@@ -231,3 +231,18 @@ def test_parse_args_slot_and_triggered_by():
     assert parse_args(["--triggered-by", "x", "0830"]) == ("0830", ["x"])
     slot, triggered = parse_args([])
     assert slot in SLOTS and triggered == []
+
+
+def test_raw_response_captured_in_outputs(rr):
+    r, runner, alerts, jdb, root, cfg = rr
+    runner.script["decide:claude-opus-5"] = [ok(GOOD)]
+    assert r.main_flow("0830") == 0
+    p = root / "journal" / "snapshots" / "20260922-0830" / "outputs" / "response.json"
+    data = json.loads(p.read_text())
+    assert data["ok"] is True and data["model"] == "claude-opus-5"
+    assert json.loads(data["text"])["targets"] == GOOD["targets"]
+    assert data["meta"]["subtype"] == "success"
+    # capturing outputs never breaks snapshot sha verification
+    from evals import snapshot as snapshotlib
+
+    snapshotlib.read_snapshot("2026-09-22T08:30+04:00", root=root)

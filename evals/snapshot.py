@@ -96,6 +96,19 @@ def write_snapshot(run_id: str, *, inputs: dict[str, str], limits: str, fewshot:
     return d
 
 
+def write_output(run_id: str, name: str, content: str,
+                 root: Path | None = None) -> Path:
+    """Post-decision artifacts (raw model responses, stage metadata) go to
+    outputs/ NEXT TO the write-once inputs. Deliberately exempt from the sha
+    manifest — read_snapshot verifies manifest['files'] only — so capturing
+    outputs can never break replay's byte-equality checks."""
+    d = snapshots_dir(root) / slug_for(run_id) / "outputs"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text(content)
+    return p
+
+
 @dataclass(frozen=True)
 class Snapshot:
     run_id: str

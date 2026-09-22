@@ -144,6 +144,19 @@ class ResearchRun:
              _json.dumps(hard_flags), int(valid), invalid_reason))
         self.jdb.commit()
 
+    def _save_response(self, name: str, res, model: str) -> None:
+        """Raw model output + stage metadata into the snapshot's outputs/ dir —
+        the traceability record runs/trace.py renders. Never fails the run."""
+        import json as _json
+        from dataclasses import asdict
+
+        try:
+            snapshotlib.write_output(self.run_id, name, _json.dumps(
+                {"model": model, "ok": res.ok, "text": res.text,
+                 "meta": asdict(res.meta)}, indent=2) + "\n", root=self.root)
+        except Exception as e:  # noqa: BLE001
+            print(f"response capture failed: {e}", file=sys.stderr)
+
     # ------------------------------------------------------------- stages
 
     def stage_flags(self) -> None:
@@ -243,6 +256,7 @@ class ResearchRun:
             prop, res = self._decide_once(choice, bp)
             if prop is not None or res.meta.subtype == "error_max_budget_usd":
                 break
+        self._save_response("response.json", res, choice.model)
         if prop is None:
             self.journal("decide", "failed", choice=choice, meta=res.meta,
                          prompt_version=bp.prompt_version)
@@ -273,6 +287,7 @@ class ResearchRun:
             max_usd=base_choice.max_usd, cwd=self.root, effort=base_choice.effort,
             allowed_tools=decision_core.READ_ONLY_TOOLS,
             extra_disallowed=["Write", "Bash"], output_schema=json_schema())
+        self._save_response("response_shadow.json", res, shadow_model)
         status, prop, reason = "failed", None, res.meta.error
         if res.ok:
             try:
