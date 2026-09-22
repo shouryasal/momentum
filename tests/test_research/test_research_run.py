@@ -208,3 +208,26 @@ def test_env_guard_blocks_exchange_credentials(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY")
     with pytest.raises(EnvGuardError, match="ANTHROPIC"):
         guard_env()
+
+
+def test_triggered_run_skips_brief_and_escalates(rr):
+    r, runner, alerts, jdb, root, cfg = rr
+    runner.script["decide:claude-fable-5-1"] = [ok(GOOD)]
+    assert r.main_flow("0830", triggered_by=["news:hack"]) == 0
+    keys = [k for k, *_ in runner.calls]
+    assert "brief" not in keys                 # 15-min-old brief already on disk
+    assert "decide:claude-fable-5-1" in keys   # trigger forces the top model
+    row = jdb.execute("SELECT * FROM runs WHERE stage='decide'").fetchone()
+    assert row["trigger_reason"] == "news:hack"
+    assert row["escalated"] == 1
+    assert "trigger:news:hack" in row["escalation_reasons"]
+
+
+def test_parse_args_slot_and_triggered_by():
+    from runs.common import SLOTS
+    from runs.research_run import parse_args
+
+    assert parse_args(["1200", "--triggered-by", "a,b"]) == ("1200", ["a", "b"])
+    assert parse_args(["--triggered-by", "x", "0830"]) == ("0830", ["x"])
+    slot, triggered = parse_args([])
+    assert slot in SLOTS and triggered == []

@@ -219,7 +219,9 @@ class ResearchRun:
     def stage_decide(self) -> bool:
         hard = router.compute_hardcase_flags(self.cfg, self.jdb, root=self.root,
                                              now=self.now)
-        choice = router.resolve("decide", hard, models_cfg=self.models_cfg)
+        # a triggered run ALWAYS escalates to the top model — something moved
+        choice = router.resolve("decide", hard, models_cfg=self.models_cfg,
+                                force_escalation=self.trigger_reasons or None)
         bp, inputs, limits, fewshot = build_prompt.build_research_prompt(
             self.cfg, self.jdb, self.run_id, choice.escalation_reasons, self.now,
             root=self.root)
@@ -290,16 +292,17 @@ class ResearchRun:
 
     # ------------------------------------------------------------- flow
 
-    def main_flow(self, slot: str) -> int:
+    def main_flow(self, slot: str, triggered_by: list[str] | None = None) -> int:
         self.slot = slot
         self.run_id = run_id_for(slot, self.now)
+        self.trigger_reasons = triggered_by or []
 
         if killlib.is_engaged(self.cfg, self.root):
             self.journal("decide", "killed")
             return 0
         target = self.root / self.cfg.paths.proposals_dir / proposal_filename(slot, self.now)
         if target.exists():
-            return 0  # idempotent rerun by healthcheck
+            return 0  # idempotent rerun by healthcheck (and triggered double-fires)
 
         try:
             cs = load_compute_state(self.root)
@@ -308,10 +311,12 @@ class ResearchRun:
             self.alert(f"compute_state failed: {e}")
 
         self.stage_flags()
-        throttle = router.throttle_state(
-            self.jdb, self.models_cfg, self.now, kdb=self.kdb,
-            degrade_at_utilization=self.cfg.budgets.rate_limit.degrade_at_utilization)
-        self.stage_brief(throttle["brief_throttled"])
+        if not self.trigger_reasons:
+            throttle = router.throttle_state(
+                self.jdb, self.models_cfg, self.now, kdb=self.kdb,
+                degrade_at_utilization=self.cfg.budgets.rate_limit.degrade_at_utilization)
+            self.stage_brief(throttle["brief_throttled"])
+        # triggered runs skip the brief: the 15-min-old one is already on disk
         ok = self.stage_decide()
 
         try:  # postflight: refresh the human view (spec: after each run)
@@ -323,15 +328,26 @@ class ResearchRun:
         return 0 if ok else 1
 
 
+def parse_args(argv: list[str]) -> tuple[str, list[str]]:
+    slot, triggered = None, []
+    it = iter(argv)
+    for a in it:
+        if a == "--triggered-by":
+            triggered = [r for r in (next(it, "") or "").split(",") if r]
+        elif slot is None:
+            slot = a
+    return slot or nearest_slot(), triggered
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     guard_env()
     cfg = load_config()
-    slot = argv[0] if argv else nearest_slot()
+    slot, triggered = parse_args(argv)
     with locks.acquire("research"):
         with db.connect(REPO_ROOT / cfg.paths.journal_db) as jdb, \
                 db.connect(REPO_ROOT / cfg.paths.knowledge_db) as kdb:
-            return ResearchRun(cfg, jdb, kdb).main_flow(slot)
+            return ResearchRun(cfg, jdb, kdb).main_flow(slot, triggered_by=triggered)
 
 
 if __name__ == "__main__":

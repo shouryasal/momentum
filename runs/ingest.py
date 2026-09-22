@@ -404,7 +404,21 @@ class Ingest:
                          ("corroborate", self.corroborate),
                          ("macro", self.update_macro_blackout)):
             ok = self._phase(name, fn) and ok
+        self._maybe_trigger()
         return 0 if ok else 1
+
+    def _maybe_trigger(self) -> None:
+        """Post-ingest trigger evaluation — fully isolated: a trigger failure
+        never fails ingest (and never blocks the next cycle)."""
+        try:
+            from runs import triggers as triggerslib
+
+            result = triggerslib.evaluate_and_fire(self.cfg, self.kdb,
+                                                   root=self.root, now=self.now)
+            if result and result["fired"]:
+                self._record("trigger", "fired", ",".join(result["reasons"]))
+        except Exception as e:  # noqa: BLE001
+            print(f"trigger evaluation failed: {e}", file=sys.stderr)
 
 
 def main() -> int:

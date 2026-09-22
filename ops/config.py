@@ -223,6 +223,15 @@ class MaintenanceCfg(_Model):
     shadow_days: int = 30
 
 
+class Triggers(_Model):
+    enabled: bool
+    cooldown_hours: int
+    max_per_day: int
+    news_events: list[str]
+    move_4h_pct: float
+    funding_abs_8h: float
+
+
 class Replay(_Model):
     days: int
     min_snapshots: int
@@ -292,6 +301,7 @@ class EarnConfig(_Model):
     ops: OpsCfg
     backup: Backup
     maintenance: MaintenanceCfg
+    triggers: Triggers
     review: Review
     models_config: str
     paths: Paths
