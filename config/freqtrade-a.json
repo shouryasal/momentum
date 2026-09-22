@@ -1,0 +1,68 @@
+{
+  "api_server": {
+    "CORS_origins": [],
+    "enable_openapi": false,
+    "enabled": true,
+    "jwt_secret_key": "",
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 8080,
+    "password": "",
+    "username": "earn",
+    "verbosity": "error"
+  },
+  "bot_name": "earn-a",
+  "db_url": "sqlite:////freqtrade/user_data/tradesv3.sqlite",
+  "dry_run": true,
+  "dry_run_wallet": 10000.0,
+  "entry_pricing": {
+    "check_depth_of_market": {
+      "bids_to_ask_delta": 1,
+      "enabled": false
+    },
+    "order_book_top": 1,
+    "price_side": "same",
+    "use_order_book": true
+  },
+  "exchange": {
+    "ccxt_async_config": {},
+    "ccxt_config": {},
+    "key": "",
+    "name": "binance",
+    "pair_whitelist": [
+      "BTC/USDT",
+      "ETH/USDT"
+    ],
+    "secret": ""
+  },
+  "exit_pricing": {
+    "order_book_top": 1,
+    "price_side": "same",
+    "use_order_book": true
+  },
+  "initial_state": "running",
+  "internals": {
+    "heartbeat_interval": 60,
+    "process_throttle_secs": 5
+  },
+  "max_open_trades": 2,
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
+  "stake_amount": "unlimited",
+  "stake_currency": "USDT",
+  "strategy": "Scaffold",
+  "telegram": {
+    "enabled": false
+  },
+  "timeframe": "4h",
+  "tradable_balance_ratio": 0.99,
+  "unfilledtimeout": {
+    "entry": 20,
+    "exit": 20,
+    "exit_timeout_count": 3,
+    "unit": "minutes"
+  },
+  "user_data_dir": "/freqtrade/user_data"
+}

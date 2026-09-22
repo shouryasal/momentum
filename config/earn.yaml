@@ -1,0 +1,170 @@
+# config/earn.yaml — the single source of truth for Earn's limits, universe and schedules.
+# TIER 2: human-only. Every risk default below is a spec-§9 value; tests assert them literally.
+# Generated configs (freqtrade-*.json, riskgate.json, params-sleeve-*.json) are rendered
+# from this file by `python -m ops.gen_freqtrade_config`.
+
+meta:
+  config_version: 1
+  display_timezone: "Asia/Dubai"   # schedules below are Gulf time (UTC+4, no DST)
+
+phase: paper                       # paper | live_propose | live_execute
+
+autonomy:
+  tier1_auto_merge: true           # paper phase: auto-merge tier-1 changes when thresholds pass
+
+universe:
+  quote: USDT
+  assets: [BTC, ETH]               # BTC/USDT and ETH/USDT ONLY (locked decision)
+  pairs: ["BTC/USDT", "ETH/USDT"]
+  data_only_symbols: ["BNB/USDT"]  # candles for fee conversion only; NEVER tradeable
+
+exchange:
+  name: binance                    # UAE entity, spot only
+  fee_bps_assumed: 10              # base taker; BNB discount is measured by TCA, not assumed
+
+sleeves:
+  a: { label: rules,  strategy: Scaffold, capital_usdt: 10000 }   # capital = PLACEHOLDER until live
+  b: { label: claude, strategy: Scaffold, capital_usdt: 10000 }   # strategy -> SleeveA/SleeveB (M2/M4)
+  benchmark: { label: hold_btc, pair: "BTC/USDT" }
+
+risk:                              # the gate reads these (via riskgate.json); one test per control
+  max_weight: { BTC: 0.40, default: 0.30 }   # fraction of sleeve NAV, keyed by base asset
+  max_gross_exposure: 0.80
+  usdt_floor: 0.20
+  daily_loss_stop: 0.03            # flatten + lock entries
+  daily_stop_lock_hours: 24
+  monthly_loss_stop: 0.10          # flatten + pause sleeve; resume is human-only
+  max_trades_per_day: 4            # per sleeve
+  stoploss_guard: { count: 3, window_hours: 48, lock_hours: 24 }
+  cooldown_candles: 2
+  staleness_minutes: 30            # no candle or book snapshot in 30 min -> no entries + alert
+  min_notional_usdt: 25
+  stoploss_per_trade: 0.15         # per-trade safety net (freqtrade stoploss, market order)
+  blackout: { macro_events: [US_CPI, FOMC], window_minutes: 60 }
+  kill_file: ops/killdir/KILL
+
+proposal:
+  schema: schemas/proposal.json
+  max_age_hours: 48                # then sleeve B drifts to sleeve A's rules targets
+  sum_tolerance: 0.001             # the ONE epsilon for target-weight sums
+
+execution:
+  entry_unfilled_timeout_min: 20
+  exit_unfilled_timeout_min: 20
+  exit_timeout_count: 3            # after 3 timed-out exit replacements freqtrade uses emergency_exit (market)
+  cross_ticks_buffer: 0.0005       # risk-stop exits: cross the spread by this fraction (marketable limit)
+  rebalance_band: 0.05             # dead-band as fraction of NAV before SleeveB rebalances
+  dust_weight: 0.01                # below this target weight, close the position
+
+sleeve_a:                          # DEFAULTS; live values are config/params-sleeve-a.json (tier 1)
+  trend: { ma_days: 200, hysteresis_pct: 0.02 }
+  vol: { target_annual: 0.30, lookback_days: 20 }
+  base_weights: { BTC: 0.40, ETH: 0.30 }
+  dca: { interval_days: 7, chunk_pct_nav: 0.05 }
+
+sleeve_b:
+  drift_to_a_after_h: 48
+
+paper:
+  start_date: "2026-10-27"
+
+bounds:                            # tier-2 bounds for tier-1 params; apply_changes enforces
+  "sleeve_a.vol.target_annual": { min: 0.10, max: 0.50, max_step: 0.05 }
+  "sleeve_a.trend.ma_days": { min: 100, max: 300, max_step: 25 }
+  "sleeve_a.dca.chunk_pct_nav": { min: 0.01, max: 0.10, max_step: 0.02 }
+  "execution.rebalance_band": { min: 0.02, max: 0.10, max_step: 0.02 }
+
+escalation:
+  stop_proximity_pct: 1.0          # drawdown within 1% of a stop -> hard-case flag
+
+budgets:
+  run_usd: { research: 1.50, review: 15.00 }
+  monthly_usd: 150
+  context_tokens: { research: 20000, review: 60000 }
+  degrade_at_pct: 80               # brief frequency drops before any decision run is skipped
+
+tca:
+  freeze_ratio: 1.5                # measured > 1.5x assumption ...
+  freeze_days: 14                  # ... for 14 days -> tier1_freeze flag (human-cleared)
+  calibration_min_fills: 20
+  quote_fallback_max_s: 900
+  alert_bps: 30                    # rolling 7d cost above this -> healthcheck alert + hard-case flag
+
+news:
+  window_hours: 12
+  min_sources: 2                   # two-source corroboration rule
+  classify: { enabled: true, model: claude-haiku-4-5-20251001, monthly_budget_usd: 5 }
+  whitelist:
+    - { name: CoinDesk, url: "https://www.coindesk.com/arc/outboundfeeds/rss/", class: secondary }
+    - { name: Cointelegraph, url: "https://cointelegraph.com/rss", class: secondary }
+    - { name: TheBlock, url: "https://www.theblock.co/rss.xml", class: secondary }
+    - { name: Blockworks, url: "https://blockworks.co/feed", class: secondary }
+    - { name: Decrypt, url: "https://decrypt.co/feed", class: secondary }
+    - { name: BitcoinMagazine, url: "https://bitcoinmagazine.com/feed", class: secondary }
+    - { name: EthereumFoundation, url: "https://blog.ethereum.org/en/feed.xml", class: primary }
+    - { name: BitcoinCore, url: "https://bitcoincore.org/en/rss.xml", class: primary }
+    - { name: FederalReserve, url: "https://www.federalreserve.gov/feeds/press_all.xml", class: primary }
+
+telegram:
+  chat_id: 0                       # the ONE chat the bot accepts; 0 until configured
+  user_id: 0
+  dedupe_ttl_min: 60
+
+ops:
+  staleness_min: 30
+  missed_run_grace_min: 30
+  container_heartbeat_min: 10
+  max_restarts_per_hour: 3
+  summary_time_local: "21:00"      # daily digest; silence is itself an alert
+  bots:
+    a: { service: freqtrade-a, api: "http://127.0.0.1:8080", password_env: FT_API_PASSWORD_A }
+    b: { service: freqtrade-b, api: "http://127.0.0.1:8081", password_env: FT_API_PASSWORD_B }
+  schedules:                       # Gulf time; the crontab must match (asserted by test)
+    ingest:        { cron: "*/15 * * * *",  deadline_s: 600,  artifact: ingest_runs }
+    tca_job:       { cron: "5 * * * *",     deadline_s: 1500, artifact: tca_rows }
+    nav_job:       { cron: "10 0 * * *",    deadline_s: 300,  artifact: nav_rows }
+    healthcheck:   { cron: "*/5 * * * *",   deadline_s: 240,  artifact: none }
+    research_run:  { cron: "30 8,16 * * *", deadline_s: 1800, artifact: proposals_file }
+    review_run:    { cron: "0 20 * * 0",    deadline_s: 5400, artifact: report_file }
+    backtest_data: { cron: "0 18 * * 0",    deadline_s: 1800, artifact: none }
+    backup:        { cron: "0 3 * * *",     deadline_s: 2700, artifact: backup_file }
+
+backup:
+  dest: /mnt/d/earn-backups        # a second physical disk (WSL2 mount) or adjust per machine
+  keep_daily: 14
+  keep_weekly: 8
+
+review:
+  model: claude-fable-5-1
+  fallback_model: claude-opus-5    # explicit rerun on failure; fallback-authored changes are HELD
+  max_turns: 150
+  max_budget_usd: 15.0
+  replay:
+    days: 30
+    min_snapshots: 20
+    runs_per_snapshot: 2
+    budget_usd: 8.0
+    target_tolerance: 0.02
+    determinism_min_identical: 1.0
+    turnover_max_ratio: 1.25
+  change_gates:
+    backtest_min_years: 2
+    walk_forward_min_out_sample_delta: 0.0
+    max_param_changes_per_month: 2
+  outcome_stats_min_decisions: 30
+  lessons_reconfirm_days: 180
+  recurring_cause_weeks: 3
+  fewshot: { best: 2, worst: 2, refresh: monthly }
+
+models_config: config/models.yaml
+
+paths:
+  knowledge_db: knowledge/earn.db
+  journal_db: journal/journal.db
+  flags_file: knowledge/flags.json
+  state_latest: knowledge/state/latest.json
+  proposals_dir: proposals
+  data_dir: data
+  fewshot: prompts/examples/fewshot.json
+  params_a: config/params-sleeve-a.json
+  params_b: config/params-sleeve-b.json

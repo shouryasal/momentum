@@ -1,0 +1,68 @@
+# Two freqtrade bots (dry-run in paper). Run from ops/:  docker compose up -d
+# ops/.env must be a symlink to the repo-root .env (compose interpolation reads it).
+#
+# Notes:
+# - REST is bound to 127.0.0.1 on the HOST; 0.0.0.0 inside the container is required
+#   for the port map (spec §4: no inbound network beyond localhost).
+# - The whole config/ dir is mounted (never single files): atomic os.replace() on
+#   params-sleeve-*.json would break a single-file bind mount.
+# - Strategy name comes from the bot's config.json, so this file never changes when
+#   SleeveA/SleeveB replace Scaffold.
+# - Kill switch: only ops/killdir/ is mounted, not all of ops/ (no script exposure).
+# - Exchange keys stay OUT of compose in paper; the live runbook adds
+#   FREQTRADE__EXCHANGE__KEY/__SECRET lines.
+
+services:
+  freqtrade-a:
+    image: freqtradeorg/freqtrade:2026.8
+    restart: unless-stopped
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      EARN_SLEEVE: a
+      EARN_RISKGATE: /freqtrade/earn-config/riskgate.json
+      EARN_JOURNAL_DB: /freqtrade/journal/journal.db
+      EARN_KNOWLEDGE_DB: /freqtrade/knowledge/earn.db
+      FREQTRADE__API_SERVER__PASSWORD: "${FT_API_PASSWORD_A}"
+      FREQTRADE__API_SERVER__JWT_SECRET_KEY: "${FT_JWT_SECRET}"
+    volumes:
+      - ../ft_userdata/a:/freqtrade/user_data
+      - ../data:/freqtrade/user_data/data
+      - ../strategies:/freqtrade/user_data/strategies:ro
+      - ../config:/freqtrade/earn-config:ro
+      - ../journal:/freqtrade/journal
+      - ../knowledge:/freqtrade/knowledge:ro
+      - ../proposals:/freqtrade/proposals:ro
+      - ./killdir:/freqtrade/killdir:ro
+    command: >
+      trade --logfile /freqtrade/user_data/logs/freqtrade.log
+            --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+            --config /freqtrade/earn-config/freqtrade-a.json
+
+  freqtrade-b:
+    image: freqtradeorg/freqtrade:2026.8
+    restart: unless-stopped
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    ports:
+      - "127.0.0.1:8081:8080"
+    environment:
+      EARN_SLEEVE: b
+      EARN_RISKGATE: /freqtrade/earn-config/riskgate.json
+      EARN_JOURNAL_DB: /freqtrade/journal/journal.db
+      EARN_KNOWLEDGE_DB: /freqtrade/knowledge/earn.db
+      FREQTRADE__API_SERVER__PASSWORD: "${FT_API_PASSWORD_B}"
+      FREQTRADE__API_SERVER__JWT_SECRET_KEY: "${FT_JWT_SECRET}"
+    volumes:
+      - ../ft_userdata/b:/freqtrade/user_data
+      - ../data:/freqtrade/user_data/data
+      - ../strategies:/freqtrade/user_data/strategies:ro
+      - ../config:/freqtrade/earn-config:ro
+      - ../journal:/freqtrade/journal
+      - ../knowledge:/freqtrade/knowledge:ro
+      - ../proposals:/freqtrade/proposals:ro
+      - ./killdir:/freqtrade/killdir:ro
+    command: >
+      trade --logfile /freqtrade/user_data/logs/freqtrade.log
+            --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+            --config /freqtrade/earn-config/freqtrade-b.json

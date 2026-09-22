@@ -1,0 +1,34 @@
+# Secrets — never committed; gitleaks pre-commit is the second line of defence
+.env
+.env.*
+!.env.example
+
+# Databases and runtime state (journal/knowledge are records, not source)
+knowledge/earn.db*
+journal/journal.db*
+journal/.write_failed
+journal/snapshots/
+ft_userdata/
+data/
+logs/
+ops/locks/
+ops/killdir/KILL
+
+# Reports are generated
+reports/*.xlsx
+reports/backtests/
+reports/weekly/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Note: config/freqtrade-*.json, config/riskgate.json and config/params-sleeve-*.json
+# are GENERATED but COMMITTED (drift-checked by `python -m ops.gen_freqtrade_config --check`).

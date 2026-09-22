@@ -1,0 +1,22 @@
+{
+  "params": {
+    "base_weights": {
+      "BTC": 0.4,
+      "ETH": 0.3
+    },
+    "dca": {
+      "chunk_pct_nav": 0.05,
+      "interval_days": 7
+    },
+    "rebalance_band": 0.05,
+    "trend": {
+      "hysteresis_pct": 0.02,
+      "ma_days": 200
+    },
+    "vol": {
+      "lookback_days": 20,
+      "target_annual": 0.3
+    }
+  },
+  "sleeve": "a"
+}

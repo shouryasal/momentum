@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Earn flags file (knowledge/flags.json)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "updated_at", "flags"],
+  "properties": {
+    "version": { "const": 1 },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "flags": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["active", "severity", "reason", "set_by", "set_at"],
+        "properties": {
+          "active": { "type": "boolean" },
+          "severity": { "enum": ["block_entries", "freeze_tier1", "info"] },
+          "scope": { "type": "string" },
+          "reason": { "type": "string" },
+          "set_by": { "type": "string" },
+          "set_at": { "type": "string", "format": "date-time" },
+          "expires_at": { "type": ["string", "null"], "format": "date-time" },
+          "cleared_by": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

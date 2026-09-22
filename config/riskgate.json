@@ -1,0 +1,73 @@
+{
+  "container_paths": {
+    "config_dir": "/freqtrade/earn-config",
+    "data_dir": "/freqtrade/user_data/data",
+    "flags_file": "/freqtrade/knowledge/flags.json",
+    "journal_db": "/freqtrade/journal/journal.db",
+    "kill_file": "/freqtrade/killdir/KILL",
+    "knowledge_db": "/freqtrade/knowledge/earn.db",
+    "proposals_dir": "/freqtrade/proposals"
+  },
+  "execution": {
+    "cross_ticks_buffer": 0.0005,
+    "dust_weight": 0.01,
+    "entry_unfilled_timeout_min": 20,
+    "exit_timeout_count": 3,
+    "exit_unfilled_timeout_min": 20,
+    "rebalance_band": 0.05
+  },
+  "generated_from": "config/earn.yaml",
+  "phase": "paper",
+  "proposal": {
+    "max_age_hours": 48,
+    "schema": "schemas/proposal.json",
+    "sum_tolerance": 0.001
+  },
+  "risk": {
+    "blackout": {
+      "macro_events": [
+        "US_CPI",
+        "FOMC"
+      ],
+      "window_minutes": 60
+    },
+    "cooldown_candles": 2,
+    "daily_loss_stop": 0.03,
+    "daily_stop_lock_hours": 24,
+    "kill_file": "ops/killdir/KILL",
+    "max_gross_exposure": 0.8,
+    "max_trades_per_day": 4,
+    "max_weight": {
+      "BTC": 0.4,
+      "default": 0.3
+    },
+    "min_notional_usdt": 25.0,
+    "monthly_loss_stop": 0.1,
+    "staleness_minutes": 30,
+    "stoploss_guard": {
+      "count": 3,
+      "lock_hours": 24,
+      "window_hours": 48
+    },
+    "stoploss_per_trade": 0.15,
+    "usdt_floor": 0.2
+  },
+  "sleeve_b": {
+    "drift_to_a_after_h": 48
+  },
+  "source_sha256": "3dc6ce4fe03195ba8f694e0257d18ae0aa7a365e0f4665a7fe5fc72afcbca5d2",
+  "universe": {
+    "assets": [
+      "BTC",
+      "ETH"
+    ],
+    "data_only_symbols": [
+      "BNB/USDT"
+    ],
+    "pairs": [
+      "BTC/USDT",
+      "ETH/USDT"
+    ],
+    "quote": "USDT"
+  }
+}
