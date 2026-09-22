@@ -1,0 +1,10 @@
+# Backtest cost assumptions. Seeded per spec week 2 (10 bps fee + 5 bps slippage);
+# thereafter the `costs:` block is REWRITTEN MONTHLY by runs/tca_job.py with measured
+# medians (ruamel round-trip preserves everything else). measured_month stays null
+# until the first calibration.
+costs:
+  fee_bps: 10.0
+  slippage_bps: 5.0
+  measured_month: null
+  n_fills: 0
+  method: "median of tca_fill_costs, prior calendar month"
