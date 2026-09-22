@@ -1,0 +1,10 @@
+# Scheduled US macro events (TIER 2, human-maintained quarterly). runs/ingest.py turns
+# each into a macro_blackout flag +/- risk.blackout.window_minutes around `at`.
+# This file is the ONLY CPI/FOMC calendar; reg-watch handles regulator events only.
+# Times are UTC. Source: federalreserve.gov FOMC calendar, bls.gov CPI schedule.
+events:
+  - { name: US_CPI_Sep,  at: "2026-10-13T12:30:00Z" }
+  - { name: FOMC_Oct,    at: "2026-10-28T18:00:00Z" }
+  - { name: US_CPI_Oct,  at: "2026-11-12T13:30:00Z" }
+  - { name: US_CPI_Nov,  at: "2026-12-10T13:30:00Z" }
+  - { name: FOMC_Dec,    at: "2026-12-09T19:00:00Z" }

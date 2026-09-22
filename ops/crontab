@@ -1,0 +1,19 @@
+# Earn crontab — install with:  crontab ops/crontab
+# Distro timezone MUST be Asia/Dubai (Gulf, UTC+4, no DST): entries below are Gulf
+# time verbatim and MUST match config/earn.yaml ops.schedules (asserted by
+# tests/test_ops/test_consistency.py). Every job runs under flock (no overlap),
+# timeout (its deadline_s; overrun = killed = missed run) and envwrap (per-job
+# secret allowlist). E must point at the repo on the WSL2 ext4 filesystem.
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+MAILTO=""
+E=/home/user/momentum
+
+*/15 * * * *  flock -n $E/ops/locks/cron-ingest.lock   timeout -k 30 600  bash $E/ops/envwrap.sh ingest      -- $E/.venv/bin/python -m runs.ingest       >> $E/logs/ingest.log 2>&1
+5 * * * *     flock -n $E/ops/locks/cron-tca.lock      timeout -k 30 1500 bash $E/ops/envwrap.sh tca         -- $E/.venv/bin/python -m runs.tca_job      >> $E/logs/tca.log 2>&1
+10 0 * * *    flock -n $E/ops/locks/cron-nav.lock      timeout -k 30 300  bash $E/ops/envwrap.sh nav         -- $E/.venv/bin/python -m runs.nav_job      >> $E/logs/nav.log 2>&1
+*/5 * * * *   flock -n $E/ops/locks/cron-health.lock   timeout -k 30 240  bash $E/ops/envwrap.sh healthcheck -- $E/.venv/bin/python -m ops.healthcheck   >> $E/logs/health.log 2>&1
+30 8,16 * * * flock -n $E/ops/locks/cron-research.lock timeout -k 30 1800 bash $E/ops/envwrap.sh research    -- $E/.venv/bin/python -m runs.research_run >> $E/logs/research.log 2>&1
+0 20 * * 0    flock -n $E/ops/locks/cron-review.lock   timeout -k 30 5400 bash $E/ops/envwrap.sh review      -- $E/.venv/bin/python -m runs.review_run   >> $E/logs/review.log 2>&1
+0 18 * * 0    flock -n $E/ops/locks/cron-dldata.lock   timeout -k 30 1800 bash $E/ops/envwrap.sh ingest      -- bash $E/ops/refresh_backtest_data.sh     >> $E/logs/dldata.log 2>&1
+0 3 * * *     flock -n $E/ops/locks/cron-backup.lock   timeout -k 30 2700 bash $E/ops/envwrap.sh backup      -- bash $E/ops/backup.sh                    >> $E/logs/backup.log 2>&1

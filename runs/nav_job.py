@@ -1,0 +1,88 @@
+"""Daily NAV job (00:10 Gulf): one nav_daily row per sleeve from each bot's REST
+/balance, plus the buy-and-hold benchmark row (sleeve_c_benchmark). Closes the
+"nobody writes sleeve NAV" gap — the digest, Excel NAV sheet, G3 evaluation and the
+near-stop hard-case flag all read these rows.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from datetime import UTC, datetime
+
+from ops import db
+from ops.config import REPO_ROOT, EarnConfig, load_config
+from ops.lib import locks
+from ops.lib.freqtrade_api import BotApi
+from runs import sleeve_c_benchmark
+
+
+def sleeve_nav(api: BotApi) -> tuple[float, float, dict] | None:
+    """(nav_usdt, cash_usdt, positions) from /balance; None when the bot is down."""
+    try:
+        bal = api.balance()
+    except Exception:
+        return None
+    total = float(bal.get("total", 0.0))
+    cash = 0.0
+    positions: dict[str, float] = {}
+    for c in bal.get("currencies", []):
+        if c.get("currency") == "USDT":
+            cash = float(c.get("free", 0.0))
+        elif float(c.get("balance", 0.0)):
+            positions[c["currency"]] = float(c.get("balance", 0.0))
+    return total, cash, positions
+
+
+def write_nav(jdb, sleeve: str, date_utc: str, nav: float, cash: float,
+              positions: dict) -> None:
+    prev_max = jdb.execute(
+        "SELECT MAX(nav_usdt) AS m FROM nav_daily WHERE sleeve=?", (sleeve,)).fetchone()
+    dd = None
+    if prev_max and prev_max["m"]:
+        peak = max(prev_max["m"], nav)
+        dd = (nav / peak - 1) * 100
+    trades = jdb.execute(
+        "SELECT COUNT(*) AS n FROM fills WHERE sleeve=? AND ts_utc LIKE ?",
+        (sleeve, f"{date_utc}%")).fetchone()["n"]
+    jdb.execute(
+        "INSERT INTO nav_daily(date_utc, sleeve, nav_usdt, cash_usdt, positions_json,"
+        " drawdown_pct, trades_today) VALUES (?,?,?,?,?,?,?)"
+        " ON CONFLICT(date_utc, sleeve) DO UPDATE SET nav_usdt=excluded.nav_usdt,"
+        " cash_usdt=excluded.cash_usdt, positions_json=excluded.positions_json,"
+        " drawdown_pct=excluded.drawdown_pct, trades_today=excluded.trades_today",
+        (date_utc, sleeve, nav, cash, json.dumps(positions), dd, trades))
+    jdb.commit()
+
+
+def run(cfg: EarnConfig, jdb, apis: dict[str, BotApi], now: datetime) -> int:
+    date_utc = now.strftime("%Y-%m-%d")
+    missing = []
+    for sleeve, api in apis.items():
+        got = sleeve_nav(api)
+        if got is None:
+            missing.append(sleeve)
+            continue
+        nav, cash, positions = got
+        write_nav(jdb, sleeve, date_utc, nav, cash, positions)
+    if missing:
+        print(f"nav_job: bot(s) unreachable: {missing}", file=sys.stderr)
+    return 1 if missing else 0
+
+
+def main() -> int:
+    cfg = load_config()
+    now = datetime.now(UTC)
+    with locks.acquire("nav"):
+        with db.connect(REPO_ROOT / cfg.paths.journal_db) as jdb:
+            rc = run(cfg, jdb, {s: BotApi.for_sleeve(cfg, s) for s in ("a", "b")}, now)
+    try:
+        sleeve_c_benchmark.main()
+    except Exception as e:  # benchmark needs candles; never fail the sleeve rows on it
+        print(f"nav_job: benchmark row failed: {e}", file=sys.stderr)
+        rc = rc or 1
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())
