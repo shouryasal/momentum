@@ -81,6 +81,12 @@ def main() -> int:
     except Exception as e:  # benchmark needs candles; never fail the sleeve rows on it
         print(f"nav_job: benchmark row failed: {e}", file=sys.stderr)
         rc = rc or 1
+    try:  # postflight: rebuild the what-if track (Excel testing mode)
+        from runs import whatif
+
+        whatif.main()
+    except Exception as e:  # noqa: BLE001 — the simulator never fails NAV rows
+        print(f"nav_job: whatif rebuild failed: {e}", file=sys.stderr)
     return rc
 
 

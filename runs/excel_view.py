@@ -143,6 +143,112 @@ def _limits_sheet(wb: Workbook, conn, cfg: EarnConfig) -> None:
                "ENGAGED" if (REPO_ROOT / r.kill_file).exists() else "clear", "everything"])
 
 
+def _wrong(cfg: EarnConfig, grade_row) -> str | None:
+    """Same rule as daily_review: low process grade, or worse outcome with a
+    failed rubric boolean."""
+    if grade_row is None:
+        return None
+    if grade_row["process_grade"] < cfg.daily_review.wrong_process_below:
+        return f"process {grade_row['process_grade']}"
+    if grade_row["outcome_grade"] == "worse":
+        try:
+            rubric = json.loads(grade_row["process_rubric_json"] or "{}")
+        except json.JSONDecodeError:
+            rubric = {}
+        failed = [k for k, v in rubric.items() if v is False]
+        if failed:
+            return f"worse + rubric: {','.join(failed)}"
+    return None
+
+
+def _decisions_sheet(wb: Workbook, conn, cfg: EarnConfig) -> None:
+    ws = wb.create_sheet("Decisions")
+    ws.append(["run_id", "ts_utc", "kind", "model", "effort", "escalated",
+               "module", "targets", "abstain", "consumed", "fills",
+               "vs_rules_bps", "vs_btc_bps", "process", "wrong?", "root_cause"])
+    for p in conn.execute("SELECT * FROM proposals WHERE shadow=0"
+                          " ORDER BY ts_utc").fetchall():
+        run = conn.execute("SELECT * FROM runs WHERE run_id=? AND stage='decide'",
+                           (p["run_id"],)).fetchone()
+        g = conn.execute("SELECT * FROM decision_grades WHERE run_id=?",
+                         (p["run_id"],)).fetchone()
+        fills = conn.execute(
+            "SELECT COUNT(*) AS n FROM fills f JOIN orders o ON o.id=f.order_id"
+            " WHERE o.proposal_run_id=?", (p["run_id"],)).fetchone()["n"]
+        rc = conn.execute("SELECT cause FROM root_cause_events WHERE ref=?"
+                          " LIMIT 1", (p["run_id"],)).fetchone()
+        wrong = _wrong(cfg, g)
+        ws.append([
+            p["run_id"], p["ts_utc"],
+            "triggered" if run and run["trigger_reason"] else "scheduled",
+            run["served_model"] or run["requested_model"] if run else None,
+            run["effort"] if run else None,
+            bool(run["escalated"]) if run else None,
+            p["module"], p["targets_json"], bool(p["abstain"]),
+            p["consumed_status"], fills,
+            g["outcome_vs_rules_bps"] if g else None,
+            g["outcome_vs_btc_bps"] if g else None,
+            g["process_grade"] if g else None,
+            wrong or "", rc["cause"] if rc else None,
+        ])
+
+
+def _mistakes_sheet(wb: Workbook, conn, cfg: EarnConfig) -> None:
+    from evals.snapshot import slug_for
+
+    ws = wb.create_sheet("Mistakes")
+    ws.append(["run_id", "why_wrong", "cause", "recurrence_key", "fix_path",
+               "trace_report"])
+    for p in conn.execute("SELECT run_id FROM proposals WHERE shadow=0"
+                          " ORDER BY ts_utc").fetchall():
+        g = conn.execute("SELECT * FROM decision_grades WHERE run_id=?",
+                         (p["run_id"],)).fetchone()
+        why = _wrong(cfg, g)
+        if not why:
+            continue
+        rc = conn.execute("SELECT * FROM root_cause_events WHERE ref=? LIMIT 1",
+                          (p["run_id"],)).fetchone()
+        trace = f"reports/trace/{slug_for(p['run_id'])}.md"
+        ws.append([p["run_id"], why, rc["cause"] if rc else None,
+                   rc["recurrence_key"] if rc else None,
+                   rc["fix_path"] if rc else None,
+                   trace if (REPO_ROOT / trace).exists() else "(not rendered)"])
+
+
+def _whatif_sheet(wb: Workbook, conn) -> None:
+    ws = wb.create_sheet("WhatIf")
+    ws.append(["date", "whatif", "sleeve_b", "benchmark",
+               "whatif_idx", "b_idx", "bench_idx", "turnover", "cost_usdt"])
+    wi = {r["date_utc"]: r for r in conn.execute(
+        "SELECT * FROM whatif_nav ORDER BY date_utc")}
+    nav = {}
+    for r in conn.execute("SELECT date_utc, sleeve, nav_usdt FROM nav_daily"
+                          " WHERE sleeve IN ('b','benchmark')"):
+        nav.setdefault(r["date_utc"], {})[r["sleeve"]] = r["nav_usdt"]
+    base: dict[str, float] = {}
+    for d in sorted(set(wi) | set(nav)):
+        vals = {"whatif": wi[d]["nav_usdt"] if d in wi else None,
+                "b": nav.get(d, {}).get("b"),
+                "benchmark": nav.get(d, {}).get("benchmark")}
+        for k, v in vals.items():
+            if v is not None:
+                base.setdefault(k, v)
+        ws.append([
+            d, vals["whatif"], vals["b"], vals["benchmark"],
+            *(100 * vals[k] / base[k] if vals.get(k) and base.get(k) else None
+              for k in ("whatif", "b", "benchmark")),
+            wi[d]["turnover"] if d in wi else None,
+            wi[d]["cost_usdt"] if d in wi else None,
+        ])
+    if ws.max_row > 1:
+        chart = LineChart()
+        chart.title = "What the proposals alone would have earned (indexed)"
+        data = Reference(ws, min_col=5, max_col=7, min_row=1, max_row=ws.max_row)
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(Reference(ws, min_col=1, min_row=2, max_row=ws.max_row))
+        ws.add_chart(chart, "K2")
+
+
 def write_workbook(cfg: EarnConfig, out: Path | None = None) -> Path:
     out = out or (REPO_ROOT / "reports" / "earn.xlsx")
     wb = Workbook()
@@ -152,6 +258,9 @@ def write_workbook(cfg: EarnConfig, out: Path | None = None) -> Path:
         _costs_sheet(wb, conn)
         _gate_sheet(wb, conn)
         _limits_sheet(wb, conn, cfg)
+        _decisions_sheet(wb, conn, cfg)
+        _mistakes_sheet(wb, conn, cfg)
+        _whatif_sheet(wb, conn)
     ws_meta = wb.create_sheet("_meta")
     ws_meta.append(["generated_at", datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")])
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -27,10 +27,13 @@ def main() -> int:
     like = " OR ".join("LOWER(title) LIKE ?" for _ in REG_TERMS)
     with db.connect(REPO_ROOT / cfg.paths.knowledge_db, readonly=True) as kdb:
         rows = [dict(r) for r in kdb.execute(
-            f"SELECT source, source_class, title, url, published_at, assets,"
-            f" event_class, corroborated FROM news_items"
-            f" WHERE COALESCE(published_at, fetched_at) >= ? AND ({like})"
-            f" ORDER BY published_at",
+            f"SELECT n.source, n.source_class, n.title, n.url, n.published_at,"
+            f" n.assets, n.event_class, n.corroborated,"
+            f" COALESCE(sr.score, 0.5) AS source_score"
+            f" FROM news_items n LEFT JOIN source_reliability sr"
+            f" ON sr.source = n.source"
+            f" WHERE COALESCE(n.published_at, n.fetched_at) >= ? AND ({like})"
+            f" ORDER BY n.published_at",
             (since, *[f"%{t}%" for t in REG_TERMS]))]
     print(json.dumps({"since": since, "items": rows}, indent=2))
     return 0

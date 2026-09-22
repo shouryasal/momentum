@@ -24,6 +24,13 @@ references/whitelist.md. -->
    least two sources from different independence groups (see whitelist), or one
    `primary` (official) source. Everything else is written as `[unconfirmed]`.
 
+   **Source credibility.** Each row carries `source_score` (0..1, measured: did
+   this source's unconfirmed items later get corroborated? did its numeric
+   claims check out against prices?) and `claim_verified` (a %-move claim
+   checked against candles; 0 = prices never did that). Weight unconfirmed
+   items by score: below 0.4 they go to `Watch items` at most, one line; a
+   `claim_verified=0` item is written as `[disputed by price data]` or dropped.
+
 3. Write `knowledge/briefs/YYYY-MM-DD.md` (the run prompt gives the date; on the
    16:00 run append an `## Update 16:00` section instead of rewriting):
 

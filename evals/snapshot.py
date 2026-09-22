@@ -25,6 +25,8 @@ from ops.config import REPO_ROOT
 INPUT_FILES = {
     "state": "state.json", "brief": "brief.md", "positions": "positions.json",
     "graded": "graded_recent.txt", "lessons": "lessons.md", "flags": "flags.json",
+    # v2 asset intelligence; pre-v2 snapshots lack these files and read as ""
+    "dossiers": "dossiers.md", "event_stats": "event_stats.json",
 }
 
 
@@ -133,7 +135,12 @@ def read_snapshot(run_id_or_path: str | Path, root: Path | None = None) -> Snaps
         if got != want:
             raise SnapshotError(f"snapshot tampered: {fname} sha mismatch in {d}")
     meta = SnapshotMeta(**manifest["meta"])
-    inputs = {key: (d / fname).read_text() for key, fname in INPUT_FILES.items()}
+    inputs = {}
+    for key, fname in INPUT_FILES.items():
+        try:
+            inputs[key] = (d / fname).read_text()
+        except OSError:
+            inputs[key] = ""  # pre-v2 snapshot: this input did not exist yet
     return Snapshot(run_id=meta.run_id, path=d, meta=meta, inputs=inputs,
                     limits=(d / "limits.yaml").read_text(),
                     fewshot=(d / "fewshot.txt").read_text(),

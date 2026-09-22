@@ -92,6 +92,20 @@ def test_excel_view_writes_all_sheets(tmp_path):
         c.execute("INSERT INTO fills(ts_utc, sleeve, pair, side, fill_amount, fill_price,"
                   " quote_bid, quote_ask) VALUES"
                   " ('2026-10-27T04:30:00Z','a','BTC/USDT','buy',0.01,100.1,100.0,100.2)")
+        c.execute("INSERT INTO proposals(run_id, shadow, ts_utc, valid, module,"
+                  " targets_json, abstain) VALUES"
+                  " ('2026-10-27T08:30+04:00',0,'2026-10-27T04:30:00Z',1,'trend',"
+                  "'{\"BTC\":0.4}',0)")
+        c.execute("INSERT INTO runs(run_id, stage, kind, started_utc, served_model,"
+                  " effort, escalated, trigger_reason, status) VALUES"
+                  " ('2026-10-27T08:30+04:00','decide','research','2026-10-27T04:30:00Z',"
+                  "'claude-opus-5','max',0,'news:hack','success')")
+        c.execute("INSERT INTO decision_grades(run_id, graded_at, review_week,"
+                  " process_grade, process_rubric_json, outcome_grade, grader_model,"
+                  " grader_run_id) VALUES ('2026-10-27T08:30+04:00','x','2026-W44',55,"
+                  "'{}','worse','m','r')")
+        c.execute("INSERT INTO whatif_nav(date_utc, nav_usdt, turnover, cost_usdt)"
+                  " VALUES ('2026-10-27', 10120.5, 0.65, 9.75)")
         c.commit()
 
     class P:  # point paths at the tmp journal
@@ -107,7 +121,20 @@ def test_excel_view_writes_all_sheets(tmp_path):
     finally:
         ev.REPO_ROOT = orig
     wb = load_workbook(out)
-    assert {"NAV", "Trades", "Costs", "Gate", "Limits"} <= set(wb.sheetnames)
+    assert {"NAV", "Trades", "Costs", "Gate", "Limits",
+            "Decisions", "Mistakes", "WhatIf"} <= set(wb.sheetnames)
     trades = wb["Trades"]
     # slippage bps for the buy: (100.1 - 100.1)/100.1 -> 0
     assert trades.cell(row=2, column=9).value == pytest.approx(0.0, abs=1e-6)
+    dec = wb["Decisions"]
+    row2 = [dec.cell(row=2, column=i).value for i in range(1, 17)]
+    assert row2[0] == "2026-10-27T08:30+04:00" and row2[2] == "triggered"
+    assert row2[3] == "claude-opus-5" and row2[4] == "max"
+    assert row2[13] == 55 and "process 55" in row2[14]      # wrong: low grade
+    mis = wb["Mistakes"]
+    assert mis.cell(row=2, column=1).value == "2026-10-27T08:30+04:00"
+    assert "process 55" in mis.cell(row=2, column=2).value
+    wi = wb["WhatIf"]
+    assert wi.cell(row=2, column=1).value == "2026-10-27"
+    assert wi.cell(row=2, column=2).value == pytest.approx(10120.5)
+    assert wi.cell(row=2, column=3).value == pytest.approx(10000)   # sleeve b nav

@@ -357,6 +357,50 @@ class Ingest:
                 )
         self.kdb.commit()
 
+    # ------------------------------------------------------------------ claim check
+
+    CLAIM_RE = re.compile(r"(\d+(?:\.\d+)?)\s?%")
+
+    def claimcheck(self) -> None:
+        """Deterministic credibility: a headline claiming an N% move is checked
+        against realized candle moves (7d window before the item, 1d candles:
+        max |single-day| and |cumulative|). Verified when the claim is within
+        1.5x of what prices actually did; a claim prices never came close to is
+        falsified. No claim, no single asset, or no data -> NULL (unjudged)."""
+        since = now_iso(self.now - timedelta(hours=24))
+        rows = self.kdb.execute(
+            "SELECT id, title, assets, COALESCE(published_at, fetched_at) AS ts"
+            " FROM news_items WHERE fetched_at >= ? AND claim_verified IS NULL"
+            " AND assets IS NOT NULL", (since,)).fetchall()
+        for r in rows:
+            claims = [float(m) for m in self.CLAIM_RE.findall(r["title"])
+                      if 2.0 <= float(m) <= 95.0]
+            assets = json.loads(r["assets"] or "[]")
+            if not claims or len(assets) != 1:
+                continue
+            pair = f"{assets[0]}/{self.cfg.universe.quote}"
+            try:
+                ts = datetime.fromisoformat(r["ts"].replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                continue
+            end_ms = int(ts.timestamp() * 1000)
+            start_ms = end_ms - 7 * 86_400_000
+            candles = self.kdb.execute(
+                "SELECT open, close FROM candles WHERE pair=? AND tf='1d'"
+                " AND is_closed=1 AND open_time BETWEEN ? AND ?"
+                " ORDER BY open_time", (pair, start_ms, end_ms)).fetchall()
+            if len(candles) < 2:
+                continue
+            daily_max = max(abs(c["close"] / c["open"] - 1) * 100
+                            for c in candles if c["open"])
+            cumulative = abs(candles[-1]["close"] / candles[0]["open"] - 1) * 100 \
+                if candles[0]["open"] else 0.0
+            realized = max(daily_max, cumulative)
+            verified = int(min(claims) <= realized * 1.5)
+            self.kdb.execute("UPDATE news_items SET claim_verified=? WHERE id=?",
+                             (verified, r["id"]))
+        self.kdb.commit()
+
     # ------------------------------------------------------------------ macro blackout
 
     def update_macro_blackout(self) -> None:
@@ -402,6 +446,7 @@ class Ingest:
                          ("news", self.pull_news),
                          ("classify", self.classify_news),
                          ("corroborate", self.corroborate),
+                         ("claimcheck", self.claimcheck),
                          ("macro", self.update_macro_blackout)):
             ok = self._phase(name, fn) and ok
         self._maybe_trigger()

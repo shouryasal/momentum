@@ -95,9 +95,17 @@ class DailyReview:
         pack = self.root / "reports" / "daily" / "packs" / f"{self.day}-inputs.json"
         pack.parent.mkdir(parents=True, exist_ok=True)
         script = self.root / ".claude/skills/post-mortem/scripts/grade_inputs.py"
+        env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
         subprocess.run([sys.executable, str(script), "--day", self.day,
-                        "--out", str(pack)], cwd=self.root, check=False,
-                       env={**os.environ, "PYTHONPATH": str(REPO_ROOT)})
+                        "--out", str(pack)], cwd=self.root, check=False, env=env)
+        if gulf_now(self.now).day == 1:
+            # monthly asset-intelligence refresh (deterministic scripts; the
+            # session then rewrites the dossiers' narrative from the numbers)
+            for name in ("asset_stats.py", "event_study.py"):
+                subprocess.run(
+                    [sys.executable, str(self.root / ".claude/skills/asset-dossier"
+                                                     / "scripts" / name)],
+                    cwd=self.root, check=False, env=env)
 
     # ------------------------------------------------------------- session
 
@@ -120,7 +128,8 @@ class DailyReview:
             allowed_tools=["Read", "Grep", "Glob", "Write", "Edit", "Skill",
                            "Bash(python3 *)", "Bash(pytest *)",
                            "Bash(git add *)", "Bash(git commit *)"],
-            skills=["post-mortem", "strategy-lab"], deadline_s=2400)
+            skills=["post-mortem", "strategy-lab", "asset-dossier"],
+            deadline_s=2400)
 
     def _session_outputs_ok(self, run_ids: list[str]) -> bool:
         if not self.report_path().exists():

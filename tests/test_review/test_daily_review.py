@@ -265,3 +265,26 @@ def test_grade_inputs_day_window(env):
     pack = json.loads(out.read_text())
     assert [d["run_id"] for d in pack["decisions"]] == [RID1]
     assert pack["week_start"] == "2026-09-20" and pack["week_end"] == "2026-09-21"
+
+
+def test_monthly_dossier_refresh_only_on_the_first(env, monkeypatch):
+    import subprocess as sp
+
+    import runs.daily_review as drmod
+
+    cfg, root, jdb, kdb, alerts = env
+    calls = []
+    monkeypatch.setattr(
+        drmod.subprocess, "run",
+        lambda cmd, **kw: calls.append(cmd) or sp.CompletedProcess(cmd, 0, "", ""))
+    first = datetime(2026, 10, 1, 17, 30, tzinfo=UTC)  # 21:30 Gulf, Oct 1
+    DailyReview(cfg, jdb, kdb, root=root, now=first,
+                session_runner=session_ok(root, jdb),
+                alert=lambda t, s="info": alerts.append((s, t))).preflight()
+    assert any("asset_stats.py" in str(c) for c in calls)
+    assert any("event_study.py" in str(c) for c in calls)
+    calls.clear()
+    DailyReview(cfg, jdb, kdb, root=root, now=NOW,
+                session_runner=session_ok(root, jdb),
+                alert=lambda t, s="info": alerts.append((s, t))).preflight()
+    assert not any("asset_stats.py" in str(c) for c in calls)

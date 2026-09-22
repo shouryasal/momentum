@@ -24,8 +24,9 @@ def env(tmp_path):
     (tmp_path / "prompts").mkdir()
     from ops.config import REPO_ROOT
 
-    (tmp_path / "prompts" / "research.v1.md").write_text(
-        (REPO_ROOT / "prompts" / "research.v1.md").read_text())
+    for v in ("research.v1.md", "research.v2.md"):
+        (tmp_path / "prompts" / v).write_text(
+            (REPO_ROOT / "prompts" / v).read_text())
     (tmp_path / "lessons.md").write_text("## L-1\nlesson text\n")
     sp = tmp_path / cfg.paths.state_latest
     sp.parent.mkdir(parents=True)
@@ -78,8 +79,8 @@ def test_truncation_keeps_newest(env):
 
 def test_hard_cap_raises(env):
     cfg, jdb, root = env
-    template = (root / "prompts" / "research.v1.md").read_text()
-    (root / "prompts" / "research.v1.md").write_text(template + "P" * 100000)
+    template = (root / "prompts" / "research.v2.md").read_text()
+    (root / "prompts" / "research.v2.md").write_text(template + "P" * 100000)
     with pytest.raises(build_prompt.PromptBudgetExceeded):
         _build(cfg, jdb, root)
 
@@ -103,7 +104,7 @@ def test_snapshot_roundtrip_byte_identical(env):
     cfg, jdb, root = env
     bp, inputs, limits, fewshot = _build(cfg, jdb, root)
     meta = snapshotlib.SnapshotMeta(
-        run_id=RUN_ID, created_at="2026-09-22T04:30:00Z", prompt_version="research.v1",
+        run_id=RUN_ID, created_at="2026-09-22T04:30:00Z", prompt_version="research.v2",
         model="claude-opus-5", git_commit="abc", token_budget=20000)
     d = snapshotlib.write_snapshot(RUN_ID, inputs=inputs, limits=limits,
                                    fewshot=fewshot, rendered_prompt=bp.text,
@@ -120,7 +121,7 @@ def test_snapshot_roundtrip_byte_identical(env):
         bpmod.REPO_ROOT = orig
     assert rebuilt.text == bp.text
     row = jdb.execute("SELECT * FROM snapshot_index WHERE run_id=?", (RUN_ID,)).fetchone()
-    assert row is not None and row["prompt_version"] == "research.v1"
+    assert row is not None and row["prompt_version"] == "research.v2"
 
 
 def test_snapshot_write_once_and_tamper_detected(env):
@@ -138,3 +139,68 @@ def test_snapshot_write_once_and_tamper_detected(env):
     (d / "state.json").write_text("{tampered}")
     with pytest.raises(snapshotlib.SnapshotError, match="tampered"):
         snapshotlib.read_snapshot(d)
+
+
+def test_pre_v2_snapshot_rebuilds_byte_identical(env):
+    """A snapshot written BEFORE the dossier inputs existed (no dossiers.md /
+    event_stats.json, manifest without them) must still rebuild byte-identically
+    under its own v1 template."""
+    import hashlib
+    import json
+
+    cfg, jdb, root = env
+    bp, inputs, limits, fewshot = build_prompt.build_research_prompt(
+        cfg, jdb, RUN_ID, [], NOW, root=root, prompt_version="research.v1")
+    d = root / "journal" / "snapshots" / "20260922-0830"
+    d.mkdir(parents=True)
+    old_files = {"state": "state.json", "brief": "brief.md",
+                 "positions": "positions.json", "graded": "graded_recent.txt",
+                 "lessons": "lessons.md", "flags": "flags.json"}
+    files = {}
+    for key, fname in old_files.items():
+        (d / fname).write_text(inputs[key])
+        files[fname] = hashlib.sha256(inputs[key].encode()).hexdigest()
+    for fname, content in (("limits.yaml", limits), ("fewshot.txt", fewshot),
+                           ("rendered_prompt.md", bp.text)):
+        (d / fname).write_text(content)
+        files[fname] = hashlib.sha256(content.encode()).hexdigest()
+    manifest = {"meta": {"run_id": RUN_ID, "created_at": "x",
+                         "prompt_version": "research.v1", "model": "m",
+                         "git_commit": "c", "token_budget": 20000,
+                         "escalation_reasons": []}, "files": files}
+    (d / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    snap = snapshotlib.read_snapshot(d)  # tolerant of the missing v2 files
+    assert snap.inputs["dossiers"] == "" and snap.inputs["event_stats"] == ""
+    import runs.build_prompt as bpmod
+
+    orig = bpmod.REPO_ROOT
+    bpmod.REPO_ROOT = root
+    try:
+        rebuilt = build_prompt.build_from_snapshot(d)
+    finally:
+        bpmod.REPO_ROOT = orig
+    assert rebuilt.text == bp.text and rebuilt.prompt_version == "research.v1"
+
+
+def test_v2_renders_dossier_summaries_and_event_stats(env):
+    cfg, jdb, root = env
+    assets = root / "knowledge" / "assets"
+    assets.mkdir(parents=True)
+    (assets / "BTC.md").write_text(
+        "# BTC dossier\n\n## Summary\ncurrent vol rank 0.82\n\n## History\nlong tail\n")
+    (root / "knowledge" / "state").mkdir(parents=True, exist_ok=True)
+    (root / "knowledge" / "state" / "event_stats.json").write_text(
+        '{"events": {"hack": {"mean_1d_pct": -3.1}}}')
+    bp, inputs, *_ = _build(cfg, jdb, root)
+    assert bp.prompt_version == "research.v2"
+    assert "current vol rank 0.82" in bp.text     # the Summary section is in
+    assert "long tail" not in bp.text             # History stays out
+    assert '"mean_1d_pct": -3.1' in bp.text
+    assert inputs["dossiers"].startswith("### BTC")
+
+
+def test_v2_without_dossiers_degrades(env):
+    cfg, jdb, root = env
+    bp, *_ = _build(cfg, jdb, root)
+    assert "(no dossiers yet)" in bp.text and "{{DOSSIERS}}" not in bp.text
+    assert "{{EVENT_STATS}}" not in bp.text

@@ -15,7 +15,7 @@ from runs.research_run import ResearchRun
 
 NOW = datetime(2026, 9, 22, 4, 30, tzinfo=UTC)  # 08:30 Gulf
 GOOD = {
-    "run_id": "2026-09-22T08:30+04:00", "prompt_version": "research.v1",
+    "run_id": "2026-09-22T08:30+04:00", "prompt_version": "research.v2",
     "module": "trend", "targets": {"BTC": 0.45, "ETH": 0.25, "USDT": 0.30},
     "exposure_scale": 0.8, "confidence": 0.6, "abstain": False, "horizon_days": 7,
     "rationale": ["BTC above 200d"], "invalidation": "BTC daily close below 200d MA",
@@ -62,8 +62,9 @@ def rr(tmp_path):
     jdb, kdb = db.connect(journal), db.connect(knowledge)
     # scaffold what the run needs in the tmp root
     (tmp_path / "prompts").mkdir()
-    (tmp_path / "prompts" / "research.v1.md").write_text(
-        (REPO_ROOT / "prompts" / "research.v1.md").read_text())
+    for v in ("research.v1.md", "research.v2.md"):
+        (tmp_path / "prompts" / v).write_text(
+            (REPO_ROOT / "prompts" / v).read_text())
     (tmp_path / "lessons.md").write_text("none\n")
     sp = tmp_path / cfg.paths.state_latest
     sp.parent.mkdir(parents=True)

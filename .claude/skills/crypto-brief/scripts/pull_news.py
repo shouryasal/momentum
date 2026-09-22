@@ -23,10 +23,14 @@ def main() -> int:
     since = (datetime.now(UTC) - timedelta(hours=args.hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     with db.connect(REPO_ROOT / cfg.paths.knowledge_db, readonly=True) as kdb:
         rows = [dict(r) for r in kdb.execute(
-            "SELECT source, source_class, title, url, published_at, assets,"
-            " event_class, cluster_id, corroborated, corroborating_sources"
-            " FROM news_items WHERE COALESCE(published_at, fetched_at) >= ?"
-            " ORDER BY cluster_id, published_at", (since,))]
+            "SELECT n.source, n.source_class, n.title, n.url, n.published_at,"
+            " n.assets, n.event_class, n.cluster_id, n.corroborated,"
+            " n.corroborating_sources, n.claim_verified,"
+            " COALESCE(sr.score, 0.5) AS source_score"
+            " FROM news_items n LEFT JOIN source_reliability sr"
+            " ON sr.source = n.source"
+            " WHERE COALESCE(n.published_at, n.fetched_at) >= ?"
+            " ORDER BY n.cluster_id, n.published_at", (since,))]
     clusters: dict[str, list[dict]] = {}
     for r in rows:
         clusters.setdefault(r["cluster_id"] or r["url"], []).append(r)

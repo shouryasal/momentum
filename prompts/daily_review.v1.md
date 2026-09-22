@@ -30,6 +30,9 @@ Work through, in order, using the post-mortem skill:
 4. **Change candidates** (optional, at most one): only when the same mistake is
    visible in the pack more than once. Full strategy-lab protocol on this
    branch, one commit touching only its files. When in doubt, don't.
+5. **Dossiers (1st of the month only)**: the wrapper has refreshed the computed
+   stats — rewrite `knowledge/assets/{BTC,ETH}.md` with the asset-dossier
+   skill, numbers from the JSON files only.
 
 Constraints: never edit an existing lessons entry; propose params changes only
 through `changes/*.json`; never touch tier-2 paths; do not run apply_changes

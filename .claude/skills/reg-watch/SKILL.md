@@ -24,6 +24,9 @@ NOT by you. -->
      regulator domain in the URL) is sufficient on its own.
    - A market event (depeg, halt rumor) needs the two-source rule
      (`corroborated=1`) before it becomes a flag.
+   - Weight by measured credibility: an unconfirmed item from a source with
+     `source_reliability.score` below 0.4 is never sufficient evidence for a
+     flag on its own, whatever its wording.
    - Watched bodies and feeds: `references/feeds.md`.
 
 3. Severity guidance:

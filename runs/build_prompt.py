@@ -27,6 +27,7 @@ DYNAMIC_MARKER = "<!-- DYNAMIC -->"
 INPUT_BUDGETS = {
     "state": 1000, "brief": 2500, "positions": 1000,
     "graded": 2000, "lessons": 2500, "flags": 500,
+    "dossiers": 1500, "event_stats": 600,   # v2 asset intelligence
 }
 HARD_CAP = 20000
 TARGET_CAP = 12000
@@ -109,6 +110,12 @@ def gather_inputs(cfg: EarnConfig, jdb: sqlite3.Connection,
                   if f.get("active")}
     except json.JSONDecodeError:
         active = {"_unreadable": True}
+    # v2 asset intelligence: the dossiers' Summary sections + the event studies.
+    # Missing files read as "" so a v1 template (no placeholders) is unaffected.
+    dossiers = "\n\n".join(
+        s for s in (_dossier_summary(root / "knowledge" / "assets" / f"{a}.md")
+                    for a in cfg.universe.assets) if s)
+    event_stats = read(root / "knowledge" / "state" / "event_stats.json", "")
     return {
         "state": state,
         "brief": brief,
@@ -116,7 +123,30 @@ def gather_inputs(cfg: EarnConfig, jdb: sqlite3.Connection,
         "graded": graded,
         "lessons": lessons,
         "flags": json.dumps(active, indent=2, sort_keys=True),
+        "dossiers": dossiers,
+        "event_stats": event_stats,
     }
+
+
+def _dossier_summary(path: Path) -> str:
+    """The '## Summary' section of one asset dossier (the prompt-facing part)."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return ""
+    lines = []
+    in_summary = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if in_summary:
+                break
+            in_summary = line.strip().lower() == "## summary"
+            if in_summary:
+                lines.append(f"### {path.stem}")
+                continue
+        if in_summary:
+            lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def load_fewshot(root: Path, cfg: EarnConfig, now: datetime) -> str:
@@ -152,7 +182,9 @@ def build(template: str, *, run_id: str, limits: str, fewshot: str,
             .replace("{{POSITIONS}}", inputs["positions"])
             .replace("{{GRADED}}", inputs["graded"])
             .replace("{{LESSONS}}", inputs["lessons"])
-            .replace("{{FLAGS}}", inputs["flags"]))
+            .replace("{{FLAGS}}", inputs["flags"])
+            .replace("{{DOSSIERS}}", inputs.get("dossiers") or "(no dossiers yet)")
+            .replace("{{EVENT_STATS}}", inputs.get("event_stats") or "{}"))
     est = token_estimate(text)
     if est > HARD_CAP:
         raise PromptBudgetExceeded(f"prompt estimate {est} > {HARD_CAP} tokens")
@@ -165,7 +197,7 @@ def build(template: str, *, run_id: str, limits: str, fewshot: str,
 def build_research_prompt(cfg: EarnConfig, jdb: sqlite3.Connection, run_id: str,
                           escalation_reasons: list[str], now: datetime,
                           root: Path | None = None,
-                          prompt_version: str = "research.v1"
+                          prompt_version: str = "research.v2"
                           ) -> tuple[BuiltPrompt, dict[str, str], str, str]:
     """Returns (prompt, inputs, limits, fewshot) — inputs/limits/fewshot go into the
     snapshot so replay can rebuild byte-identically."""
@@ -188,13 +220,23 @@ def build_from_snapshot(snapshot_dir: Path, prompt_version: str | None = None,
     version = prompt_version or meta["prompt_version"]
     template = template_override if template_override is not None else (
         REPO_ROOT / "prompts" / f"{version}.md").read_text()
+    def _read(name: str) -> str:
+        # missing file -> "" so PRE-v2 snapshots (no dossiers/event_stats files)
+        # rebuild byte-identically under their own v1 template
+        try:
+            return (snapshot_dir / name).read_text().strip()
+        except OSError:
+            return ""
+
     inputs = {
-        "state": (snapshot_dir / "state.json").read_text().strip(),
-        "brief": (snapshot_dir / "brief.md").read_text().strip(),
-        "positions": (snapshot_dir / "positions.json").read_text().strip(),
-        "graded": (snapshot_dir / "graded_recent.txt").read_text().strip(),
-        "lessons": (snapshot_dir / "lessons.md").read_text().strip(),
-        "flags": (snapshot_dir / "flags.json").read_text().strip(),
+        "state": _read("state.json"),
+        "brief": _read("brief.md"),
+        "positions": _read("positions.json"),
+        "graded": _read("graded_recent.txt"),
+        "lessons": _read("lessons.md"),
+        "flags": _read("flags.json"),
+        "dossiers": _read("dossiers.md"),
+        "event_stats": _read("event_stats.json"),
     }
     limits = (snapshot_dir / "limits.yaml").read_text()
     fewshot = (snapshot_dir / "fewshot.txt").read_text()

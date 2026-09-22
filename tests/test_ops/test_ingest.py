@@ -274,3 +274,60 @@ def test_classifier_gated_on_config_and_credential(classify_env, monkeypatch):
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     ingest.classify_news()  # no credential -> silent skip
     assert not calls
+
+
+# ---------------------------------------------------------------- claim check
+
+class TestClaimCheck:
+    TS = "2026-09-22T06:00:00Z"
+
+    def _news(self, kdb, title, h, assets='["BTC"]'):
+        kdb.execute(
+            "INSERT INTO news_items(url_hash, source, source_class, title, url,"
+            " published_at, fetched_at, classified_by, assets)"
+            " VALUES (?,?,?,?,?,?,?, 'rule', ?)",
+            (h, "CoinDesk", "secondary", title, f"https://n/{h}", self.TS,
+             NOW.strftime("%Y-%m-%dT%H:%M:%SZ"), assets))
+        kdb.commit()
+
+    def _candles(self, kdb):
+        # 3 daily candles before the item: one -8% day; cumulative -8%
+        ts_ms = 1_790_056_800_000  # 2026-09-22T06:00Z
+        day = 86_400_000
+        rows = [(100.0, 100.0, 3), (100.0, 92.0, 2), (92.0, 92.0, 1)]
+        kdb.executemany(
+            "INSERT INTO candles(pair, tf, open_time, open, close, is_closed)"
+            " VALUES ('BTC/USDT','1d',?,?,?,1)",
+            [(ts_ms - n * day, o, c) for o, c, n in rows])
+        kdb.commit()
+
+    def test_realistic_claim_verified(self, ing):
+        ingest, _, kdb, _ = ing
+        self._candles(kdb)
+        self._news(kdb, "Bitcoin drops 8% after exchange hack", "cv1")
+        ingest.claimcheck()
+        r = kdb.execute("SELECT claim_verified FROM news_items WHERE url_hash='cv1'"
+                        ).fetchone()
+        assert r["claim_verified"] == 1  # 8% claimed, 8% realized
+
+    def test_impossible_claim_falsified(self, ing):
+        ingest, _, kdb, _ = ing
+        self._candles(kdb)
+        self._news(kdb, "Bitcoin crashes 40% in bloodbath", "cv2")
+        ingest.claimcheck()
+        r = kdb.execute("SELECT claim_verified FROM news_items WHERE url_hash='cv2'"
+                        ).fetchone()
+        assert r["claim_verified"] == 0  # 40% claimed, 8% realized
+
+    def test_no_claim_or_ambiguous_assets_left_null(self, ing):
+        ingest, _, kdb, _ = ing
+        self._candles(kdb)
+        self._news(kdb, "Bitcoin rallies on ETF news", "cv3")           # no %
+        self._news(kdb, "Markets fall 9% broadly", "cv4",
+                   assets='["BTC", "ETH"]')                             # 2 assets
+        self._news(kdb, "Token up 8%", "cv5", assets="[]")              # no asset
+        ingest.claimcheck()
+        for h in ("cv3", "cv4", "cv5"):
+            r = kdb.execute("SELECT claim_verified FROM news_items WHERE url_hash=?",
+                            (h,)).fetchone()
+            assert r["claim_verified"] is None, h
