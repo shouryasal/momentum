@@ -24,6 +24,37 @@ ln -sf ../.env ops/.env
 pre-commit install
 ```
 
+## Claude sign-in (subscription-first)
+
+The model-facing jobs (research, nightly + Sunday review, Monday maintenance,
+the news classifier) authenticate with your **Claude Max subscription**, not a
+metered API key:
+
+```bash
+claude setup-token          # sign in via browser; prints a long-lived token
+# put the token in .env:
+#   CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat...
+```
+
+`ANTHROPIC_API_KEY` in `.env` works as a fallback, but when both are present
+`ops/envwrap.sh` deliberately strips the API key from model-facing jobs — a
+present API key would otherwise preempt subscription auth in headless runs.
+USD figures in the journal are estimates (telemetry); degradation keys on the
+subscription's rate-limit signals, and decision runs are never throttled.
+
+Verify after the first live research run (`bash ops/envwrap.sh research -- \
+.venv/bin/python -m runs.research_run`):
+
+```sql
+-- journal/journal.db: subscription auth + max reasoning effort applied
+SELECT run_id, stage, effort, auth_source FROM runs WHERE stage='decide';
+--                          -> effort='max', auth_source='none' (none = subscription)
+```
+
+Then watch for the first `reports/daily/<day>.md` (21:30 Gulf nightly review)
+and the first Monday-02:00 maintenance row (`SELECT * FROM runs WHERE
+stage='maintenance'`).
+
 ## Week-1 verification gate
 
 Every command must exit 0, twice in a row:
@@ -49,6 +80,7 @@ cd ops && docker compose down && cd ..
 | `knowledge/` | Market data, news, state, flags (SQLite + files) |
 | `journal/` | The system's own record: proposals, gate decisions, orders, fills, NAV |
 | `proposals/` | Claude's schema-validated target-weight proposals |
-| `runs/` | Scheduled jobs: ingest, TCA, NAV, research, review, apply-changes |
+| `runs/` | Scheduled jobs: ingest (+triggers), TCA, NAV (+what-if), research, daily/weekly review, maintenance, apply-changes, trace |
 | `ops/` | Docker, cron, healthcheck, Telegram, backup, kill switch (`ops/killdir/KILL`) |
-| `.claude/skills/` | The ten skills the Claude runs load |
+| `.claude/skills/` | The eleven skills the Claude runs load |
+| `reports/trace/` | `python -m runs.trace <run_id>` — any decision reconstructed end-to-end |
