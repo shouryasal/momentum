@@ -1,0 +1,12 @@
+{
+  "run_id": "2026-09-22T08:30+04:00",
+  "prompt_version": "research.v1",
+  "module": "trend",
+  "targets": {"BTC": 0.40, "ETH": 0.25, "USDT": 0.35},
+  "exposure_scale": 0.8,
+  "confidence": 0.6,
+  "abstain": false,
+  "horizon_days": 7,
+  "rationale": ["BTC above 200d MA, vol regime med", "no blackout flags"],
+  "invalidation": "BTC daily close below the 200d MA"
+}
