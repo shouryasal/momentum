@@ -32,6 +32,11 @@ class StageMeta:
     cache_write_tokens: int | None = None
     num_turns: int | None = None
     served_model: str | None = None
+    applied_effort: str | None = None      # from the CLI init frame (post env/caps)
+    auth_source: str | None = None         # init apiKeySource; "none" = subscription
+    rate_limit_status: str | None = None   # subscription RateLimitEvent, if any
+    rate_limit_utilization: float | None = None
+    rate_limit_resets_at: str | None = None
     error: str | None = None
     skills_loaded: list[str] = field(default_factory=list)
 
@@ -45,7 +50,8 @@ class StageResult:
 
 def _options(*, model: str, max_turns: int, max_usd: float, cwd: Path,
              allowed_tools: list[str] | None, extra_disallowed: list[str],
-             output_schema: dict | None, skills: list[str] | None) -> ClaudeAgentOptions:
+             output_schema: dict | None, skills: list[str] | None,
+             effort: str | None) -> ClaudeAgentOptions:
     kwargs: dict = dict(
         model=model,
         cwd=str(cwd),
@@ -57,6 +63,8 @@ def _options(*, model: str, max_turns: int, max_usd: float, cwd: Path,
         max_budget_usd=max_usd,
         env={},
     )
+    if effort is not None:
+        kwargs["effort"] = effort          # "high" floor enforced by the router
     if output_schema is not None:
         kwargs["output_format"] = {"type": "json_schema", "schema": output_schema}
     if skills:
@@ -72,9 +80,21 @@ async def _run_stage_async(prompt: str, opts: ClaudeAgentOptions,
     async def consume() -> None:
         nonlocal text
         async for message in _query(prompt=prompt, options=opts):
-            # ResultMessage is the terminal message; parse defensively — usage
-            # fields are optional per docs.
-            if type(message).__name__ == "ResultMessage":
+            # Parse every frame defensively by type name — fields are optional and
+            # shapes may drift across SDK versions; never fail a stage on metadata.
+            kind = type(message).__name__
+            if kind == "SystemMessage" and getattr(message, "subtype", "") == "init":
+                data = getattr(message, "data", None) or {}
+                meta.applied_effort = data.get("effort")
+                meta.auth_source = data.get("apiKeySource")
+            elif kind == "RateLimitEvent":
+                info = getattr(message, "rate_limit_info", None)
+                if info is not None:
+                    meta.rate_limit_status = getattr(info, "status", None)
+                    meta.rate_limit_utilization = getattr(info, "utilization", None)
+                    resets = getattr(info, "resets_at", None)
+                    meta.rate_limit_resets_at = str(resets) if resets else None
+            elif kind == "ResultMessage":
                 meta.subtype = getattr(message, "subtype", "unknown")
                 meta.cost_usd = getattr(message, "total_cost_usd", None)
                 meta.num_turns = getattr(message, "num_turns", None)
@@ -108,11 +128,11 @@ def run_stage(prompt: str, *, model: str, max_turns: int, max_usd: float,
               cwd: Path | None = None, allowed_tools: list[str] | None = None,
               extra_disallowed: list[str] | None = None,
               output_schema: dict | None = None, skills: list[str] | None = None,
-              deadline_s: float = 900) -> StageResult:
+              effort: str | None = None, deadline_s: float = 900) -> StageResult:
     opts = _options(model=model, max_turns=max_turns, max_usd=max_usd,
                     cwd=cwd or REPO_ROOT, allowed_tools=allowed_tools,
                     extra_disallowed=extra_disallowed or [],
-                    output_schema=output_schema, skills=skills)
+                    output_schema=output_schema, skills=skills, effort=effort)
     try:
         return asyncio.run(_run_stage_async(prompt, opts, deadline_s))
     except RuntimeError as e:
@@ -122,10 +142,11 @@ def run_stage(prompt: str, *, model: str, max_turns: int, max_usd: float,
 
 def decide(prompt: str, *, model: str, cwd: Path, max_turns: int = 12,
            max_usd: float = 2.0, output_schema: dict | None = None,
-           deadline_s: float = 900) -> StageResult:
+           effort: str | None = None, deadline_s: float = 900) -> StageResult:
     """Read-only decision call — the replay harness's entry point (no Write, no Bash,
     no skills beyond what the sandbox provides)."""
     return run_stage(prompt, model=model, max_turns=max_turns, max_usd=max_usd,
                      cwd=cwd, allowed_tools=READ_ONLY_TOOLS,
                      extra_disallowed=["Write", "Bash", "Skill"],
-                     output_schema=output_schema, deadline_s=deadline_s)
+                     output_schema=output_schema, effort=effort,
+                     deadline_s=deadline_s)

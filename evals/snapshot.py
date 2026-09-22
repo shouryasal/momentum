@@ -41,6 +41,7 @@ class SnapshotMeta:
     git_commit: str
     token_budget: int
     escalation_reasons: list[str] = field(default_factory=list)
+    effort: str | None = None  # default keeps pre-v2 manifests loadable
 
 
 def slug_for(run_id: str) -> str:

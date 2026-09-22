@@ -79,3 +79,35 @@ def test_runs_composite_pk(dbs):
                 "INSERT INTO runs(run_id, stage, kind, started_utc, status)"
                 " VALUES ('2026-09-22T08:30+04:00','decide','research','2026-09-22T04:30:00Z','success')"
             )
+
+
+def test_v1_to_v2_migration(tmp_path):
+    """A DB created under schema v1 (no effort/auth/trigger columns) gains them."""
+    old = tmp_path / "journal" / "journal.db"
+    old.parent.mkdir(parents=True)
+    conn = sqlite3.connect(old)
+    conn.execute("""CREATE TABLE runs (
+        run_id TEXT NOT NULL, stage TEXT NOT NULL, kind TEXT NOT NULL,
+        started_utc TEXT NOT NULL, status TEXT NOT NULL, cost_usd REAL,
+        PRIMARY KEY (run_id, stage))""")
+    conn.execute("PRAGMA user_version=1")
+    conn.commit()
+    conn.close()
+    with db.connect(old) as c:
+        db.apply_schema(c, db.SQL_DIR / "journal.sql")
+        cols = {r[1] for r in c.execute("PRAGMA table_info(runs)")}
+        assert {"effort", "auth_source", "trigger_reason"} <= cols
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert "whatif_nav" in _tables(c)
+        db.apply_schema(c, db.SQL_DIR / "journal.sql")  # idempotent rerun
+
+
+def test_v2_tables_exist_fresh(dbs):
+    _, journal, knowledge = dbs
+    with db.connect(journal) as j, db.connect(knowledge) as k:
+        assert "whatif_nav" in _tables(j)
+        assert {"trigger_events", "source_reliability"} <= _tables(k)
+        jcols = {r[1] for r in j.execute("PRAGMA table_info(runs)")}
+        assert {"effort", "auth_source", "trigger_reason"} <= jcols
+        kcols = {r[1] for r in k.execute("PRAGMA table_info(news_items)")}
+        assert "claim_verified" in kcols

@@ -121,9 +121,12 @@ class ReviewRun:
                 .replace("{{RUN_ID}}", self.run_id))
 
     def run_session(self, model: str):
+        effort = router.resolve("review",
+                                models_cfg=router.load_models_cfg(
+                                    self.root / "config" / "models.yaml")).effort
         return self.session_runner(
             self._session_prompt(model), model=model,
-            max_turns=self.cfg.review.max_turns,
+            max_turns=self.cfg.review.max_turns, effort=effort,
             max_usd=self.cfg.review.max_budget_usd, cwd=self.root,
             allowed_tools=["Read", "Grep", "Glob", "Write", "Edit", "Skill",
                            "Bash(python3 *)", "Bash(pytest *)", "Bash(git add *)",
@@ -272,11 +275,14 @@ class ReviewRun:
             self.alert(f"lessons.md lint problems after review: {problems}", "warn")
         self.jdb.execute(
             "INSERT OR REPLACE INTO runs(run_id, stage, kind, started_utc, finished_utc,"
-            " requested_model, served_model, cost_usd, num_turns, status, error)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            " requested_model, served_model, cost_usd, num_turns, effort,"
+            " auth_source, status, error)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (self.run_id, "review", "review", utc_iso(self.now), utc_iso(),
              model_used, getattr(meta, "served_model", None),
              getattr(meta, "cost_usd", None), getattr(meta, "num_turns", None),
+             getattr(meta, "applied_effort", None) or "max",
+             getattr(meta, "auth_source", None),
              "success" if self._session_outputs_ok() else "failed",
              getattr(meta, "error", None)))
         self.jdb.commit()

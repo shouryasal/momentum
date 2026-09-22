@@ -12,8 +12,30 @@ from pathlib import Path
 
 from ops.config import REPO_ROOT, EarnConfig
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SQL_DIR = Path(__file__).resolve().parent / "sql"
+
+# Versioned additive migrations for DBs created under an older schema. Fresh DBs
+# get these columns from the DDL directly; existing files get guarded ALTERs.
+# {version: {ddl_stem: [(table, column, decl), ...]}}
+MIGRATIONS: dict[int, dict[str, list[tuple[str, str, str]]]] = {
+    2: {
+        "journal": [
+            ("runs", "effort", "TEXT"),
+            ("runs", "auth_source", "TEXT"),
+            ("runs", "trigger_reason", "TEXT"),
+        ],
+        "knowledge": [
+            ("news_items", "claim_verified", "INTEGER"),
+        ],
+    },
+}
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def connect(db_path: Path | str, *, readonly: bool = False) -> sqlite3.Connection:
@@ -33,8 +55,12 @@ def connect(db_path: Path | str, *, readonly: bool = False) -> sqlite3.Connectio
 
 
 def apply_schema(conn: sqlite3.Connection, ddl_path: Path, target_version: int = SCHEMA_VERSION) -> None:
-    conn.executescript(ddl_path.read_text())
+    conn.executescript(ddl_path.read_text())  # new tables come free (IF NOT EXISTS)
     current = conn.execute("PRAGMA user_version").fetchone()[0]
+    for version in sorted(MIGRATIONS):
+        if current < version <= target_version:
+            for table, column, decl in MIGRATIONS[version].get(ddl_path.stem, []):
+                _ensure_column(conn, table, column, decl)
     if current < target_version:
         conn.execute(f"PRAGMA user_version={target_version}")
     conn.commit()

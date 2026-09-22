@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS runs (
   cache_write_tokens INTEGER,
   cost_usd REAL,                       -- ResultMessage.total_cost_usd (client-side estimate; may be NULL)
   num_turns INTEGER,
+  effort TEXT,                         -- applied reasoning effort (floor 'high'; decide/review 'max')
+  auth_source TEXT,                    -- init apiKeySource; 'none' = subscription (Claude Max)
+  trigger_reason TEXT,                 -- csv of trigger reasons for event-fired decision runs
   status TEXT NOT NULL CHECK (status IN ('success','failed','skipped','throttled','killed','missed')),
   error TEXT,
   PRIMARY KEY (run_id, stage)
@@ -263,4 +266,15 @@ CREATE TABLE IF NOT EXISTS change_log (
   replay_id TEXT REFERENCES replay_runs(replay_id),
   merge_commit TEXT,
   is_param_change INTEGER NOT NULL DEFAULT 0
+);
+
+-- What the proposals ALONE would have earned (runs/whatif.py — the Excel testing
+-- mode): follow every valid proposal exactly at the next 4h close, measured costs.
+CREATE TABLE IF NOT EXISTS whatif_nav (
+  date_utc TEXT PRIMARY KEY,           -- YYYY-MM-DD
+  nav_usdt REAL NOT NULL,
+  weights_json TEXT,
+  last_proposal_run_id TEXT,
+  turnover REAL,
+  cost_usdt REAL
 );

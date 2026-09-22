@@ -143,11 +143,17 @@ class Escalation(_Model):
     stop_proximity_pct: float
 
 
+class RateLimitBudget(_Model):
+    degrade_at_utilization: float
+
+
 class Budgets(_Model):
+    mode: Literal["telemetry", "hard"] = "telemetry"
     run_usd: dict[str, float]
     monthly_usd: float
     context_tokens: dict[str, int]
     degrade_at_pct: int
+    rate_limit: RateLimitBudget = RateLimitBudget(degrade_at_utilization=0.80)
 
 
 class Tca(_Model):

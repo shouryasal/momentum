@@ -77,11 +77,14 @@ bounds:                            # tier-2 bounds for tier-1 params; apply_chan
 escalation:
   stop_proximity_pct: 1.0          # drawdown within 1% of a stop -> hard-case flag
 
-budgets:
-  run_usd: { research: 1.50, review: 15.00 }
+budgets:                           # TELEMETRY under the Claude Max subscription:
+  mode: telemetry                  #   USD figures are estimates for reporting only;
+  run_usd: { research: 4.00, review: 25.00 }   # per-run caps stay as runaway-loop safety
   monthly_usd: 150
   context_tokens: { research: 20000, review: 60000 }
-  degrade_at_pct: 80               # brief frequency drops before any decision run is skipped
+  degrade_at_pct: 80               # legacy USD throttle input (telemetry)
+  rate_limit:                      # the REAL degradation signal (RateLimitEvent frames)
+    degrade_at_utilization: 0.80   # brief drops first; decision runs never throttle
 
 tca:
   freeze_ratio: 1.5                # measured > 1.5x assumption ...

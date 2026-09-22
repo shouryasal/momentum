@@ -34,6 +34,7 @@ TIER2_SAMPLES = [
 ]
 WRITABLE_SAMPLES = [
     "config/params-sleeve-a.json", "config/params-sleeve-b.json",
+    "config/models-auto.yaml",
     "knowledge/briefs/2026-09-22.md", "lessons.md", "changes/2026-09-27-x.json",
     "prompts/research.v2.md", "prompts/examples/fewshot.json",
     ".claude/skills/decide/SKILL.md", ".claude/skills/strategy-lab/SKILL.md",

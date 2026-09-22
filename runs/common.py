@@ -18,14 +18,17 @@ class EnvGuardError(Exception):
 
 
 def guard_env(require_anthropic: bool = True) -> None:
-    """Research/review runs carry ONLY the Anthropic key (spec §4). Hard-exit if any
-    exchange credential leaked into this process."""
+    """Model-facing runs carry ONLY a Claude credential (spec §4) — subscription
+    OAuth token first, API key fallback. Hard-exit if any exchange credential
+    leaked into this process."""
     leaked = [k for k in os.environ
               if k.startswith(("BINANCE_", "FREQTRADE__EXCHANGE"))]
     if leaked:
         raise EnvGuardError(f"exchange credentials present in run env: {leaked}")
-    if require_anthropic and not os.environ.get("ANTHROPIC_API_KEY"):
-        raise EnvGuardError("ANTHROPIC_API_KEY missing")
+    if require_anthropic:
+        from ops.lib import claude_auth
+
+        claude_auth.require()
 
 
 def gulf_now(now: datetime | None = None) -> datetime:

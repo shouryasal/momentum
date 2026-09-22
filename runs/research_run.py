@@ -76,6 +76,7 @@ class ResearchRun:
         self.models_cfg = models_cfg or router.load_models_cfg()
         self.slot = ""
         self.run_id = ""
+        self.trigger_reasons: list[str] = []
 
     # ------------------------------------------------------------- journaling
 
@@ -88,16 +89,36 @@ class ResearchRun:
             "INSERT OR REPLACE INTO runs(run_id, stage, kind, started_utc, finished_utc,"
             " requested_model, served_model, prompt_version, escalated,"
             " escalation_reasons, input_tokens, output_tokens, cache_read_tokens,"
-            " cache_write_tokens, cost_usd, num_turns, status, error)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " cache_write_tokens, cost_usd, num_turns, effort, auth_source,"
+            " trigger_reason, status, error)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (self.run_id, stage, "research", utc_iso(self.now), utc_iso(),
              choice.model if choice else None, m.served_model, prompt_version,
              int(bool(choice and choice.escalated)),
              _json.dumps(choice.escalation_reasons) if choice else None,
              m.input_tokens, m.output_tokens, m.cache_read_tokens,
-             m.cache_write_tokens, m.cost_usd, m.num_turns, status,
+             m.cache_write_tokens, m.cost_usd, m.num_turns,
+             m.applied_effort or (choice.effort if choice else None),
+             m.auth_source, ",".join(self.trigger_reasons) or None, status,
              error or m.error))
         self.jdb.commit()
+        self._persist_rate_limit(m)
+
+    def _persist_rate_limit(self, m) -> None:
+        """RateLimitEvent frames (subscription auth) feed the router's throttle."""
+        if m.rate_limit_status is None and m.rate_limit_utilization is None:
+            return
+        try:
+            for key, value in (("rate_limit_status", m.rate_limit_status),
+                               ("rate_limit_utilization", m.rate_limit_utilization),
+                               ("rate_limit_resets_at", m.rate_limit_resets_at)):
+                if value is not None:
+                    self.kdb.execute(
+                        "INSERT OR REPLACE INTO ops_state(key, value, updated_at)"
+                        " VALUES (?,?,?)", (key, str(value), utc_iso()))
+            self.kdb.commit()
+        except Exception:  # noqa: BLE001 — telemetry only, never fails a run
+            pass
 
     def journal_proposal(self, prop, *, path: str | None, valid: bool,
                          invalid_reason: str | None, model: str,
@@ -131,7 +152,7 @@ class ResearchRun:
         for _attempt in range(1 + choice.retry):
             res = self.stage_runner(
                 FLAGS_PROMPT, model=choice.model, max_turns=choice.max_turns,
-                max_usd=choice.max_usd, cwd=self.root,
+                max_usd=choice.max_usd, cwd=self.root, effort=choice.effort,
                 allowed_tools=["Read", "Glob", "Grep", "Skill", skill_bash],
                 output_schema=FLAG_LIST_SCHEMA, skills=["reg-watch"])
             if res.ok:
@@ -163,14 +184,14 @@ class ResearchRun:
         res = self.stage_runner(
             BRIEF_PROMPT.format(date=date_s), model=choice.model,
             max_turns=choice.max_turns, max_usd=choice.max_usd, cwd=self.root,
-            allowed_tools=tools, skills=["crypto-brief"])
+            effort=choice.effort, allowed_tools=tools, skills=["crypto-brief"])
         if not res.ok and res.meta.subtype != "error_max_budget_usd":
             # semantic fallback per spec: shorter brief on haiku (explicit re-dispatch)
             res = self.stage_runner(
                 BRIEF_PROMPT_SHORT.format(date=date_s),
                 model=self.models_cfg["models"]["haiku"],
                 max_turns=choice.max_turns, max_usd=choice.max_usd, cwd=self.root,
-                allowed_tools=tools, skills=["crypto-brief"])
+                effort=choice.effort, allowed_tools=tools, skills=["crypto-brief"])
         self.journal("brief", "success" if res.ok else "failed", choice=choice,
                      meta=res.meta)
         if not res.ok:
@@ -179,7 +200,7 @@ class ResearchRun:
     def _decide_once(self, choice, bp) -> tuple:
         res = self.stage_runner(
             bp.text, model=choice.model, max_turns=choice.max_turns,
-            max_usd=choice.max_usd, cwd=self.root,
+            max_usd=choice.max_usd, cwd=self.root, effort=choice.effort,
             allowed_tools=decision_core.READ_ONLY_TOOLS,
             extra_disallowed=["Write", "Bash"],
             output_schema=json_schema())
@@ -247,7 +268,7 @@ class ResearchRun:
             return
         res = self.stage_runner(
             bp.text, model=shadow_model, max_turns=base_choice.max_turns,
-            max_usd=base_choice.max_usd, cwd=self.root,
+            max_usd=base_choice.max_usd, cwd=self.root, effort=base_choice.effort,
             allowed_tools=decision_core.READ_ONLY_TOOLS,
             extra_disallowed=["Write", "Bash"], output_schema=json_schema())
         status, prop, reason = "failed", None, res.meta.error
@@ -287,7 +308,9 @@ class ResearchRun:
             self.alert(f"compute_state failed: {e}")
 
         self.stage_flags()
-        throttle = router.throttle_state(self.jdb, self.models_cfg, self.now)
+        throttle = router.throttle_state(
+            self.jdb, self.models_cfg, self.now, kdb=self.kdb,
+            degrade_at_utilization=self.cfg.budgets.rate_limit.degrade_at_utilization)
         self.stage_brief(throttle["brief_throttled"])
         ok = self.stage_decide()
 

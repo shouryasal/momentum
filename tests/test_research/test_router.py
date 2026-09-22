@@ -56,26 +56,122 @@ def _run_row(conn, stage, cost, started="2026-09-05T04:30:00Z"):
     conn.commit()
 
 
-def test_throttle_brief_at_80pct_decide_untouched(jdb):
-    _, conn = jdb
-    mc = router.load_models_cfg()
-    budget = mc["tasks"]["brief"]["monthly_budget_usd"]
-    _run_row(conn, "brief", 0.8 * budget)
-    st = router.throttle_state(conn, mc, NOW)
-    assert st["brief_throttled"] and not st["decide_blocked"]
+@pytest.fixture
+def kdb(cfg, jdb):
+    root, _ = jdb
+    from ops import db as dbmod
+
+    conn = dbmod.connect(root / cfg.paths.knowledge_db)
+    yield conn
+    conn.close()
 
 
-def test_total_budget_throttles_brief(jdb):
-    _, conn = jdb
-    mc = router.load_models_cfg()
-    _run_row(conn, "decide", 0.8 * mc["budget"]["monthly_total_usd"])
-    assert router.throttle_state(conn, mc, NOW)["brief_throttled"]
+def _set_rl(kdb, status=None, utilization=None, resets_at="2099-01-01T00:00:00Z"):
+    for key, value in (("rate_limit_status", status),
+                       ("rate_limit_utilization", utilization),
+                       ("rate_limit_resets_at", resets_at)):
+        if value is not None:
+            kdb.execute("INSERT OR REPLACE INTO ops_state(key, value, updated_at)"
+                        " VALUES (?,?, 'x')", (key, str(value)))
+    kdb.commit()
 
 
-def test_under_budget_no_throttle(jdb):
-    _, conn = jdb
-    _run_row(conn, "brief", 1.0)
-    assert not router.throttle_state(conn, router.load_models_cfg(), NOW)["brief_throttled"]
+class TestThrottle:
+    """USD spend is TELEMETRY under Claude Max; only rate-limit pressure throttles
+    briefs, and decide runs are never blocked."""
+
+    def test_usd_spend_never_throttles(self, jdb, kdb):
+        _, conn = jdb
+        mc = router.load_models_cfg()
+        _run_row(conn, "decide", 10 * mc["budget"]["monthly_total_usd"])
+        st = router.throttle_state(conn, mc, NOW, kdb=kdb)
+        assert not st["brief_throttled"] and not st["decide_blocked"]
+        assert st["month_total_usd"] > 0  # telemetry still reported
+
+    def test_rate_limit_warning_throttles_brief(self, jdb, kdb):
+        _, conn = jdb
+        _set_rl(kdb, status="allowed_warning")
+        st = router.throttle_state(conn, None, NOW, kdb=kdb)
+        assert st["brief_throttled"] and not st["decide_blocked"]
+
+    def test_high_utilization_throttles_brief(self, jdb, kdb):
+        _, conn = jdb
+        _set_rl(kdb, utilization=0.9)
+        assert router.throttle_state(conn, None, NOW, kdb=kdb)["brief_throttled"]
+        _set_rl(kdb, utilization=0.5)
+        assert not router.throttle_state(conn, None, NOW, kdb=kdb)["brief_throttled"]
+
+    def test_expired_window_clears_throttle(self, jdb, kdb):
+        _, conn = jdb
+        _set_rl(kdb, status="rejected", resets_at="2026-09-21T00:00:00Z")  # past
+        assert not router.throttle_state(conn, None, NOW, kdb=kdb)["brief_throttled"]
+
+
+class TestEffortAndOverlay:
+    def test_effort_floor_and_task_levels(self):
+        assert router.resolve("decide", router.HardCaseFlags()).effort == "max"
+        assert router.resolve("review").effort == "max"
+        assert router.resolve("brief").effort == "high"
+        assert router.clamp_effort("low") == "high"       # floor
+        assert router.clamp_effort("medium") == "high"
+        assert router.clamp_effort(None) == "high"
+        assert router.clamp_effort("nonsense") == "high"
+        assert router.clamp_effort("xhigh") == "xhigh"
+
+    def test_overlay_cannot_lower_effort(self, tmp_path):
+        import shutil
+
+        from ops.config import REPO_ROOT
+
+        base = tmp_path / "models.yaml"
+        shutil.copy(REPO_ROOT / "config" / "models.yaml", base)
+        (tmp_path / "models-auto.yaml").write_text(
+            "tasks:\n  decide: { effort: low }\n")
+        mc = router.load_models_cfg(base)
+        assert mc["tasks"]["decide"]["effort"] == "low"    # merged raw...
+        assert router.resolve("decide", models_cfg=mc).effort == "high"  # ...clamped
+
+    def test_overlay_promotes_decide_model_and_owns_shadow(self, tmp_path):
+        import shutil
+
+        from ops.config import REPO_ROOT
+
+        base = tmp_path / "models.yaml"
+        shutil.copy(REPO_ROOT / "config" / "models.yaml", base)
+        (tmp_path / "models-auto.yaml").write_text(
+            "models: { nova: claude-nova-6 }\n"
+            "tasks: { decide: { model: nova } }\n"
+            "shadow: { enabled: true, model: sonnet, started: '2026-09-01', days: 30 }\n")
+        mc = router.load_models_cfg(base)
+        assert router.resolve("decide", models_cfg=mc).model == "claude-nova-6"
+        assert router.shadow_active(mc, date(2026, 9, 10)) == "claude-sonnet-5"
+
+    def test_write_models_overlay_atomic(self, tmp_path):
+        op = tmp_path / "models-auto.yaml"
+
+        def mutate(cur):
+            cur.setdefault("tasks", {})["decide"] = {"model": "nova"}
+            return cur
+
+        router.write_models_overlay(mutate, overlay_path=op)
+        router.write_models_overlay(lambda c: c, overlay_path=op)  # idempotent RMW
+        import yaml as _y
+
+        assert _y.safe_load(op.read_text())["tasks"]["decide"]["model"] == "nova"
+
+    def test_missing_overlay_is_base_only(self):
+        mc = router.load_models_cfg()
+        assert router.resolve("decide", models_cfg=mc).model == "claude-opus-5"
+
+
+def test_force_escalation_from_triggers():
+    c = router.resolve("decide", router.HardCaseFlags(),
+                       force_escalation=["news:hack"])
+    assert c.model == "claude-fable-5-1" and c.escalated
+    assert c.escalation_reasons == ["trigger:news:hack"]
+    both = router.resolve("decide", router.HardCaseFlags(near_stop=True),
+                          force_escalation=["move_4h:BTC:-6.0"])
+    assert set(both.escalation_reasons) == {"trigger:move_4h:BTC:-6.0", "near_stop"}
 
 
 def test_shadow_window_day30_no_day31_yes():

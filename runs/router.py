@@ -1,6 +1,9 @@
-"""Model routing (spec §3a): per-task defaults from config/models.yaml, the six
-hard-case escalation flags, monthly budget tracking with the 80% brief throttle
-(decide runs are never skipped for budget), and the 30-day shadow window."""
+"""Model routing (spec §3a): per-task defaults from config/models.yaml merged with
+the tier-1 overlay config/models-auto.yaml (auto-shadow / auto-promotion writes),
+the six hard-case escalation flags, the code-enforced reasoning-effort floor
+("high"; decide/review run at "max"), rate-limit-aware brief throttling under the
+Claude Max subscription (decide runs are never skipped), and the 30-day shadow
+window."""
 
 from __future__ import annotations
 
@@ -15,6 +18,10 @@ import yaml
 from ops.config import REPO_ROOT, EarnConfig
 from ops.lib import flags as flagslib
 
+EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
+EFFORT_FLOOR = "high"   # code-enforced: no config or overlay can go below this
+OVERLAY_PATH = REPO_ROOT / "config" / "models-auto.yaml"
+
 
 @dataclass(frozen=True)
 class ModelChoice:
@@ -26,6 +33,7 @@ class ModelChoice:
     retry: int
     max_usd: float
     max_turns: int
+    effort: str = EFFORT_FLOOR
 
 
 @dataclass(frozen=True)
@@ -44,8 +52,52 @@ class HardCaseFlags:
         return [k for k, v in vars(self).items() if v]
 
 
-def load_models_cfg(path: Path | None = None) -> dict:
-    return yaml.safe_load((path or REPO_ROOT / "config" / "models.yaml").read_text())
+def clamp_effort(effort: str | None) -> str:
+    """Never below the floor; unknown values fall back to the floor."""
+    if effort in EFFORT_ORDER and EFFORT_ORDER.index(effort) >= EFFORT_ORDER.index(EFFORT_FLOOR):
+        return effort
+    return EFFORT_FLOOR
+
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    out = dict(base)
+    for k, v in overlay.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def load_models_cfg(path: Path | None = None,
+                    overlay_path: Path | None = None) -> dict:
+    """config/models.yaml (tier-2, human base) deep-merged with the tier-1 overlay
+    config/models-auto.yaml where auto-shadow windows and auto-promotions live.
+    The overlay may add `models:` pins, override `tasks.<t>.model` and own the
+    whole `shadow:` block; it can never lower effort below the floor (clamped in
+    resolve())."""
+    base = yaml.safe_load((path or REPO_ROOT / "config" / "models.yaml").read_text())
+    op = overlay_path or (path.parent / "models-auto.yaml" if path else OVERLAY_PATH)
+    try:
+        overlay = yaml.safe_load(Path(op).read_text()) or {}
+    except OSError:
+        overlay = {}
+    return _deep_merge(base, overlay)
+
+
+def write_models_overlay(mutate_fn, overlay_path: Path | None = None) -> dict:
+    """Atomically read-modify-write config/models-auto.yaml (the ONLY file the
+    auto-shadow/auto-promotion machinery edits; models.yaml stays human-only)."""
+    from runs.common import atomic_write_text
+
+    op = Path(overlay_path or OVERLAY_PATH)
+    try:
+        current = yaml.safe_load(op.read_text()) or {}
+    except OSError:
+        current = {}
+    updated = mutate_fn(current) or current
+    atomic_write_text(op, yaml.safe_dump(updated, sort_keys=True))
+    return updated
 
 
 def compute_hardcase_flags(cfg: EarnConfig, jdb: sqlite3.Connection,
@@ -113,17 +165,27 @@ def compute_hardcase_flags(cfg: EarnConfig, jdb: sqlite3.Connection,
 
 
 def resolve(task: str, flags: HardCaseFlags | None = None,
-            models_cfg: dict | None = None) -> ModelChoice:
+            models_cfg: dict | None = None,
+            force_escalation: list[str] | None = None) -> ModelChoice:
     mc = models_cfg or load_models_cfg()
     t = mc["tasks"][task]
     models = mc["models"]
-    escalated = bool(task == "decide" and flags and flags.any() and t.get("escalation"))
+    reasons: list[str] = []
+    escalated = False
+    if task == "decide" and t.get("escalation"):
+        if force_escalation:
+            escalated = True
+            reasons += [f"trigger:{r}" for r in force_escalation]
+        if flags and flags.any():
+            escalated = True
+            reasons += flags.reasons()
     key = t["escalation"] if escalated else t["model"]
     return ModelChoice(
         task=task, model=models[key], escalated=escalated,
-        escalation_reasons=flags.reasons() if (escalated and flags) else [],
+        escalation_reasons=reasons,
         fallback=t.get("fallback"), retry=int(t.get("retry", 0)),
         max_usd=float(t["max_usd_per_run"]), max_turns=int(t["max_turns"]),
+        effort=clamp_effort(t.get("effort")),
     )
 
 
@@ -137,17 +199,43 @@ def month_spend(jdb: sqlite3.Connection, month: str, stage: str | None = None) -
 
 
 def throttle_state(jdb: sqlite3.Connection, models_cfg: dict | None = None,
-                   now: datetime | None = None) -> dict:
-    mc = models_cfg or load_models_cfg()
+                   now: datetime | None = None,
+                   kdb: sqlite3.Connection | None = None,
+                   degrade_at_utilization: float = 0.80) -> dict:
+    """Under the Claude Max subscription, USD spend is telemetry — degradation keys
+    on the persisted rate-limit signal (ops_state keys written by the runs from
+    RateLimitEvent frames). Decide runs are never blocked."""
+    del models_cfg  # kept in the signature for callers; USD caps no longer gate
     now = now or datetime.now(UTC)
     month = now.strftime("%Y-%m")
-    pct = mc["budget"]["throttle_at_pct"] / 100
     total = month_spend(jdb, month)
-    brief = month_spend(jdb, month, "brief")
-    throttled = (total >= pct * mc["budget"]["monthly_total_usd"]
-                 or brief >= pct * mc["tasks"]["brief"]["monthly_budget_usd"])
+
+    throttled = False
+    status = utilization = resets_at = None
+    if kdb is not None:
+        try:
+            rows = {r["key"]: r["value"] for r in kdb.execute(
+                "SELECT key, value FROM ops_state WHERE key IN"
+                " ('rate_limit_status','rate_limit_utilization','rate_limit_resets_at')")}
+            status = rows.get("rate_limit_status")
+            utilization = float(rows["rate_limit_utilization"]) \
+                if rows.get("rate_limit_utilization") else None
+            resets_at = rows.get("rate_limit_resets_at")
+            in_window = True
+            if resets_at:
+                try:
+                    in_window = datetime.fromisoformat(
+                        resets_at.replace("Z", "+00:00")) > now
+                except ValueError:
+                    in_window = True
+            throttled = in_window and (
+                status in ("allowed_warning", "rejected")
+                or (utilization is not None and utilization >= degrade_at_utilization))
+        except sqlite3.Error:
+            pass
     return {"brief_throttled": throttled, "decide_blocked": False,
-            "month_total_usd": total}
+            "month_total_usd": total, "rate_limit_status": status,
+            "rate_limit_utilization": utilization}
 
 
 def shadow_active(models_cfg: dict | None = None, today: date | None = None) -> str | None:

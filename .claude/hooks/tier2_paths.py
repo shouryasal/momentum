@@ -38,6 +38,7 @@ TIER2_PATTERNS = [
 TIER1_EXCEPTIONS = [
     "config/params-sleeve-a.json",
     "config/params-sleeve-b.json",
+    "config/models-auto.yaml",       # auto-shadow / auto-promotion overlay
 ]
 
 # Explicitly tier 0/1 (documentation aid; anything not tier-2 is writable by runs):

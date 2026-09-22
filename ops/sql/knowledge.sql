@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS news_items (
   cluster_id TEXT,
   corroborated INTEGER NOT NULL DEFAULT 0,
   corroborating_sources INTEGER NOT NULL DEFAULT 1,
-  classified_by TEXT                   -- 'rule' | model id
+  classified_by TEXT,                  -- 'rule' | model id
+  claim_verified INTEGER               -- deterministic %-move claim check vs candles; NULL = no checkable claim
 );
 CREATE INDEX IF NOT EXISTS idx_news_fetched ON news_items(fetched_at);
 CREATE INDEX IF NOT EXISTS idx_news_cluster ON news_items(cluster_id);
@@ -165,4 +166,29 @@ CREATE TABLE IF NOT EXISTS ops_incidents (
   kind TEXT NOT NULL,
   detail TEXT,
   resolved_at TEXT
+);
+
+-- Every trigger evaluation (fired or blocked) — the audit trail for event-driven
+-- decision runs (runs/triggers.py).
+CREATE TABLE IF NOT EXISTS trigger_events (
+  id INTEGER PRIMARY KEY,
+  ts_utc TEXT NOT NULL,
+  fired INTEGER NOT NULL,
+  reasons_json TEXT NOT NULL,          -- ["news:hack", "move_4h:BTC:-6.2", ...]
+  blocked_json TEXT,                   -- ["cooldown", "daily_cap", ...]
+  run_id TEXT,                         -- the fired research run's run_id
+  detail_json TEXT
+);
+
+-- Per-source news credibility, updated deterministically by the daily review:
+-- did this source's unconfirmed items later get corroborated or falsified?
+CREATE TABLE IF NOT EXISTS source_reliability (
+  source TEXT PRIMARY KEY,
+  n_unconfirmed INTEGER NOT NULL DEFAULT 0,
+  n_corroborated_later INTEGER NOT NULL DEFAULT 0,
+  n_falsified INTEGER NOT NULL DEFAULT 0,
+  n_claims_checked INTEGER NOT NULL DEFAULT 0,
+  n_claims_verified INTEGER NOT NULL DEFAULT 0,
+  score REAL NOT NULL DEFAULT 0.5,     -- Laplace-smoothed
+  updated_at TEXT
 );

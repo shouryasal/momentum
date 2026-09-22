@@ -1,6 +1,8 @@
-# Model routing (spec section 3a). The ONLY place model ID strings appear.
-# Tier 2 (human-only). runs/router.py resolves per task; escalation is explicit and
-# journaled — never a silent downgrade or upgrade.
+# Model routing (spec section 3a) — the human-pinned BASE. Tier 2 (human-only).
+# The tier-1 overlay config/models-auto.yaml (written by auto-shadow/auto-promotion)
+# deep-merges on top; runs/router.py resolves per task; escalation is explicit and
+# journaled — never a silent downgrade or upgrade. Reasoning effort floor is "high"
+# (clamped in code); decide/review run at "max".
 models:
   fable: claude-fable-5-1
   opus: claude-opus-5
@@ -9,19 +11,20 @@ models:
 
 tasks:
   decide:  { model: opus,   escalation: fable,       fallback: null,      retry: 1,
-             max_usd_per_run: 2.00, max_turns: 12, monthly_budget_usd: 60 }
+             effort: max,  max_usd_per_run: 4.00, max_turns: 12, monthly_budget_usd: 60 }
   brief:   { model: sonnet, escalation: null,        fallback: haiku_short, retry: 1,
-             max_usd_per_run: 0.50, max_turns: 10, monthly_budget_usd: 12 }
+             effort: high, max_usd_per_run: 1.00, max_turns: 10, monthly_budget_usd: 12 }
   flags:   { model: haiku,  escalation: null,        fallback: keep_last, retry: 1,
-             max_usd_per_run: 0.20, max_turns: 6,  monthly_budget_usd: 4 }
+             effort: high, max_usd_per_run: 0.40, max_turns: 6,  monthly_budget_usd: 4 }
   review:  { model: fable,  escalation: null,        fallback: opus,      retry: 0,
-             max_usd_per_run: 15.00, max_turns: 150, monthly_budget_usd: 70 }
+             effort: max,  max_usd_per_run: 25.00, max_turns: 150, monthly_budget_usd: 70 }
   classify: { model: haiku,  escalation: null,       fallback: rule,      retry: 0,
-              max_usd_per_run: 0.05, max_turns: 1,  monthly_budget_usd: 5 }
+              effort: high, max_usd_per_run: 0.20, max_turns: 1,  monthly_budget_usd: 5 }
 
-budget:
-  monthly_total_usd: 150
-  throttle_at_pct: 80        # 16:00 brief drops first; decide runs are NEVER skipped
+budget:                       # TELEMETRY under the Claude Max subscription —
+  monthly_total_usd: 150      # degradation keys on rate-limit signals, not USD;
+  throttle_at_pct: 80         # per-run max_usd stays as runaway-loop safety only.
+                              # 16:00 brief drops first; decide runs are NEVER skipped
 
 shadow:                       # 30-day shadow mode for promoting a new decision model
   enabled: false
