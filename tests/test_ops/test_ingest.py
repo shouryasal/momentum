@@ -184,3 +184,93 @@ def test_phase_isolation(ing, monkeypatch):
     statuses = {r["phase"]: r["status"] for r in kdb.execute("SELECT * FROM ingest_runs")}
     assert statuses["candles"] == "error"
     assert statuses["books"] == "ok"  # later phases still ran
+
+
+# ---------------------------------------------------------------- classifier
+
+from ops.config import REPO_ROOT  # noqa: E402
+from runs.decision_core import StageMeta, StageResult  # noqa: E402
+
+
+@pytest.fixture
+def classify_env(ing, monkeypatch):
+    ingest, _, kdb, root = ing
+    (root / "config" / "models.yaml").write_text(
+        (REPO_ROOT / "config" / "models.yaml").read_text())
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sub-token")
+    for var in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    return ingest, kdb, root
+
+
+def _seed_item(kdb, title, h):
+    kdb.execute(
+        "INSERT INTO news_items(url_hash, source, source_class, title, url,"
+        " fetched_at, classified_by) VALUES (?,?,?,?,?,?, 'rule')",
+        (h, "CoinDesk", "secondary", title, f"https://n/{h}",
+         NOW.strftime("%Y-%m-%dT%H:%M:%SZ")))
+    kdb.commit()
+
+
+def test_classifier_labels_and_corroborate_preserves(classify_env):
+    ingest, kdb, _ = classify_env
+    _seed_item(kdb, "Bitcoin exchange hacked", "kw1")           # keyword-labelable
+    _seed_item(kdb, "Validators offline across the network", "ml1")  # rules can't
+    calls = []
+
+    def runner(prompt, **kw):
+        calls.append((prompt, kw))
+        return StageResult(True, json.dumps({"labels": [
+            {"url_hash": "ml1", "event_class": "outage", "assets": ["ETH"]},
+            {"url_hash": "bogus", "event_class": "hack", "assets": []},     # unknown
+            {"url_hash": "kw1", "event_class": "nonsense", "assets": []},   # invalid
+        ]}), StageMeta(subtype="success"))
+
+    ingest.stage_runner = runner
+    ingest.classify_news()
+    assert len(calls) == 1
+    prompt, kw = calls[0]
+    assert "ml1" in prompt and "kw1" not in prompt  # only rule-unlabelable items sent
+    assert kw["model"] == "claude-haiku-4-5-20251001"
+    assert kw["effort"] == "high" and kw["max_turns"] == 1
+    r = kdb.execute("SELECT * FROM news_items WHERE url_hash='ml1'").fetchone()
+    assert r["event_class"] == "outage" and r["classified_by"] == "model"
+    assert json.loads(r["assets"]) == ["ETH"]
+    kw1 = kdb.execute("SELECT event_class FROM news_items WHERE url_hash='kw1'").fetchone()
+    assert kw1["event_class"] is None  # invalid model label discarded
+    # corroborate keeps the model label instead of re-deriving from keywords
+    ingest.corroborate()
+    r = kdb.execute("SELECT * FROM news_items WHERE url_hash='ml1'").fetchone()
+    assert r["event_class"] == "outage" and json.loads(r["assets"]) == ["ETH"]
+    # already-model-classified items are not re-sent
+    calls.clear()
+    ingest.classify_news()
+    assert not calls
+
+
+def test_classifier_failure_rule_labels_stand(classify_env):
+    ingest, kdb, _ = classify_env
+    _seed_item(kdb, "Something unclassifiable happens", "u1")
+    ingest.stage_runner = lambda prompt, **kw: StageResult(
+        False, None, StageMeta(error="refused"))
+    assert ingest._phase("classify", ingest.classify_news) is False  # isolated
+    r = kdb.execute("SELECT event_class, classified_by FROM news_items"
+                    " WHERE url_hash='u1'").fetchone()
+    assert r["event_class"] is None and r["classified_by"] == "rule"
+    status = kdb.execute("SELECT status FROM ingest_runs WHERE phase='classify'"
+                         ).fetchone()
+    assert status["status"] == "error"
+
+
+def test_classifier_gated_on_config_and_credential(classify_env, monkeypatch):
+    ingest, kdb, _ = classify_env
+    _seed_item(kdb, "Something unclassifiable happens", "g1")
+    calls = []
+    ingest.stage_runner = lambda prompt, **kw: calls.append(1)
+    ingest.cfg.news.classify.enabled = False
+    ingest.classify_news()
+    assert not calls
+    ingest.cfg.news.classify.enabled = True
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    ingest.classify_news()  # no credential -> silent skip
+    assert not calls

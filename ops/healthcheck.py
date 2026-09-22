@@ -33,6 +33,7 @@ RERUN_CMDS = {
     "nav_job": ("nav", "runs.nav_job"),
     "research_run": ("research", "runs.research_run"),
     "review_run": ("review", "runs.review_run"),
+    "maintenance": ("maintenance", "runs.maintenance"),
     "backup": ("backup", None),  # shell script, special-cased
 }
 
@@ -164,6 +165,11 @@ class Healthcheck:
         if kind == "report_file":
             week = fire_utc.astimezone(GULF).strftime("%G-W%V")
             return (self.root / "reports" / f"review-{week}.md").exists()
+        if kind == "maintenance_row":
+            row = self.jdb.execute(
+                "SELECT 1 FROM runs WHERE stage='maintenance' AND started_utc >= ?"
+                " LIMIT 1", (_iso(fire_utc),)).fetchone()
+            return row is not None
         if kind == "backup_file":
             stamp = self.root / "logs" / "backup.stamp"
             try:

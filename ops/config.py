@@ -217,6 +217,12 @@ class Backup(_Model):
     keep_weekly: int
 
 
+class MaintenanceCfg(_Model):
+    sdk_floor: str
+    sdk_ceiling: str
+    shadow_days: int = 30
+
+
 class Replay(_Model):
     days: int
     min_snapshots: int
@@ -285,6 +291,7 @@ class EarnConfig(_Model):
     telegram: Telegram
     ops: OpsCfg
     backup: Backup
+    maintenance: MaintenanceCfg
     review: Review
     models_config: str
     paths: Paths

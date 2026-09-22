@@ -131,11 +131,17 @@ ops:
     review_run:    { cron: "0 20 * * 0",    deadline_s: 5400, artifact: report_file }
     backtest_data: { cron: "0 18 * * 0",    deadline_s: 1800, artifact: none }
     backup:        { cron: "0 3 * * *",     deadline_s: 2700, artifact: backup_file }
+    maintenance:   { cron: "0 2 * * 1",     deadline_s: 3600, artifact: maintenance_row }
 
 backup:
   dest: /mnt/d/earn-backups        # a second physical disk (WSL2 mount) or adjust per machine
   keep_daily: 14
   keep_weekly: 8
+
+maintenance:                       # Monday 02:00 Gulf self-maintenance (runs/maintenance.py)
+  sdk_floor: "0.2.157"             # claude-agent-sdk auto-upgrade window: pip resolves
+  sdk_ceiling: "0.5"               # within [floor, ceiling); red tests -> exact rollback
+  shadow_days: 30                  # auto-shadow window for a newly detected model
 
 review:
   model: claude-fable-5-1

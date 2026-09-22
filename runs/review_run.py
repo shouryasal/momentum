@@ -8,12 +8,13 @@ Recurring-cause escalation: a root cause recurring 3 consecutive ISO weeks goes 
 the human with the evidence — a loop that keeps diagnosing the same thing is
 itself the fault (spec §7).
 
-Shadow promotion: when the 30-day shadow window closes, the deterministic
-postflight computes agreement/validity/process-grade stats and, if the shadow model
-qualifies, writes the recommendation into the report and alerts the human —
-config/models.yaml is tier-2, so the promotion itself is a human edit (recorded
-deviation from "promotion is a tier-1 change": the evidence pipeline is automated,
-the final apply is human).
+Shadow promotion (full autonomy, user-locked): when the 30-day shadow window
+closes, the deterministic postflight computes validity/agreement stats plus a
+zero-limit-violations gate (evals.metrics.violates_limits over every shadow
+proposal against its paired snapshot's limits). A qualifying shadow model is
+AUTO-PROMOTED through the tier-1 overlay config/models-auto.yaml — evidence in
+knowledge/promotions.jsonl, a change_log row, a git commit, and an alert.
+config/models.yaml (the human base) is never edited.
 """
 
 from __future__ import annotations
@@ -181,8 +182,12 @@ class ReviewRun:
             " WHERE p.shadow=0 AND p.valid=1").fetchall()
         if not pairs:
             return None
+        from evals import metrics as metricslib
+        from evals import snapshot as snapshotlib
+
         agree = 0
         valid = 0
+        limit_violations = 0
         for r in pairs:
             valid += bool(r["shadow_valid"])
             if r["shadow_valid"] and r["primary_t"] and r["shadow_t"]:
@@ -190,21 +195,63 @@ class ReviewRun:
                 same = (r["primary_m"] == r["shadow_m"] and all(
                     abs(pt.get(k, 0) - st.get(k, 0)) <= tol for k in set(pt) | set(st)))
                 agree += same
+                # zero-limit-violations gate against the paired snapshot's limits
+                try:
+                    snap = snapshotlib.read_snapshot(r["run_id"], root=self.root)
+                except snapshotlib.SnapshotError:
+                    continue  # no snapshot -> no evidence either way
+                if metricslib.violates_limits(st, snap.limits):
+                    limit_violations += 1
         n = len(pairs)
         started = datetime.fromisoformat(str(sh["started"])).replace(tzinfo=UTC)
         window_done = (self.now - started).days >= int(sh.get("days", 30))
         stats = {"model": mc["models"].get(sh["model"], sh["model"]), "n": n,
                  "validity_rate": valid / n, "agreement_rate": agree / n,
-                 "window_done": window_done}
-        if window_done and stats["validity_rate"] >= 0.95 and stats["agreement_rate"] >= 0.8:
+                 "limit_violations": limit_violations, "window_done": window_done}
+        if (window_done and stats["validity_rate"] >= 0.95
+                and stats["agreement_rate"] >= 0.8 and limit_violations == 0):
             stats["recommendation"] = "PROMOTE"
-            self.alert(f"shadow window complete: {stats['model']} qualifies for"
-                       f" promotion (validity {stats['validity_rate']:.0%}, agreement"
-                       f" {stats['agreement_rate']:.0%}). models.yaml is tier-2 —"
-                       f" apply by hand, then disable shadow.", "warn")
+            self._promote_shadow(mc, sh, stats)
         else:
             stats["recommendation"] = "continue" if not window_done else "DO NOT PROMOTE"
         return stats
+
+    def _promote_shadow(self, mc: dict, sh: dict, stats: dict) -> None:
+        """Full autonomy: the qualifying shadow becomes the decide model through
+        the tier-1 overlay — evidence log, change_log row, git commit, alert."""
+        key = sh["model"]
+        model_id = mc["models"].get(key, key)
+
+        def mutate(cur: dict) -> dict:
+            cur.setdefault("models", {})[key] = model_id
+            cur.setdefault("tasks", {}).setdefault("decide", {})["model"] = key
+            cur["shadow"] = {"enabled": False, "model": None, "started": None}
+            return cur
+
+        router.write_models_overlay(
+            mutate, overlay_path=self.root / "config" / "models-auto.yaml")
+        plog = self.root / "knowledge" / "promotions.jsonl"
+        plog.parent.mkdir(parents=True, exist_ok=True)
+        with plog.open("a") as f:
+            f.write(json.dumps({"promoted_at": utc_iso(self.now),
+                                "model": model_id, "evidence": stats}) + "\n")
+        self.git("add", "config/models-auto.yaml")
+        self.git("commit", "-m", f"auto-promote: decide model -> {model_id}"
+                                 f" after clean shadow window")
+        sha = (self.git("rev-parse", "HEAD").stdout or "").strip() or None
+        self.jdb.execute(
+            "INSERT OR REPLACE INTO change_log(change_id, proposed_at, kind, target,"
+            " status, author_model, decided_at, decided_by, reason, merge_commit)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"promote-{self.week}-{key}", utc_iso(self.now), "model",
+             "config/models-auto.yaml", "auto_merged", "code:grade_shadow",
+             utc_iso(self.now), "grade_shadow", json.dumps(stats), sha))
+        self.jdb.commit()
+        self.alert(f"shadow PROMOTED: decide model is now {model_id}"
+                   f" (validity {stats['validity_rate']:.0%}, agreement"
+                   f" {stats['agreement_rate']:.0%}, limit violations 0,"
+                   f" n={stats['n']}). Revert: git revert the overlay commit.",
+                   "warn")
 
     def refresh_fewshot(self) -> bool:
         """First review of the calendar month: 2 best + 2 worst graded decisions

@@ -1,6 +1,8 @@
 """15-minute ingest: incremental candles (incl. BNB/USDT data-only), order-book
 snapshots, funding + open interest, whitelisted news RSS with the two-source
-corroboration rule, and the deterministic macro-blackout flag.
+corroboration rule, the Haiku classifier for items the keyword rules can't label
+(config- and credential-gated; a classifier failure means the rule labels stand —
+it never escalates), and the deterministic macro-blackout flag.
 
 Phases run independently — one failing never skips the rest; each writes an
 ingest_runs row. Everything is idempotent (INSERT OR REPLACE / OR IGNORE keyed on
@@ -42,6 +44,23 @@ EVENT_KEYWORDS = {
 }
 ASSET_KEYWORDS = {"BTC": ["bitcoin", "btc"], "ETH": ["ethereum", "eth ", "ether "]}
 
+CLASSIFY_SCHEMA = {
+    "type": "object",
+    "properties": {"labels": {"type": "array", "items": {
+        "type": "object",
+        "properties": {
+            "url_hash": {"type": "string"},
+            "event_class": {"type": ["string", "null"],
+                            "enum": [*EVENT_KEYWORDS, None]},
+            "assets": {"type": "array", "items": {"enum": ["BTC", "ETH"]}},
+        },
+        "required": ["url_hash", "event_class", "assets"],
+        "additionalProperties": False,
+    }}},
+    "required": ["labels"],
+    "additionalProperties": False,
+}
+
 
 def sym(pair: str) -> str:
     return pair.replace("/", "")
@@ -54,12 +73,13 @@ def now_iso(now: datetime) -> str:
 class Ingest:
     def __init__(self, cfg: EarnConfig, kdb: sqlite3.Connection,
                  http: httpx.Client | None = None, now: datetime | None = None,
-                 root: Path | None = None):
+                 root: Path | None = None, stage_runner=None):
         self.cfg = cfg
         self.kdb = kdb
         self.http = http or httpx.Client(timeout=10)
         self.now = now or datetime.now(UTC)
         self.root = root or REPO_ROOT
+        self.stage_runner = stage_runner  # None -> decision_core.run_stage, lazily
 
     # ------------------------------------------------------------------ helpers
 
@@ -224,18 +244,83 @@ class Ingest:
             )
         self.kdb.commit()
 
+    def classify_news(self) -> None:
+        """Haiku labels the items the keyword rules can't (spec: the classifier
+        never escalates — any failure leaves the rule labels standing)."""
+        if not self.cfg.news.classify.enabled:
+            return
+        from ops.lib import claude_auth
+
+        if claude_auth.resolve().source == "none":
+            return
+        since = now_iso(self.now - timedelta(hours=24))
+        rows = self.kdb.execute(
+            "SELECT url_hash, title FROM news_items WHERE fetched_at >= ?"
+            " AND classified_by='rule' AND event_class IS NULL", (since,)).fetchall()
+        pending = []
+        for r in rows:
+            title_l = r["title"].lower()
+            if any(k in title_l for kws in EVENT_KEYWORDS.values() for k in kws):
+                continue  # the keyword rule will label it in corroborate
+            pending.append({"url_hash": r["url_hash"], "title": r["title"]})
+        if not pending:
+            return
+        pending = pending[:25]
+        from runs import router
+
+        choice = router.resolve("classify",
+                                models_cfg=router.load_models_cfg(
+                                    self.root / "config" / "models.yaml"))
+        runner = self.stage_runner
+        if runner is None:
+            from runs import decision_core
+
+            runner = decision_core.run_stage
+        prompt = (
+            "Label each crypto news headline. event_class must be one of "
+            f"{sorted(EVENT_KEYWORDS)} or null when none applies; assets is the "
+            "subset of [\"BTC\", \"ETH\"] the headline is about (often empty). "
+            "Use ONLY the headline text — no outside knowledge of the story. "
+            "Return JSON {\"labels\": [{url_hash, event_class, assets}, ...]} "
+            "covering every input item.\n\nItems:\n" + json.dumps(pending))
+        res = runner(prompt, model=choice.model, max_turns=1,
+                     max_usd=choice.max_usd, effort=choice.effort,
+                     allowed_tools=[], output_schema=CLASSIFY_SCHEMA,
+                     deadline_s=120)
+        if not res.ok or not res.text:
+            raise RuntimeError(f"classifier failed: {res.meta.error}")
+        parsed = json.loads(res.text)
+        labels = parsed.get("labels", []) if isinstance(parsed, dict) else parsed
+        valid_hashes = {p["url_hash"] for p in pending}
+        for item in labels:
+            h = item.get("url_hash")
+            ev = item.get("event_class")
+            if h not in valid_hashes or (ev is not None and ev not in EVENT_KEYWORDS):
+                continue
+            assets = sorted(a for a in (item.get("assets") or []) if a in ASSET_KEYWORDS)
+            self.kdb.execute(
+                "UPDATE news_items SET event_class=?, assets=?, classified_by='model'"
+                " WHERE url_hash=?", (ev, json.dumps(assets), h))
+        self.kdb.commit()
+
     def corroborate(self) -> None:
         since = now_iso(self.now - timedelta(hours=24))
         rows = self.kdb.execute(
-            "SELECT id, url_hash, source, source_class, title, published_at, fetched_at"
+            "SELECT id, url_hash, source, source_class, title, published_at,"
+            " fetched_at, event_class, classified_by, assets AS assets_json"
             " FROM news_items WHERE fetched_at >= ?", (since,)).fetchall()
         items = []
         for r in rows:
             title_l = r["title"].lower()
-            assets = sorted(a for a, kws in ASSET_KEYWORDS.items()
-                            if any(k in title_l for k in kws))
-            event = next((ev for ev, kws in EVENT_KEYWORDS.items()
-                          if any(k in title_l for k in kws)), None)
+            if r["classified_by"] == "model" and r["event_class"]:
+                # the Haiku label stands — keywords could not classify this item
+                assets = sorted(json.loads(r["assets_json"] or "[]"))
+                event = r["event_class"]
+            else:
+                assets = sorted(a for a, kws in ASSET_KEYWORDS.items()
+                                if any(k in title_l for k in kws))
+                event = next((ev for ev, kws in EVENT_KEYWORDS.items()
+                              if any(k in title_l for k in kws)), None)
             ts = r["published_at"] or r["fetched_at"]
             bucket = ts[:11] + ("00" if ts[11:13] < "12" else "12")
             tokens = frozenset(re.findall(r"[a-z]{4,}", title_l))
@@ -315,6 +400,7 @@ class Ingest:
                          ("books", self.snapshot_books),
                          ("funding", self.refresh_funding),
                          ("news", self.pull_news),
+                         ("classify", self.classify_news),
                          ("corroborate", self.corroborate),
                          ("macro", self.update_macro_blackout)):
             ok = self._phase(name, fn) and ok

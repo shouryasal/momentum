@@ -154,6 +154,7 @@ def test_crontab_matches_earn_yaml_schedules(cfg):
         "ops.healthcheck": "healthcheck", "runs.research_run": "research_run",
         "runs.review_run": "review_run", "ops/backup.sh": "backup",
         "refresh_backtest_data.sh": "backtest_data",
+        "runs.maintenance": "maintenance",
     }
     seen = {}
     for line in lines:

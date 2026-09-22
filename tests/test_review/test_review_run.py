@@ -122,28 +122,73 @@ def test_recurring_cause_escalates_after_3_weeks(env):
     assert rr.check_recurring_causes() == []
 
 
-def test_shadow_verdict_and_promotion_alert(env):
-    cfg, root, jdb, kdb, alerts = env
+def _seed_shadow(root, jdb, n=10, extra=()):
     mc = yaml.safe_load((root / "config" / "models.yaml").read_text())
     mc["shadow"].update({"enabled": True, "model": "sonnet",
                          "started": "2026-08-01", "days": 30})
     (root / "config" / "models.yaml").write_text(yaml.safe_dump(mc))
     targets = json.dumps({"BTC": 0.4, "ETH": 0.25, "USDT": 0.35})
-    for i in range(10):
-        rid = f"2026-09-{10 + i:02d}T08:30+04:00"
+    rows = [(f"2026-09-{10 + i:02d}T08:30+04:00",
+             f"2026-09-{10 + i:02d}T04:30:00Z", targets) for i in range(n)]
+    for rid, ts, tj in [*rows, *extra]:
         for shadow in (0, 1):
             jdb.execute("INSERT INTO proposals(run_id, shadow, ts_utc, valid, module,"
                         " targets_json, model) VALUES (?,?,?,1,'trend',?,?)",
-                        (rid, shadow, f"2026-09-{10 + i:02d}T04:30:00Z", targets,
+                        (rid, shadow, ts, tj,
                          "claude-sonnet-5" if shadow else "claude-opus-5"))
     jdb.commit()
+
+
+def test_shadow_auto_promotion(env):
+    cfg, root, jdb, kdb, alerts = env
+    _seed_shadow(root, jdb)
     rr = ReviewRun(cfg, jdb, kdb, root=root, now=NOW,
                    session_runner=session_ok(root=root, jdb=jdb),
                    alert=lambda t, s="info": alerts.append((s, t)))
     stats = rr.grade_shadow()
     assert stats["agreement_rate"] == 1.0 and stats["window_done"]
+    assert stats["limit_violations"] == 0
     assert stats["recommendation"] == "PROMOTE"
-    assert any("promotion" in t for _, t in alerts)
+    # full autonomy: the overlay now routes decide to the promoted model
+    ov = yaml.safe_load((root / "config" / "models-auto.yaml").read_text())
+    assert ov["tasks"]["decide"]["model"] == "sonnet"
+    assert ov["shadow"]["enabled"] is False
+    from runs import router
+    mc2 = router.load_models_cfg(root / "config" / "models.yaml")
+    assert router.resolve("decide", models_cfg=mc2).model == "claude-sonnet-5"
+    row = jdb.execute("SELECT * FROM change_log WHERE kind='model'").fetchone()
+    assert row["status"] == "auto_merged" and row["merge_commit"]
+    plog = (root / "knowledge" / "promotions.jsonl").read_text()
+    assert "claude-sonnet-5" in plog
+    assert any("PROMOTED" in t for _, t in alerts)
+    log = subprocess.run(["git", "log", "--oneline"], cwd=root,
+                         capture_output=True, text=True).stdout
+    assert "auto-promote" in log
+
+
+def test_shadow_limit_violation_blocks_promotion(env):
+    cfg, root, jdb, kdb, alerts = env
+    from evals.snapshot import SnapshotMeta, write_snapshot
+
+    rid_bad = "2026-09-21T08:30+04:00"
+    bad = json.dumps({"BTC": 0.6, "ETH": 0.2, "USDT": 0.2})  # BTC over its cap
+    _seed_shadow(root, jdb, extra=[(rid_bad, "2026-09-21T04:30:00Z", bad)])
+    write_snapshot(rid_bad, inputs={},
+                   limits="max_weight: {BTC: 0.40, default: 0.30}\n"
+                          "max_gross_exposure: 0.80\nusdt_floor: 0.20\n",
+                   fewshot="", rendered_prompt="",
+                   meta=SnapshotMeta(run_id=rid_bad, created_at="x",
+                                     prompt_version="v1", model="m",
+                                     git_commit="c", token_budget=0),
+                   root=root)
+    rr = ReviewRun(cfg, jdb, kdb, root=root, now=NOW,
+                   session_runner=session_ok(root=root, jdb=jdb),
+                   alert=lambda t, s="info": alerts.append((s, t)))
+    stats = rr.grade_shadow()
+    assert stats["limit_violations"] == 1 and stats["window_done"]
+    assert stats["recommendation"] == "DO NOT PROMOTE"
+    assert not (root / "config" / "models-auto.yaml").exists()
+    assert not any("PROMOTED" in t for _, t in alerts)
 
 
 def test_fewshot_refresh_monthly(env):
