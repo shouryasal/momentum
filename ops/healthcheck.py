@@ -34,6 +34,7 @@ RERUN_CMDS = {
     "research_run": ("research", "runs.research_run"),
     "review_run": ("review", "runs.review_run"),
     "maintenance": ("maintenance", "runs.maintenance"),
+    "daily_review": ("daily_review", "runs.daily_review"),
     "backup": ("backup", None),  # shell script, special-cased
 }
 
@@ -165,6 +166,9 @@ class Healthcheck:
         if kind == "report_file":
             week = fire_utc.astimezone(GULF).strftime("%G-W%V")
             return (self.root / "reports" / f"review-{week}.md").exists()
+        if kind == "daily_report":
+            day = (fire_utc.astimezone(GULF) - timedelta(days=1)).strftime("%Y-%m-%d")
+            return (self.root / "reports" / "daily" / f"{day}.md").exists()
         if kind == "maintenance_row":
             row = self.jdb.execute(
                 "SELECT 1 FROM runs WHERE stage='maintenance' AND started_utc >= ?"

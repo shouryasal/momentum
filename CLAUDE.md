@@ -21,8 +21,8 @@ drawdowns and discipline, not fast gains.
 | Tier | Who | Paths |
 |---|---|---|
 | 0 — free | Claude, every run | `knowledge/**`, `lessons.md` (append-only, dated), briefs, its own notes |
-| 1 — gated | Claude, via `changes/*.json` + `runs/apply_changes.py` | `config/params-sleeve-{a,b}.json` (inside `bounds:` from earn.yaml), `prompts/**`, skill bodies of `decide`, `strategy-lab`, `market-state` |
-| 2 — human only | Shourya, normal Claude Code session with tests | `config/**` (except params files), `strategies/**`, `runs/**`, `evals/**`, `ops/**`, `schemas/**`, `tests/**`, `.env*`, `.claude/settings.json`, `.claude/hooks/**`, skills `tca`, `risk-gate`, `ops-runbook` |
+| 1 — gated | Claude, via `changes/*.json` + `runs/apply_changes.py` | `config/params-sleeve-{a,b}.json` (inside `bounds:` from earn.yaml), `config/models-auto.yaml` (auto-shadow/promotion overlay), `prompts/**`, every skill body EXCEPT `ops-runbook` (incl. `tca` and `risk-gate` bodies; their `scripts/**` stay tier 2) |
+| 2 — human only | Shourya, normal Claude Code session with tests | `config/**` (except params files + models overlay), `strategies/**`, `runs/**`, `evals/**`, `ops/**`, `schemas/**`, `tests/**`, `.env*`, `.claude/settings.json`, `.claude/hooks/**`, `tca`/`risk-gate` `scripts/**`, skill `ops-runbook` |
 
 The PreToolUse hook (`.claude/hooks/protect_tier2.py`) enforces tier 2 in automated runs
 (`EARN_AUTOMATED_RUN=1`); `runs/apply_changes.py` refuses to merge any commit touching a
@@ -57,9 +57,14 @@ tier-2 path. The pattern list lives in `.claude/hooks/tier2_paths.py` — the on
 
 ## Secrets
 
-Never read `.env`, never echo keys. Research and review runs carry only
-`ANTHROPIC_API_KEY` by construction (`ops/envwrap.sh` allowlists per job). Binance keys
-never appear in prompts, logs, journal rows or chat.
+Never read `.env`, never echo keys. Model-facing runs (research, review,
+daily_review, maintenance, ingest's classifier) carry only a Claude credential by
+construction (`ops/envwrap.sh` allowlists per job): the Claude Max subscription
+token `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) first, with
+`ANTHROPIC_API_KEY` as fallback — envwrap strips the API key whenever the
+subscription token exists, because a present API key would preempt subscription
+auth in headless runs. Binance keys never appear in prompts, logs, journal rows
+or chat.
 
 ## How to verify
 

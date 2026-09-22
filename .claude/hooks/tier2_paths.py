@@ -24,8 +24,13 @@ TIER2_PATTERNS = [
     "ft_userdata/**",
     ".claude/settings.json",
     ".claude/hooks/**",
-    ".claude/skills/tca/**",
-    ".claude/skills/risk-gate/**",
+    # tca / risk-gate skill BODIES moved to tier 1 (WP5, user-approved plan:
+    # every skill self-improvable through the apply_changes gates except the
+    # incident runbook). Their deterministic scripts and tests stay tier 2.
+    ".claude/skills/tca/scripts/**",
+    ".claude/skills/tca/tests/**",
+    ".claude/skills/risk-gate/scripts/**",
+    ".claude/skills/risk-gate/tests/**",
     ".claude/skills/ops-runbook/**",
     ".gitignore",
     "pyproject.toml",
@@ -44,7 +49,8 @@ TIER1_EXCEPTIONS = [
 # Explicitly tier 0/1 (documentation aid; anything not tier-2 is writable by runs):
 #   knowledge/**, lessons.md, lessons-archive.md, changes/**, reports/**, prompts/**,
 #   proposals/**, .claude/skills/{decide,strategy-lab,market-state,crypto-brief,
-#   reg-watch,post-mortem}/**
+#   reg-watch,post-mortem,asset-dossier}/**, and the SKILL.md bodies of tca and
+#   risk-gate
 
 WRITE_TOKENS = (">", ">>", "tee ", "mv ", "cp ", "sed -i", "rm ", "truncate",
                 "git checkout --", "git restore", "chmod", "ln ")

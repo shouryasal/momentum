@@ -54,12 +54,19 @@ def build_pack(jdb, week_start: datetime, week_end: datetime) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--week-end", help="YYYY-MM-DD (default: today)")
+    ap.add_argument("--day", help="grade ONE Gulf day (YYYY-MM-DD) instead of a week")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     cfg = load_config()
-    end = (datetime.strptime(args.week_end, "%Y-%m-%d").replace(tzinfo=UTC)
-           if args.week_end else datetime.now(UTC))
-    start = end - timedelta(days=7)
+    if args.day:
+        # Gulf day D = [D 00:00+04, D+1 00:00+04) = [D-1 20:00Z, D 20:00Z)
+        start = (datetime.strptime(args.day, "%Y-%m-%d").replace(tzinfo=UTC)
+                 - timedelta(hours=4))
+        end = start + timedelta(days=1)
+    else:
+        end = (datetime.strptime(args.week_end, "%Y-%m-%d").replace(tzinfo=UTC)
+               if args.week_end else datetime.now(UTC))
+        start = end - timedelta(days=7)
     with db.connect(REPO_ROOT / cfg.paths.journal_db, readonly=True) as jdb:
         pack = build_pack(jdb, start, end)
     out = json.dumps(pack, indent=2)

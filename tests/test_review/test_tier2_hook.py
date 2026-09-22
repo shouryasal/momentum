@@ -28,7 +28,8 @@ TIER2_SAMPLES = [
     "config/earn.yaml", "strategies/riskgate.py", "runs/apply_changes.py",
     "ops/healthcheck.py", "schemas/proposal.json", "tests/test_foundation/x.py",
     ".env", ".env.local", ".claude/settings.json", ".claude/hooks/protect_tier2.py",
-    ".claude/skills/tca/SKILL.md", ".claude/skills/risk-gate/scripts/risk_report.py",
+    ".claude/skills/tca/scripts/report.py", ".claude/skills/tca/tests/test_x.py",
+    ".claude/skills/risk-gate/scripts/risk_report.py",
     ".claude/skills/ops-runbook/SKILL.md", "pyproject.toml", ".gitignore",
     "evals/replay.py", "journal/journal.db", "CLAUDE.md",
 ]
@@ -40,6 +41,8 @@ WRITABLE_SAMPLES = [
     ".claude/skills/decide/SKILL.md", ".claude/skills/strategy-lab/SKILL.md",
     ".claude/skills/post-mortem/scripts/x.py", "reports/review-2026-W39.md",
     "proposals/2026-09-22-0830.json",
+    # WP5 tier widening: the BODIES self-improve through the gates now
+    ".claude/skills/tca/SKILL.md", ".claude/skills/risk-gate/SKILL.md",
 ]
 
 

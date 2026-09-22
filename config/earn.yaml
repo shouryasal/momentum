@@ -132,6 +132,7 @@ ops:
     backtest_data: { cron: "0 18 * * 0",    deadline_s: 1800, artifact: none }
     backup:        { cron: "0 3 * * *",     deadline_s: 2700, artifact: backup_file }
     maintenance:   { cron: "0 2 * * 1",     deadline_s: 3600, artifact: maintenance_row }
+    daily_review:  { cron: "30 21 * * *",   deadline_s: 2700, artifact: daily_report }
 
 backup:
   dest: /mnt/d/earn-backups        # a second physical disk (WSL2 mount) or adjust per machine
@@ -150,6 +151,13 @@ triggers:                          # event-driven decision runs (runs/triggers.p
   news_events: [hack, depeg, delist, lawsuit, outage]   # corroborated only
   move_4h_pct: 5.0                 # |last closed 4h candle move| above this fires
   funding_abs_8h: 0.0010           # |current funding rate| above this fires
+
+daily_review:                      # nightly learning loop (runs/daily_review.py, 21:30 Gulf)
+  model: claude-fable-5-1          # grades the PREVIOUS Gulf day at max effort
+  fallback_model: claude-opus-5    # explicit rerun; fallback-authored changes are HELD
+  max_turns: 40
+  max_budget_usd: 8.0              # runaway-loop safety (telemetry mode)
+  wrong_process_below: 70          # process grade below this = wrong decision -> trace report
 
 review:
   model: claude-fable-5-1

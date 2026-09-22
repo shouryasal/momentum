@@ -254,6 +254,14 @@ class Fewshot(_Model):
     refresh: str
 
 
+class DailyReviewCfg(_Model):
+    model: str
+    fallback_model: str
+    max_turns: int
+    max_budget_usd: float
+    wrong_process_below: int
+
+
 class Review(_Model):
     model: str
     fallback_model: str
@@ -302,6 +310,7 @@ class EarnConfig(_Model):
     backup: Backup
     maintenance: MaintenanceCfg
     triggers: Triggers
+    daily_review: DailyReviewCfg
     review: Review
     models_config: str
     paths: Paths

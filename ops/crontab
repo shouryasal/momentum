@@ -18,3 +18,4 @@ E=/home/user/momentum
 0 18 * * 0    flock -n $E/ops/locks/cron-dldata.lock   timeout -k 30 1800 bash $E/ops/envwrap.sh ingest      -- bash $E/ops/refresh_backtest_data.sh     >> $E/logs/dldata.log 2>&1
 0 3 * * *     flock -n $E/ops/locks/cron-backup.lock   timeout -k 30 2700 bash $E/ops/envwrap.sh backup      -- bash $E/ops/backup.sh                    >> $E/logs/backup.log 2>&1
 0 2 * * 1     flock -n $E/ops/locks/cron-maint.lock    timeout -k 30 3600 bash $E/ops/envwrap.sh maintenance -- $E/.venv/bin/python -m runs.maintenance  >> $E/logs/maintenance.log 2>&1
+30 21 * * *   flock -n $E/ops/locks/cron-daily.lock    timeout -k 30 2700 bash $E/ops/envwrap.sh daily_review -- $E/.venv/bin/python -m runs.daily_review >> $E/logs/daily_review.log 2>&1
