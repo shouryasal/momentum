@@ -1,6 +1,5 @@
 """walk_forward window math + zip parsing, g2 evaluation, benchmark rows, excel view."""
 
-import io
 import json
 import zipfile
 from datetime import date
@@ -17,7 +16,7 @@ class TestWalkForward:
         assert w[0] == ("20220101", "20220701")
         assert w[-1][1] == "20240115"
         # contiguous
-        for (s1, e1), (s2, e2) in zip(w, w[1:]):
+        for (_s1, e1), (s2, _e2) in zip(w, w[1:], strict=False):
             assert e1 == s2
 
     def test_parse_backtest_zip(self, tmp_path):

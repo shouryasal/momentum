@@ -56,7 +56,9 @@ def _raw():
 def test_unknown_key_rejected():
     raw = _raw()
     raw["surprise"] = 1
-    with pytest.raises(Exception):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
         EarnConfig.model_validate(raw)
 
 

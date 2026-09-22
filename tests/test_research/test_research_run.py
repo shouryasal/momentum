@@ -4,7 +4,6 @@ env guard; escalation journaled; shadow rows; brief fallback + throttle."""
 
 import json
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
 

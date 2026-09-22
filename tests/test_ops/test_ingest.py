@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from ops.lib import flags as flagslib
-from runs.ingest import Ingest, sym
+from runs.ingest import Ingest
 
 from .conftest import NOW
 

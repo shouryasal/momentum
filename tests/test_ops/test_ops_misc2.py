@@ -1,6 +1,5 @@
 """nav_job math, telegram handlers + auth, backup round-trip, crontab consistency."""
 
-import subprocess
 from datetime import timedelta
 
 import pytest

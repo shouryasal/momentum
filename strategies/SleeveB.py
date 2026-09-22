@@ -14,16 +14,16 @@ from freqtrade.strategy import informative
 from pandas import DataFrame
 
 try:
-    from strategies.earn_base import EarnBaseStrategy
-    from strategies import sleeve_common as sc
     from strategies import _journal
     from strategies import proposal_loader as pl
+    from strategies import sleeve_common as sc
+    from strategies.earn_base import EarnBaseStrategy
     from strategies.riskgate import PortfolioState
 except ImportError:  # in-container flat layout
-    from earn_base import EarnBaseStrategy
-    import sleeve_common as sc
     import _journal
     import proposal_loader as pl
+    import sleeve_common as sc
+    from earn_base import EarnBaseStrategy
     from riskgate import PortfolioState
 
 

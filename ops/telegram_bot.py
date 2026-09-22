@@ -113,8 +113,7 @@ def cmd_approval(jdb, kind: str, ref: str, decision: str, user_id: int) -> str:
 
 def run_bot() -> int:  # pragma: no cover — needs a live token; logic is tested above
     from telegram import Update
-    from telegram.ext import (Application, CommandHandler, ContextTypes,
-                              MessageHandler, filters)
+    from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
     cfg = load_config()
     apis = {s: BotApi.for_sleeve(cfg, s) for s in ("a", "b")}

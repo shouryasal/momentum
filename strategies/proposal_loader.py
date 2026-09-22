@@ -74,7 +74,7 @@ def validate_structural(raw: dict, assets: list[str], sum_tolerance: float) -> l
         total = sum(float(v) for v in targets.values() if isinstance(v, (int, float)))
         if abs(total - 1.0) > sum_tolerance:
             errors.append(f"targets sum {total:.4f} != 1 +/- {sum_tolerance}")
-    for field, typ in (("exposure_scale", float), ("confidence", float)):
+    for field in ("exposure_scale", "confidence"):
         v = raw[field]
         if not isinstance(v, (int, float)) or not (0.0 <= float(v) <= 1.0):
             errors.append(f"{field} out of [0,1]")

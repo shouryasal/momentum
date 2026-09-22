@@ -18,16 +18,22 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from evals import snapshot as snapshotlib
 from ops import db
 from ops.config import REPO_ROOT, EarnConfig, load_config
 from ops.lib import kill as killlib
 from ops.lib import locks, tg
 from runs import build_prompt, decision_core, router
-from runs.common import (atomic_write_json, guard_env, nearest_slot,
-                         proposal_filename, run_id_for, utc_iso)
+from runs.common import (
+    atomic_write_json,
+    guard_env,
+    nearest_slot,
+    proposal_filename,
+    run_id_for,
+    utc_iso,
+)
 from schemas.flags import FLAG_LIST_SCHEMA, apply_reg_flags, parse_reg_flags
 from schemas.proposal import ProposalInvalid, json_schema, validate_proposal
-from evals import snapshot as snapshotlib
 
 FLAGS_PROMPT = """Run the reg-watch procedure (the reg-watch skill): scan the last 7
 days of regulator and exchange notices in the news archive for delistings,
@@ -122,7 +128,7 @@ class ResearchRun:
     def stage_flags(self) -> None:
         choice = router.resolve("flags", models_cfg=self.models_cfg)
         skill_bash = "Bash(python3 .claude/skills/reg-watch/scripts/*)"
-        for attempt in range(1 + choice.retry):
+        for _attempt in range(1 + choice.retry):
             res = self.stage_runner(
                 FLAGS_PROMPT, model=choice.model, max_turns=choice.max_turns,
                 max_usd=choice.max_usd, cwd=self.root,
@@ -210,7 +216,7 @@ class ResearchRun:
             pass  # retry of a failed run: snapshot already exists
 
         prop = None
-        for attempt in range(1 + choice.retry):
+        for _attempt in range(1 + choice.retry):
             prop, res = self._decide_once(choice, bp)
             if prop is not None or res.meta.subtype == "error_max_budget_usd":
                 break

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Weekly grading output (post-mortem skill -> write_grades.py)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["review_week", "grades", "root_causes"],
+  "properties": {
+    "review_week": { "type": "string", "pattern": "^\\d{4}-W\\d{2}$" },
+    "grades": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["run_id", "process_grade", "rubric"],
+        "properties": {
+          "run_id": { "type": "string" },
+          "process_grade": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "rubric": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["thesis_consistent", "invalidation_stated_respected",
+                         "checklist_completed", "flags_honored", "abstain_when_stale",
+                         "lessons_applied"],
+            "properties": {
+              "thesis_consistent": { "type": "boolean" },
+              "invalidation_stated_respected": { "type": "boolean" },
+              "checklist_completed": { "type": "boolean" },
+              "flags_honored": { "type": "boolean" },
+              "abstain_when_stale": { "type": "boolean" },
+              "lessons_applied": { "type": "boolean" }
+            }
+          },
+          "note": { "type": "string", "maxLength": 300 }
+        }
+      }
+    },
+    "root_causes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event_id", "kind", "cause", "recurrence_key", "fix_path",
+                     "learn_eligible", "eligibility_rule", "evidence"],
+        "properties": {
+          "event_id": { "type": "string" },
+          "kind": { "enum": ["losing_week", "gate_rejection", "missed_run",
+                             "invalid_proposal", "incident"] },
+          "ref": { "type": "string" },
+          "cause": { "enum": ["data", "execution", "ops", "reasoning", "strategy", "noise"] },
+          "recurrence_key": { "type": "string", "pattern": "^[a-z0-9-]{3,64}$" },
+          "fix_path": { "type": "string" },
+          "learn_eligible": { "type": "boolean" },
+          "eligibility_rule": { "type": "string" },
+          "evidence": { "type": "object" }
+        }
+      }
+    }
+  }
+}

@@ -8,7 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ops.config import REPO_ROOT, EarnConfig, load_config

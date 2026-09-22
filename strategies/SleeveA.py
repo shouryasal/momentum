@@ -11,12 +11,12 @@ from freqtrade.strategy import informative
 from pandas import DataFrame
 
 try:
-    from strategies.earn_base import EarnBaseStrategy
     from strategies import sleeve_common as sc
+    from strategies.earn_base import EarnBaseStrategy
     from strategies.riskgate import PortfolioState
 except ImportError:  # in-container flat layout
-    from earn_base import EarnBaseStrategy
     import sleeve_common as sc
+    from earn_base import EarnBaseStrategy
     from riskgate import PortfolioState
 
 
@@ -99,7 +99,6 @@ class SleeveA(EarnBaseStrategy):
                               min_stake, max_stake, current_entry_rate, current_exit_rate,
                               current_entry_profit, current_exit_profit, **kwargs):
         pair = trade.pair
-        now = current_time if current_time.tzinfo else current_time.replace(tzinfo=None)
         ps = self._portfolio_state(current_time)
         target_w = self._target_weight(pair)
         if target_w <= 0 or not self._dca_due(pair, current_time):

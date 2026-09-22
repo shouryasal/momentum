@@ -11,7 +11,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from claude_agent_sdk import ClaudeAgentOptions, query as _sdk_query
+from claude_agent_sdk import ClaudeAgentOptions
+from claude_agent_sdk import query as _sdk_query
 
 from ops.config import REPO_ROOT
 

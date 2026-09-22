@@ -84,7 +84,7 @@ def test_calibration_writes_only_costs_block(cfg, dbs, tmp_path):
     by.write_text("# header comment stays\ncosts:\n  fee_bps: 10.0\n  slippage_bps: 5.0\n"
                   "  measured_month: null\n  n_fills: 0\n  method: \"m\"\nother:\n  keep: 1\n")
     prior = (NOW.replace(day=1) - timedelta(days=1)).replace(day=15)
-    for i in range(25):
+    for _ in range(25):
         _fill(jdb, ts=prior.strftime("%Y-%m-%dT%H:%M:%SZ"), price=100.2,
               quote=(100.0, 100.2), amount=1.0, fee=0.1)
     tca_job.reconcile_fills(jdb, kdb, cfg, NOW)

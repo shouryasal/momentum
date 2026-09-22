@@ -253,7 +253,7 @@ CREATE TABLE IF NOT EXISTS snapshot_index (
 CREATE TABLE IF NOT EXISTS change_log (
   change_id TEXT PRIMARY KEY,
   proposed_at TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('params','prompt','skill')),
+  kind TEXT NOT NULL CHECK (kind IN ('params','prompt','skill','model')),
   target TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('proposed','auto_merged','approved','rejected','held')),
   author_model TEXT NOT NULL,

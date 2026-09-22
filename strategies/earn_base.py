@@ -17,17 +17,24 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from freqtrade.strategy import IStrategy
-from pandas import DataFrame
 
 try:
     from strategies import _journal
     from strategies.riskgate import (
-        GateConfig, MemoryStateStore, PortfolioState, RiskGate, SqliteStateStore,
+        GateConfig,
+        MemoryStateStore,
+        PortfolioState,
+        RiskGate,
+        SqliteStateStore,
     )
 except ImportError:  # in-container flat layout
     import _journal
     from riskgate import (
-        GateConfig, MemoryStateStore, PortfolioState, RiskGate, SqliteStateStore,
+        GateConfig,
+        MemoryStateStore,
+        PortfolioState,
+        RiskGate,
+        SqliteStateStore,
     )
 
 STRATEGY_VERSION = "earn-1"

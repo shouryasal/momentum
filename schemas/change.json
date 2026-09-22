@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Earn tier-1 change proposal (spec section 7)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "created_at", "author_run_id", "author_model", "prompt_version",
+               "tier", "kind", "target", "what", "why", "backtest", "walk_forward",
+               "replay", "counterfactual", "branch", "status"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}-[a-z0-9-]+$" },
+    "created_at": { "type": "string" },
+    "author_run_id": { "type": "string" },
+    "author_model": { "type": "string" },
+    "prompt_version": { "type": "string" },
+    "tier": { "const": 1 },
+    "kind": { "enum": ["params", "prompt", "skill", "model"] },
+    "target": { "type": "string" },
+    "what": {
+      "type": "object", "additionalProperties": false,
+      "required": ["summary", "commit"],
+      "properties": { "summary": { "type": "string" }, "commit": { "type": "string" } }
+    },
+    "why": { "type": "string", "minLength": 20 },
+    "bounds_check": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["param", "old", "new", "min", "max", "max_step", "ok"],
+        "properties": {
+          "param": { "type": "string" }, "old": { "type": "number" },
+          "new": { "type": "number" }, "min": { "type": "number" },
+          "max": { "type": "number" }, "max_step": { "type": "number" },
+          "ok": { "type": "boolean" }
+        }
+      },
+      "maxItems": 2
+    },
+    "backtest": {
+      "type": "object", "additionalProperties": true,
+      "required": ["timerange", "years", "fee_bps", "slippage_bps", "baseline", "candidate"],
+      "properties": {
+        "timerange": { "type": "string" },
+        "years": { "type": "number" },
+        "fee_bps": { "type": "number" },
+        "slippage_bps": { "type": "number" },
+        "baseline": { "type": "object" },
+        "candidate": { "type": "object" }
+      }
+    },
+    "walk_forward": {
+      "type": "object", "additionalProperties": false,
+      "required": ["windows", "scheme", "in_sample_delta", "out_sample_delta", "pass"],
+      "properties": {
+        "windows": { "type": "integer" },
+        "scheme": { "const": "expanding" },
+        "in_sample_delta": { "type": "number" },
+        "out_sample_delta": { "type": "number" },
+        "pass": { "type": "boolean" }
+      }
+    },
+    "replay": {
+      "type": "object", "additionalProperties": false,
+      "required": ["replay_id", "pass"],
+      "properties": {
+        "replay_id": { "type": "string" },
+        "days": { "type": "integer" },
+        "scores": { "type": "object" },
+        "baseline_scores": { "type": "object" },
+        "pass": { "type": "boolean" }
+      }
+    },
+    "counterfactual": {
+      "type": "object", "additionalProperties": false,
+      "required": ["week", "decisions_changed", "process_grade_delta"],
+      "properties": {
+        "week": { "type": "string" },
+        "decisions_changed": { "type": "integer" },
+        "process_grade_delta": { "type": "number" }
+      }
+    },
+    "param_changes_this_month": { "type": "integer" },
+    "branch": { "type": "string" },
+    "status": { "enum": ["proposed", "auto_merged", "approved", "rejected", "held"] },
+    "decision": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "by": { "type": "string" }, "at": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}
