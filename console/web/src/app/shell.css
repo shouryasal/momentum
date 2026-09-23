@@ -1,0 +1,30 @@
+/* Shell-only styles.  Everything else comes from the Mantine theme. */
+
+@keyframes earn-pulse-kf {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+/* TRANSITIONING mode badge (spec 12). */
+.earn-pulse {
+  animation: earn-pulse-kf 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .earn-pulse {
+    animation: none;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}

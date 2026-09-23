@@ -1,0 +1,89 @@
+import type { ErrorDetail } from './contracts';
+
+/** Normalised error for every failed API call (spec 5.2 error shape). */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly detail: unknown;
+
+  constructor(status: number, body: ErrorDetail) {
+    super(body.message || `HTTP ${status}`);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = body.code;
+    this.detail = body.detail;
+  }
+
+  /** 401: the session cookie is missing or expired -> back to login. */
+  get isUnauthorized(): boolean {
+    return this.status === 401;
+  }
+
+  /** 403 + `step_up_required`: re-enter the console token (spec 5.4). */
+  get needsStepUp(): boolean {
+    return this.status === 403 && this.code === 'step_up_required';
+  }
+
+  /** 409: optimistic concurrency (etag / base_sha conflict). */
+  get isConflict(): boolean {
+    return this.status === 409;
+  }
+
+  /** 423: blocked by the ops lock or by KILL. */
+  get isLocked(): boolean {
+    return this.status === 423;
+  }
+
+  /** 421: the Host header was not 127.0.0.1/localhost (DNS-rebinding guard). */
+  get isWrongHost(): boolean {
+    return this.status === 421;
+  }
+}
+
+const CODE_BY_STATUS: Record<number, string> = {
+  400: 'bad_request',
+  401: 'unauthorized',
+  403: 'forbidden',
+  404: 'not_found',
+  409: 'conflict',
+  421: 'misdirected_request',
+  423: 'locked',
+  429: 'rate_limited',
+  500: 'server_error',
+  502: 'bad_gateway',
+  503: 'unavailable',
+};
+
+/** Coerce any response body into the documented `{error:{code,message,detail}}` shape. */
+export function normaliseErrorDetail(status: number, raw: unknown): ErrorDetail {
+  if (raw && typeof raw === 'object' && 'error' in raw) {
+    const err = (raw as { error: unknown }).error;
+    if (err && typeof err === 'object') {
+      const e = err as Partial<ErrorDetail>;
+      return {
+        code: typeof e.code === 'string' ? e.code : (CODE_BY_STATUS[status] ?? 'error'),
+        message: typeof e.message === 'string' ? e.message : `HTTP ${status}`,
+        detail: (e.detail ?? null) as Record<string, unknown> | null,
+      };
+    }
+  }
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    return { code: CODE_BY_STATUS[status] ?? 'error', message: raw.slice(0, 500), detail: null };
+  }
+  return {
+    code: CODE_BY_STATUS[status] ?? 'error',
+    message: `HTTP ${status}`,
+    detail: raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null,
+  };
+}
+
+/** True for anything the UI should surface as "the console is unreachable". */
+export function isNetworkError(err: unknown): boolean {
+  return err instanceof TypeError || (err instanceof Error && err.name === 'AbortError');
+}
+
+export function errorMessage(err: unknown): string {
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof Error) return err.message;
+  return String(err);
+}

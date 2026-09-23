@@ -1,0 +1,326 @@
+"""``/api/llm``: provider cards, Ollama detection, the routing matrix, usage, playground.
+
+Nothing here touches a network or the Claude SDK: the Ollama probes go through an injected
+``httpx.MockTransport`` and the playground runs against a registered stub provider.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from console.services import llm_service
+from ops import db
+from ops.config import load_config
+from runs.llm import health as health_mod
+from runs.llm.stub import StubProvider, scripted
+from runs.llm.types import ProviderCaps
+
+OLLAMA = "http://127.0.0.1:11434"
+
+
+@pytest.fixture
+def journal(env: Path) -> Path:
+    journal_path, _ = db.init_all(load_config(), root=env)
+    return journal_path
+
+
+@pytest.fixture
+def knowledge(env: Path) -> Path:
+    _, knowledge_path = db.init_all(load_config(), root=env)
+    return knowledge_path
+
+
+@pytest.fixture
+def ollama_client(app):  # noqa: ANN001
+    """A mock transport that answers as the local daemon on 127.0.0.1 only."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if not url.startswith(OLLAMA):
+            raise httpx.ConnectError("connection refused", request=request)
+        if url.endswith("/api/version"):
+            return httpx.Response(200, json={"version": "0.34.1"})
+        if url.endswith("/api/tags"):
+            return httpx.Response(200, json={"models": [
+                {"name": "llama3.1:8b", "size": 4661224676,
+                 "details": {"parameter_size": "8.0B", "quantization_level": "Q4_K_M",
+                             "family": "llama"}}]})
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    app.state.http_client = client
+    yield client
+    client.close()
+
+
+# --------------------------------------------------------------------------- providers
+
+
+def test_provider_cards_cover_every_provider_key(auth_client: TestClient, journal: Path):
+    body = auth_client.get("/api/llm/providers").json()
+    keys = [card["key"] for card in body["providers"]]
+    assert keys == ["claude:subscription", "claude:api_key", "ollama"]
+    assert body["auth_mode"] in ("subscription", "api_key", "auto")
+    assert set(body["month"]) == {"month", "total_usd", "by_provider"}
+    assert set(body["rate_limit"]) == {"status", "utilization", "resets_at"}
+
+
+def test_only_the_active_credential_is_enabled(auth_client: TestClient, journal: Path):
+    cards = {c["key"]: c for c in auth_client.get("/api/llm/providers").json()["providers"]}
+    assert cards["claude:subscription"]["enabled"] is True      # models.yaml: subscription
+    assert cards["claude:api_key"]["enabled"] is False
+    assert "monthly cap" in cards["claude:api_key"]["detail"]
+
+
+def test_an_open_breaker_is_reported_with_its_error(auth_client: TestClient,
+                                                    journal: Path):
+    with db.opened(journal) as conn:
+        for _ in range(3):
+            health_mod.record_failure(conn, "ollama", "connection refused")
+    cards = {c["key"]: c for c in auth_client.get("/api/llm/providers").json()["providers"]}
+    assert cards["ollama"]["circuit"] == "open"
+    assert cards["ollama"]["consecutive_failures"] == 3
+    assert cards["ollama"]["last_error"] == "connection refused"
+
+
+def test_resetting_a_circuit_closes_it_and_is_audited(auth_client: TestClient,
+                                                      journal: Path):
+    with db.opened(journal) as conn:
+        for _ in range(3):
+            health_mod.record_failure(conn, "ollama", "boom")
+    response = auth_client.post("/api/llm/providers/ollama/circuit/reset")
+    assert response.status_code == 200
+    assert response.json()["state"] == "closed"
+    with db.opened(journal, readonly=True) as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM audit_log WHERE action='llm.circuit.reset'")]
+    assert rows and rows[-1]["result"] == "ok" and rows[-1]["target"] == "ollama"
+
+
+def test_an_unknown_provider_key_is_a_404(auth_client: TestClient, journal: Path):
+    assert auth_client.post(
+        "/api/llm/providers/nonsense/circuit/reset").status_code == 404
+
+
+def test_providers_needs_a_session(client: TestClient):
+    assert client.get("/api/llm/providers").status_code == 401
+
+
+# --------------------------------------------------------------------------- ollama
+
+
+def test_detection_returns_the_probe_table_and_the_wsl_guidance(
+    auth_client: TestClient, ollama_client, knowledge: Path
+):
+    body = auth_client.get("/api/llm/ollama/detect").json()
+    assert body["ok"] and body["base_url"] == OLLAMA and body["version"] == "0.34.1"
+    guidance = body["guidance"]
+    flat = " ".join(c for option in guidance["options"] for c in option["commands"])
+    assert "OLLAMA_HOST" in flat and "networkingMode=mirrored" in flat
+
+
+def test_detection_caches_the_url_for_the_cron_jobs(auth_client: TestClient,
+                                                    ollama_client, knowledge: Path):
+    auth_client.get("/api/llm/ollama/detect")
+    with db.opened(knowledge, readonly=True) as conn:
+        assert health_mod.cached_ollama_url(conn) == OLLAMA
+
+
+def test_the_model_list_flags_what_models_yaml_declares(auth_client: TestClient,
+                                                        ollama_client, knowledge: Path):
+    auth_client.get("/api/llm/ollama/detect")            # seed the cache
+    body = auth_client.get("/api/llm/ollama/models").json()
+    assert body["models"][0]["name"] == "llama3.1:8b"
+    assert body["models"][0]["declared_in_models_yaml"] is True
+    assert body["models"][0]["parameter_size"] == "8.0B"
+
+
+def test_an_unreachable_daemon_is_a_503_with_the_guidance(auth_client: TestClient,
+                                                          app, knowledge: Path):
+    def dead(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    app.state.http_client = httpx.Client(transport=httpx.MockTransport(dead))
+    detect = auth_client.get("/api/llm/ollama/detect").json()
+    assert detect["ok"] is False
+    assert detect["guidance"]["reachable"] is False
+    assert auth_client.get("/api/llm/ollama/models").status_code == 503
+
+
+# --------------------------------------------------------------------------- routing
+
+
+def test_the_routing_matrix_shows_the_code_floors_as_facts(auth_client: TestClient):
+    rows = {row["task"]: row for row in auth_client.get("/api/llm/routing").json()["tasks"]}
+    assert rows["decide"]["code_min_tier"] == 4
+    assert rows["decide"]["local_forbidden"] is True
+    assert rows["validate"]["code_min_tier"] == 3
+    assert rows["scan"]["code_min_tier"] == 1
+    # a config that tried to lower the floor still reports the effective one
+    assert rows["decide"]["effective_min_tier"] == 4
+
+
+def test_the_matrix_carries_the_whole_chain_with_provider_and_tier(
+    auth_client: TestClient
+):
+    rows = {row["task"]: row for row in auth_client.get("/api/llm/routing").json()["tasks"]}
+    chain = rows["brief"]["chain"]
+    assert [entry["alias"] for entry in chain] == ["sonnet", "haiku", "local_small"]
+    assert chain[-1]["local"] is True and chain[-1]["id"] == "llama3.1:8b"
+    assert rows["brief"]["local_mode"] == "context_pack"
+    assert rows["decide"]["escalation"]["alias"] == "fable"
+
+
+def test_the_matrix_reports_overlay_provenance(auth_client: TestClient, env: Path,
+                                               monkeypatch):
+    body = auth_client.get("/api/llm/routing").json()
+    assert all(row["overlay_head"] is False for row in body["tasks"])
+    assert body["switching"]["max_attempts_per_call"] == 4
+    assert body["budget"]["mode"] == "telemetry"
+
+
+# --------------------------------------------------------------------------- usage
+
+
+def _call(conn, **kwargs):
+    row = {"ts_utc": "2026-09-22T08:00:00Z", "task": "decide",
+           "provider": "claude:subscription", "model": "claude-opus-5",
+           "auth_source": "subscription", "attempt": 0, "status": "ok",
+           "latency_ms": 1200, "input_tokens": 100, "output_tokens": 50,
+           "cost_usd": 1.5, **kwargs}
+    conn.execute(
+        "INSERT INTO llm_calls(ts_utc, task, provider, model, auth_source, attempt,"
+        " status, latency_ms, input_tokens, output_tokens, cost_usd)"
+        " VALUES (:ts_utc,:task,:provider,:model,:auth_source,:attempt,:status,"
+        ":latency_ms,:input_tokens,:output_tokens,:cost_usd)", row)
+    conn.commit()
+
+
+def test_usage_groups_and_reports_a_success_rate(auth_client: TestClient, journal: Path):
+    with db.opened(journal) as conn:
+        _call(conn)
+        _call(conn, status="rate_limited", cost_usd=0.0)
+        _call(conn, task="scan", provider="ollama", model="llama3.1:8b",
+              auth_source="local", cost_usd=0.0)
+    body = auth_client.get("/api/llm/usage?group=task").json()
+    rows = {row["bucket"]: row for row in body["rows"]}
+    assert rows["decide"]["calls"] == 2 and rows["decide"]["success_rate"] == 0.5
+    assert rows["decide"]["cost_usd"] == 1.5
+    assert rows["scan"]["success_rate"] == 1.0
+    assert body["month"]["by_provider"]["claude:subscription"] == 1.5
+
+
+@pytest.mark.parametrize("group", ["task", "model", "provider", "auth", "day"])
+def test_every_documented_grouping_works(auth_client: TestClient, journal: Path, group):
+    with db.opened(journal) as conn:
+        _call(conn)
+    body = auth_client.get(f"/api/llm/usage?group={group}").json()
+    assert body["group"] == group and len(body["rows"]) == 1
+
+
+def test_an_unknown_grouping_is_rejected(auth_client: TestClient, journal: Path):
+    assert auth_client.get("/api/llm/usage?group=nonsense").status_code == 422
+
+
+def test_the_switch_log_is_exposed(auth_client: TestClient, journal: Path):
+    with db.opened(journal) as conn:
+        conn.execute(
+            "INSERT INTO provider_switches(ts_utc, task, from_provider, from_model,"
+            " to_provider, to_model, reason) VALUES (?,?,?,?,?,?,?)",
+            ("2026-09-22T08:00:00Z", "decide", "claude:subscription", "opus",
+             "claude:api_key", "opus", "rate_limited"))
+        conn.commit()
+    rows = auth_client.get("/api/llm/switches").json()["switches"]
+    assert rows[0]["reason"] == "rate_limited" and rows[0]["to_model"] == "opus"
+    assert auth_client.get("/api/llm/switches?task=scan").json()["switches"] == []
+
+
+# --------------------------------------------------------------------------- playground
+
+
+@pytest.fixture
+def stub_provider(monkeypatch):
+    """Register a stub under both Claude keys so the playground never needs the SDK."""
+    from runs.llm import chain as chain_mod
+
+    stubs = {
+        "claude:subscription": StubProvider(key="claude:subscription",
+                                            caps=ProviderCaps(),
+                                            responses=[scripted('{"answer": 42}',
+                                                                 cost_usd=0.01)]),
+        "claude:api_key": StubProvider(key="claude:api_key", caps=ProviderCaps()),
+    }
+    original = chain_mod.run_task
+
+    def patched(*args, **kwargs):
+        kwargs.setdefault("providers", stubs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(chain_mod, "run_task", patched)
+    return stubs
+
+
+def test_the_playground_runs_one_call_and_reports_the_attempts(
+    auth_client: TestClient, journal: Path, knowledge: Path, stub_provider
+):
+    response = auth_client.post("/api/llm/playground",
+                                json={"task": "decide", "prompt": "what is 6*7?"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] and body["text"] == '{"answer": 42}'
+    assert body["served"] == "opus" and body["attempts"][0]["status"] == "ok"
+    assert body["max_usd_per_run"] == 4.0
+
+
+def test_the_playground_never_runs_tools(auth_client: TestClient, journal: Path,
+                                         knowledge: Path, stub_provider):
+    auth_client.post("/api/llm/playground",
+                     json={"task": "decide", "prompt": "hello"})
+    request = stub_provider["claude:subscription"].requests[0]
+    assert request.tools_profile == "none" and request.skills is None
+
+
+def test_the_playground_writes_llm_calls_but_no_runs_row(
+    auth_client: TestClient, journal: Path, knowledge: Path, stub_provider
+):
+    auth_client.post("/api/llm/playground", json={"task": "decide", "prompt": "hi"})
+    with db.opened(journal, readonly=True) as conn:
+        calls = [dict(r) for r in conn.execute("SELECT * FROM llm_calls")]
+        runs = [dict(r) for r in conn.execute("SELECT * FROM runs")]
+    assert len(calls) == 1 and calls[0]["run_ref"] == "playground"
+    assert runs == []            # a playground call is not a journalled research run
+
+
+def test_an_unknown_task_or_alias_is_refused(auth_client: TestClient, journal: Path,
+                                             knowledge: Path, stub_provider):
+    assert auth_client.post("/api/llm/playground",
+                            json={"task": "nope", "prompt": "x"}).status_code == 404
+    assert auth_client.post(
+        "/api/llm/playground",
+        json={"task": "decide", "prompt": "x", "model_ref": "ghost"}).status_code == 400
+
+
+def test_pinning_a_model_overrides_the_chain(auth_client: TestClient, journal: Path,
+                                             knowledge: Path, stub_provider):
+    body = auth_client.post(
+        "/api/llm/playground",
+        json={"task": "review", "prompt": "x", "model_ref": "opus"}).json()
+    assert body["served"] == "opus"
+
+
+# --------------------------------------------------------------------------- service
+
+
+def test_the_service_needs_no_fastapi(journal: Path):
+    """llm_service is plain functions over paths — P8 and the CLI reuse it directly."""
+    from ops.models_config import load_models_cfg
+
+    mc = load_models_cfg(overlay=None)
+    cards = llm_service.provider_cards(mc, journal=journal)
+    assert [c["key"] for c in cards][:2] == ["claude:subscription", "claude:api_key"]
+    assert llm_service.usage(journal, group="task") == []
+    assert llm_service.switches(journal) == []
