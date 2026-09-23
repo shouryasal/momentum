@@ -1,30 +1,169 @@
-# Model routing (spec section 3a) — the human-pinned BASE. Tier 2 (human-only).
-# The tier-1 overlay config/models-auto.yaml (written by auto-shadow/auto-promotion)
-# deep-merges on top; runs/router.py resolves per task; escalation is explicit and
-# journaled — never a silent downgrade or upgrade. Reasoning effort floor is "high"
-# (clamped in code); decide/review run at "max".
-models:
-  fable: claude-fable-5-1
-  opus: claude-opus-5
-  sonnet: claude-sonnet-5
-  haiku: claude-haiku-4-5-20251001
+# Model routing — the human-pinned BASE. Tier 2 (human-only). Schema: ops/models_config.py
+#
+# The tier-1 overlay config/models-auto.yaml (written by auto-shadow / auto-promotion)
+# merges on top; it may change only `tasks.<t>.chain[0]` and the `shadow:` block, and is
+# rejected at load if it touches anything else. Escalation is explicit and journaled —
+# never a silent downgrade or upgrade. The reasoning-effort floor is "high" (clamped in
+# code); decide/review run at "max".
+#
+# Reading this file
+# -----------------
+# `chain:` is an ORDERED fallback, not a preference: the first entry that (a) clears the
+# task's min_tier, (b) has the capabilities the task needs and (c) is not behind an open
+# circuit breaker or an exhausted budget serves the call. Every move down a chain writes a
+# provider_switches row and shows up on the AI & Models page — there is no silent
+# substitution anywhere in this system.
+#
+# Two floors are CODE, not config (runs/llm/types.py: MIN_TIER_FLOOR, chain_for):
+#   decide   needs tier >= 4 and may never be served by a local model — no proposal is
+#            ever written by an 8B model on this laptop;
+#   validate needs tier >= 3.
+# Lowering min_tier below those here, or through the overlay, changes nothing.
+
+version: 2
+
+auth:                          # which Claude credential a job gets (ops/envwrap.sh reads
+  claude_mode: subscription    # EARN_CLAUDE_AUTH_MODE, kept in sync by the console)
+  subscription_source: token   # token ($CLAUDE_CODE_OAUTH_TOKEN) | login (~/.claude)
+  prefer: subscription         # in `auto`: which credential is tried first
+  fallback_on: [auth_error, rate_limited, quota_exhausted, overloaded]
+  return_after_min: 60         # retry the preferred credential after this
+  api_key_monthly_cap_usd: 30  # HARD cap on metered spend whenever the API key serves
+
+providers:
+  claude: { kind: claude_sdk, enabled: true }
+  ollama:
+    kind: ollama
+    enabled: true
+    base_url: auto             # auto-detect; explicit URLs must be loopback/private
+    probe: ["http://127.0.0.1:11434", "wsl_gateway", "resolv_nameserver",
+            "http://host.docker.internal:11434"]
+    timeout_s: 120
+    keep_alive: "10m"
+    options: { temperature: 0, num_ctx: 8192 }
+
+models:                        # alias -> {provider, exact id, capability tier}
+  fable:       { provider: claude, id: claude-fable-5-1,          tier: 5 }
+  opus:        { provider: claude, id: claude-opus-5,             tier: 4 }
+  sonnet:      { provider: claude, id: claude-sonnet-5,           tier: 3 }
+  haiku:       { provider: claude, id: claude-haiku-4-5-20251001, tier: 2 }
+  local_small: { provider: ollama, id: "llama3.1:8b",             tier: 1 }
+
+capabilities:                  # claude defaults to all true; ollama to structured output
+  local_small: { tools: false, skills: false, structured_output: true, max_ctx: 8192 }
 
 tasks:
-  decide:  { model: opus,   escalation: fable,       fallback: null,      retry: 1,
-             effort: max,  max_usd_per_run: 4.00, max_turns: 12, monthly_budget_usd: 60 }
-  brief:   { model: sonnet, escalation: null,        fallback: haiku_short, retry: 1,
-             effort: high, max_usd_per_run: 1.00, max_turns: 10, monthly_budget_usd: 12 }
-  flags:   { model: haiku,  escalation: null,        fallback: keep_last, retry: 1,
-             effort: high, max_usd_per_run: 0.40, max_turns: 6,  monthly_budget_usd: 4 }
-  review:  { model: fable,  escalation: null,        fallback: opus,      retry: 0,
-             effort: max,  max_usd_per_run: 25.00, max_turns: 150, monthly_budget_usd: 70 }
-  classify: { model: haiku,  escalation: null,       fallback: rule,      retry: 0,
-              effort: high, max_usd_per_run: 0.20, max_turns: 1,  monthly_budget_usd: 5 }
+  decide:
+    chain: [opus]
+    escalation: fable
+    allow_local: false         # belt and braces: the code floor already forbids it
+    tools: read_only
+    min_tier: 4
+    retry: 1
+    effort: max
+    max_usd_per_run: 4.00
+    max_turns: 12
+    monthly_budget_usd: 60
+    deadline_s: 900
+    on_all_failed: hold_last
+  brief:
+    chain: [sonnet, haiku, local_small]
+    tools: skill_rw
+    min_tier: 1
+    local_mode: context_pack   # a local model gets the pre-assembled inputs, not tools
+    short_on_fallback: true
+    retry: 1
+    effort: high
+    max_usd_per_run: 1.00
+    max_turns: 10
+    monthly_budget_usd: 12
+    deadline_s: 360
+    on_all_failed: keep_last
+  flags:
+    chain: [haiku, local_small]
+    tools: read_only
+    min_tier: 1
+    local_mode: context_pack
+    skills_from: skills.bindings
+    retry: 1
+    effort: high
+    max_usd_per_run: 0.40
+    max_turns: 6
+    monthly_budget_usd: 4
+    deadline_s: 240
+    on_all_failed: keep_last
+  scan:
+    chain: [local_small, haiku]
+    tools: none
+    min_tier: 1
+    retry: 0
+    effort: high
+    max_turns: 1
+    max_usd_per_run: 0.05
+    monthly_budget_usd: 3
+    deadline_s: 90
+    prompt: research.stage_prompts.scan
+    on_all_failed: skip_screen
+  validate:
+    chain: [sonnet, opus]
+    escalation: opus
+    tools: read_only
+    min_tier: 3                # code floor too: no local model validates a signal
+    retry: 0
+    effort: high
+    max_usd_per_run: 1.50
+    max_turns: 12
+    monthly_budget_usd: 30
+    deadline_s: 600
+    on_all_failed: drop_signal
+  classify:
+    chain: [local_small, haiku]
+    tools: none
+    min_tier: 1
+    retry: 0
+    effort: high
+    max_turns: 1
+    max_usd_per_run: 0.20
+    monthly_budget_usd: 5
+    deadline_s: 120
+    on_all_failed: rule
+  review:
+    chain: [fable, opus]
+    tools: skill_rw
+    min_tier: 4
+    retry: 0
+    effort: max
+    max_usd_per_run: 25.00
+    max_turns: 150
+    monthly_budget_usd: 70
+    deadline_s: 6000
+    on_all_failed: abstain
+  daily_review:
+    chain: [fable, opus]
+    tools: skill_rw
+    min_tier: 4
+    retry: 0
+    effort: max
+    max_usd_per_run: 8.00
+    max_turns: 40
+    monthly_budget_usd: 40
+    deadline_s: 3000
+    on_all_failed: abstain
+
+switching:
+  "on": { error: next, timeout: next, rate_limited: next, quota_exhausted: next,   # quoted: YAML 1.1 reads a bare `on` as true
+        budget_exhausted: next, provider_down: skip, auth_error: next,
+        schema_invalid: retry_then_next, empty_output: next }
+  prefer_local_when_rate_limited: [scan, classify]
+  escalate_on: [hard_case, trigger, gray_zone, low_confidence]
+  circuit_breaker: { failures: 3, window_min: 15, open_min: 15 }
+  max_attempts_per_call: 4
+  held_authorship_for_fallback: true
 
 budget:                       # TELEMETRY under the Claude Max subscription —
-  monthly_total_usd: 150      # degradation keys on rate-limit signals, not USD;
-  throttle_at_pct: 80         # per-run max_usd stays as runaway-loop safety only.
-                              # 16:00 brief drops first; decide runs are NEVER skipped
+  mode: telemetry             # degradation keys on rate-limit signals, not USD;
+  monthly_total_usd: 150      # per-run max_usd stays as runaway-loop safety only.
+  throttle_at_pct: 80         # 16:00 brief drops first; decide runs are NEVER skipped
 
 shadow:                       # 30-day shadow mode for promoting a new decision model
   enabled: false

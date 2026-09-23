@@ -6,7 +6,8 @@
 # re-run this script — download-data refetches the missing timerange — then re-check.
 
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT/ops"
 
 docker compose run --rm freqtrade-a download-data \
   --exchange binance \
@@ -16,5 +17,6 @@ docker compose run --rm freqtrade-a download-data \
 
 docker compose run --rm freqtrade-a list-data --show
 
-cd ..
-python3 -m ops.check_gaps
+# The venv interpreter, not system python3: ops.check_gaps needs pandas and pyarrow.
+cd "$REPO_ROOT"
+exec "$REPO_ROOT/.venv/bin/python" -m ops.check_gaps

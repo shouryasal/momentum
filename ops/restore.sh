@@ -14,7 +14,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 DATE="${1:?usage: restore.sh YYYY-MM-DD --yes}"
 CONFIRM="${2:-}"
-DEST="$(.venv/bin/python -c 'from ops.config import load_config; print(load_config().backup.dest)')"
+# backup.dest goes through ~/$VAR expansion, so ask ops.backup rather than reading the raw key.
+DEST="$(.venv/bin/python -c 'from ops.backup import dest_for; from ops.config import load_config; print(dest_for(load_config()))')"
 SRC="$DEST/$DATE"
 
 [ -d "$SRC" ] || { echo "no backup at $SRC"; exit 1; }

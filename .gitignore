@@ -3,16 +3,35 @@
 .env.*
 !.env.example
 
+# Machine-local, mode-dependent state: the signed mode file, the config bless digest and
+# the freqtrade runtime overlay. Never committed — live-ness must not live in git.
+# (The var/ contents rule lives with the other runtime directories below.)
+
 # Databases and runtime state (journal/knowledge are records, not source)
 knowledge/earn.db*
 journal/journal.db*
 journal/.write_failed
 journal/snapshots/
+knowledge/state/freshness.json
 ft_userdata/
 data/
-logs/
-ops/locks/
 ops/killdir/KILL
+
+# Runtime directories whose EXISTENCE is load-bearing: every cron line writes into
+# logs/ and locks in ops/locks/, and a missing directory used to make the line fail
+# before the job started. The .gitkeep files below are tracked so a fresh clone has
+# them; their contents never are.
+logs/*
+!logs/.gitkeep
+ops/locks/*
+!ops/locks/.gitkeep
+var/*
+!var/.gitkeep
+
+# Console build output and node deps
+console/static/
+console/web/node_modules/
+console/web/dist/
 
 # Reports are generated
 reports/*.xlsx

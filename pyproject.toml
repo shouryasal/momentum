@@ -23,12 +23,17 @@ dependencies = [
     "anthropic>=1.7",
     "freqtrade-client==2026.8",
     "croniter>=3",
+    # Local console (127.0.0.1 only). starlette comes with fastapi; uvicorn is the server
+    # the earn-console systemd unit runs.
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
     "pytest-asyncio",
+    "pytest-timeout",   # declared so a hung test names itself instead of wedging the suite
     "ruff",
     "mypy",
     "pre-commit",
@@ -38,7 +43,23 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["ops", "ops.lib", "runs", "strategies", "evals", "schemas"]
+# Every importable package in the repo. A missing entry only bites on a non-editable
+# install (the wheel silently ships no console / no signal pipeline), so
+# tests/test_foundation/test_packaging.py asserts this list equals what is on disk.
+packages = [
+    "console",
+    "console.routers",
+    "console.services",
+    "evals",
+    "ops",
+    "ops.lib",
+    "runs",
+    "runs.llm",
+    "runs.llm.providers",
+    "runs.signals",
+    "schemas",
+    "strategies",
+]
 
 [tool.ruff]
 line-length = 100
@@ -50,7 +71,17 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# `tests/e2e` boots a real console subprocess, copies the checkout and shells out to git
+# and bash; it takes minutes and needs a POSIX host. It is deselected by default so the
+# unit suite stays the fast feedback loop. `bash ops/smoke.sh` runs it phase by phase with
+# a pass/fail summary; `pytest -m e2e` runs the same files without the bootstrap checks.
+# `tests/test_ops/test_setup_sh.py` pins that ops/smoke.sh exists and still does that, so
+# this comment cannot rot into a reference to a script nobody ships.
+addopts = "-ra -m 'not e2e'"
+markers = [
+    "e2e: end-to-end proof — boots the console, writes a throwaway state root (slow)",
+    "slow: takes seconds to minutes; safe to deselect on a quick loop",
+]
 
 [tool.mypy]
 python_version = "3.11"

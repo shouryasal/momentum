@@ -159,6 +159,73 @@ def compare(baseline: Scores, candidate: Scores) -> dict[str, str]:
     return out
 
 
+#: Weights of the replay-derived process score (0–100). It is a *proxy* for the human
+#: rubric in .claude/skills/post-mortem/references/rubric.md: it says how well the decision
+#: procedure held up, never whether the trade made money.
+PROCESS_WEIGHTS = {
+    "schema_validity_rate": 40.0,
+    "agreement_rate": 25.0,
+    "determinism": 25.0,
+    "no_violations": 10.0,
+}
+
+
+def process_score(s: Scores) -> float:
+    """0–100 process proxy for one replay arm.
+
+    ``agreement_rate`` is None when no snapshot was unambiguous; its weight is then dropped
+    and the rest rescaled, so a quiet week does not look like a regression.
+    """
+    parts: list[tuple[float, float]] = [
+        (PROCESS_WEIGHTS["schema_validity_rate"], s.schema_validity_rate),
+        (PROCESS_WEIGHTS["determinism"], min(s.determinism, 1.0)),
+        (PROCESS_WEIGHTS["no_violations"], 0.0 if s.constraint_violations else 1.0),
+    ]
+    if s.agreement_rate is not None:
+        parts.append((PROCESS_WEIGHTS["agreement_rate"], s.agreement_rate))
+    total_w = sum(w for w, _ in parts)
+    if total_w <= 0:  # pragma: no cover - weights are constants
+        return 0.0
+    return round(100.0 * sum(w * v for w, v in parts) / total_w, 2)
+
+
+def decisions_changed(baseline_results: list[dict], candidate_results: list[dict],
+                      *, tolerance: float) -> int:
+    """How many snapshots the candidate decides differently (first attempt of each arm).
+
+    A snapshot where exactly one arm failed to produce a valid proposal counts as changed —
+    that *is* a different decision.
+    """
+    by_run = {r["run_id"]: r for r in candidate_results}
+    changed = 0
+    for b in baseline_results:
+        c = by_run.get(b["run_id"])
+        if c is None:
+            continue
+        bf = b["attempts"][0] if b["attempts"] else None
+        cf = c["attempts"][0] if c["attempts"] else None
+        if bf is None and cf is None:
+            continue
+        if bf is None or cf is None or not proposals_identical(bf, cf, tolerance):
+            changed += 1
+    return changed
+
+
+def counterfactual(week: str, baseline_results: list[dict], candidate_results: list[dict],
+                   baseline_scores: Scores | None, candidate_scores: Scores | None,
+                   *, tolerance: float) -> dict:
+    """The counterfactual block apply_changes gates on, recomputed from replay output."""
+    delta = 0.0
+    if baseline_scores is not None and candidate_scores is not None:
+        delta = round(process_score(candidate_scores) - process_score(baseline_scores), 2)
+    return {
+        "week": week,
+        "decisions_changed": decisions_changed(baseline_results, candidate_results,
+                                               tolerance=tolerance),
+        "process_grade_delta": delta,
+    }
+
+
 def ship_rule(candidate: Scores, comparison: dict[str, str],
               determinism_min: float = 1.0) -> tuple[bool, str]:
     """Spec §8: zero violations, full determinism, no metric worse, >=1 better."""

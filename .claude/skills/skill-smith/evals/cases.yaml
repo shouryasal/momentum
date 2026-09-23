@@ -1,0 +1,20 @@
+# skill-smith eval cases. Both are deterministic, so the code-only gate can score them.
+#
+# They are deliberately self-referential: case 2 fails the moment skill-smith's own
+# frontmatter, layout or scripts stop satisfying the rules skill-smith teaches.
+cases:
+  - id: template-is-not-a-finished-skill
+    run: scripts/check_template.py
+    args: ["--template"]
+    expect:
+      exit_code: 1
+      stdout_contains: ["NOT READY", "SKILL.md"]
+      stdout_not_contains: ["Traceback"]
+
+  - id: skill-smith-passes-its-own-checker
+    run: scripts/check_template.py
+    args: [".claude/skills/skill-smith"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["verdict=OK"]
+      stdout_not_contains: ["Traceback"]

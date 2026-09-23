@@ -20,6 +20,7 @@ import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -46,18 +47,50 @@ class ReplayResult:
     baseline_scores: metrics.Scores | None
     comparison: dict[str, str]
     cost_usd: float
+    #: Per-snapshot attempts of each arm, kept so evals/verify_change.py can recompute the
+    #: counterfactual instead of trusting the number a model wrote down.
+    baseline_results: list[dict] = dataclass_field(default_factory=list)
+    candidate_results: list[dict] = dataclass_field(default_factory=list)
+    counterfactual: dict = dataclass_field(default_factory=dict)
 
 
-def _decide_live(prompt: str, model: str, cwd: Path, output_schema: dict):
+def _decide_live(prompt: str, model: str, cwd: Path, output_schema: dict,
+                 skills: list[str] | None = None):
+    """One replay decision.
+
+    With ``skills`` the call goes through ``run_stage`` with ``Skill`` allowed and the
+    working directory set to the candidate worktree — that is the only way a *skill*
+    candidate can differ from its baseline (spec §10, HIGH issue 18). Without skills it is
+    the read-only ``decide`` path, unchanged.
+    """
     from runs import decision_core
 
-    res = decision_core.decide(prompt, model=model, cwd=cwd,
-                               output_schema=output_schema)
+    if skills:
+        res = decision_core.run_stage(
+            prompt, model=model, max_turns=12, max_usd=2.0, cwd=cwd,
+            allowed_tools=[*decision_core.READ_ONLY_TOOLS, "Skill"],
+            extra_disallowed=["Write", "Bash"], output_schema=output_schema,
+            skills=list(skills))
+    else:
+        res = decision_core.decide(prompt, model=model, cwd=cwd,
+                                   output_schema=output_schema)
     return res.text, (res.meta.cost_usd or 0.0)
 
 
+def _call_decide(decide_fn, prompt: str, model: str, cwd: Path, schema: dict,
+                 skills: list[str] | None):
+    """Call an injected decide function, passing ``skills`` only if it accepts them."""
+    if not skills:
+        return decide_fn(prompt, model, cwd, schema)
+    try:
+        return decide_fn(prompt, model, cwd, schema, skills)
+    except TypeError:
+        return decide_fn(prompt, model, cwd, schema)
+
+
 def _run_over_snapshots(snap_dirs, prompt_for, model_for, decide_fn,
-                        runs_per_snapshot: int, budget_usd: float
+                        runs_per_snapshot: int, budget_usd: float,
+                        cwd: Path | None = None, skills: list[str] | None = None
                         ) -> tuple[list[dict], dict, dict, dict, float]:
     results, limits_by, states, flags = [], {}, {}, {}
     spent = 0.0
@@ -73,8 +106,13 @@ def _run_over_snapshots(snap_dirs, prompt_for, model_for, decide_fn,
             if spent >= budget_usd:
                 attempts.append(None)
                 continue
-            with tempfile.TemporaryDirectory() as sandbox:
-                text, cost = decide_fn(prompt, model_for(snap), Path(sandbox), schema)
+            if cwd is not None:
+                text, cost = _call_decide(decide_fn, prompt, model_for(snap), Path(cwd),
+                                          schema, skills)
+            else:
+                with tempfile.TemporaryDirectory() as sandbox:
+                    text, cost = _call_decide(decide_fn, prompt, model_for(snap),
+                                              Path(sandbox), schema, skills)
             spent += cost
             try:
                 attempts.append(validate_proposal(text).model_dump() if text else None)
@@ -114,7 +152,15 @@ def _rules_targets_for(snap_dirs) -> dict[str, dict[str, float]]:
 def replay(candidate: CandidateRef, baseline: CandidateRef, *, days: int = 30,
            runs_per_snapshot: int = 2, budget_usd: float = 8.0,
            jdb: sqlite3.Connection, decide_fn=None, root: Path | None = None,
-           now: datetime | None = None) -> ReplayResult:
+           now: datetime | None = None, candidate_cwd: Path | None = None,
+           skills: list[str] | None = None) -> ReplayResult:
+    """Score a candidate against its baseline over the stored snapshots.
+
+    ``candidate_cwd`` is the **candidate worktree**: the candidate arm runs with that
+    working directory (and ``skills`` loaded), so a skill or prompt edit that lives only in
+    the worktree actually reaches the model. The baseline arm always runs in a throwaway
+    sandbox against the live checkout, so the two arms differ by exactly the change.
+    """
     cfg = load_config()
     root = root or REPO_ROOT
     now = now or datetime.now(UTC)
@@ -181,7 +227,8 @@ def replay(candidate: CandidateRef, baseline: CandidateRef, *, days: int = 30,
     b_res, b_lim, b_states, b_flags, b_cost = _run_over_snapshots(
         snap_dirs, prompt_baseline, model_baseline, decide_fn, runs_per_snapshot, half)
     c_res, c_lim, c_states, c_flags, c_cost = _run_over_snapshots(
-        snap_dirs, prompt_candidate, model_candidate, decide_fn, runs_per_snapshot, half)
+        snap_dirs, prompt_candidate, model_candidate, decide_fn, runs_per_snapshot, half,
+        cwd=candidate_cwd, skills=skills)
     b_scores = metrics.score_replay(b_res, limits_by_snapshot=b_lim, states=b_states,
                                     flags=b_flags, rules_targets=rules, tolerance=tol)
     c_scores = metrics.score_replay(c_res, limits_by_snapshot=c_lim, states=c_states,
@@ -189,8 +236,12 @@ def replay(candidate: CandidateRef, baseline: CandidateRef, *, days: int = 30,
     comparison = metrics.compare(b_scores, c_scores)
     passed, reason = metrics.ship_rule(
         c_scores, comparison, cfg.review.replay.determinism_min_identical)
+    cf = metrics.counterfactual(now.strftime("%G-W%V"), b_res, c_res, b_scores, c_scores,
+                                tolerance=tol)
     return persist(ReplayResult(replay_id, passed, reason, len(snap_dirs),
-                                c_scores, b_scores, comparison, b_cost + c_cost))
+                                c_scores, b_scores, comparison, b_cost + c_cost,
+                                baseline_results=b_res, candidate_results=c_res,
+                                counterfactual=cf))
 
 
 def main(argv: list[str] | None = None) -> int:

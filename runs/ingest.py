@@ -1,13 +1,21 @@
 """15-minute ingest: incremental candles (incl. BNB/USDT data-only), order-book
 snapshots, funding + open interest, whitelisted news RSS with the two-source
-corroboration rule, the Haiku classifier for items the keyword rules can't label
+corroboration rule, the cheap classifier for items the keyword rules can't label
 (config- and credential-gated; a classifier failure means the rule labels stand —
 it never escalates), and the deterministic macro-blackout flag.
 
 Phases run independently — one failing never skips the rest; each writes an
-ingest_runs row. Everything is idempotent (INSERT OR REPLACE / OR IGNORE keyed on
-natural keys; re-fetching from the last stored candle corrects the previously
-in-progress one). HTTP is injectable (httpx client) so tests use MockTransport.
+ingest_runs row and refreshes ``knowledge/state/freshness.json`` (the stdlib-readable
+stamp the risk gate's staleness check reads — the knowledge DB is mounted read-only into
+the containers while it is in WAL, so a SQLite read from there can block every entry).
+Everything is idempotent (INSERT OR REPLACE / OR IGNORE keyed on natural keys;
+re-fetching from the last stored candle corrects the previously in-progress one). HTTP is
+injectable (httpx client) so tests use MockTransport.
+
+Config, not code (spec §3): the ingested timeframes, the cold-start window and both news
+keyword tables come from ``earn.yaml``; the module constants below are only the fallback
+for a file that predates them. The classifier prompt is the tier-1 file named by
+``research.stage_prompts.classify`` and routes through the chain router.
 """
 
 from __future__ import annotations
@@ -44,22 +52,28 @@ EVENT_KEYWORDS = {
 }
 ASSET_KEYWORDS = {"BTC": ["bitcoin", "btc"], "ETH": ["ethereum", "eth ", "ether "]}
 
-CLASSIFY_SCHEMA = {
-    "type": "object",
-    "properties": {"labels": {"type": "array", "items": {
+
+def classify_schema(events: list[str], assets: list[str]) -> dict:
+    """The classifier's output contract, built from the configured vocabularies."""
+    return {
         "type": "object",
-        "properties": {
-            "url_hash": {"type": "string"},
-            "event_class": {"type": ["string", "null"],
-                            "enum": [*EVENT_KEYWORDS, None]},
-            "assets": {"type": "array", "items": {"enum": ["BTC", "ETH"]}},
-        },
-        "required": ["url_hash", "event_class", "assets"],
+        "properties": {"labels": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "url_hash": {"type": "string"},
+                "event_class": {"type": ["string", "null"], "enum": [*events, None]},
+                "assets": {"type": "array", "items": {"enum": list(assets)}},
+            },
+            "required": ["url_hash", "event_class", "assets"],
+            "additionalProperties": False,
+        }}},
+        "required": ["labels"],
         "additionalProperties": False,
-    }}},
-    "required": ["labels"],
-    "additionalProperties": False,
-}
+    }
+
+
+#: Kept for callers that still import it; the live schema comes from ``classify_schema``.
+CLASSIFY_SCHEMA = classify_schema(list(EVENT_KEYWORDS), list(ASSET_KEYWORDS))
 
 
 def sym(pair: str) -> str:
@@ -79,7 +93,25 @@ class Ingest:
         self.http = http or httpx.Client(timeout=10)
         self.now = now or datetime.now(UTC)
         self.root = root or REPO_ROOT
-        self.stage_runner = stage_runner  # None -> decision_core.run_stage, lazily
+        self.stage_runner = stage_runner  # set -> legacy single-model call (tests, P3 shim)
+
+    # ------------------------------------------------------------------ vocabularies
+
+    @property
+    def event_keywords(self) -> dict[str, list[str]]:
+        return dict(self.cfg.news.event_keywords or EVENT_KEYWORDS)
+
+    @property
+    def asset_keywords(self) -> dict[str, list[str]]:
+        return dict(self.cfg.news.asset_keywords or ASSET_KEYWORDS)
+
+    @property
+    def timeframes(self) -> tuple[str, ...]:
+        return tuple(self.cfg.ingest.timeframes or TFS)
+
+    @property
+    def cold_start_days(self) -> int:
+        return int(self.cfg.ingest.cold_start_days or COLD_START_DAYS)
 
     # ------------------------------------------------------------------ helpers
 
@@ -104,11 +136,56 @@ class Ingest:
         try:
             fn()
             self._record(name, "ok")
-            return True
+            ok = True
         except Exception as e:  # noqa: BLE001 — phases are isolated by design
             self._record(name, "error", str(e))
             print(f"ingest phase {name} failed: {e}", file=sys.stderr)
-            return False
+            ok = False
+        self.write_freshness()
+        return ok
+
+    def freshness_sources(self) -> dict[str, datetime]:
+        """The newest timestamp of every source the gate's staleness check watches."""
+        out: dict[str, datetime] = {}
+        book = self.kdb.execute(
+            "SELECT MAX(captured_at) AS t FROM book_snapshots").fetchone()
+        if book and book["t"]:
+            try:
+                out["book_snapshots"] = datetime.fromisoformat(
+                    str(book["t"]).replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        for tf in self.timeframes:
+            row = self.kdb.execute(
+                "SELECT MAX(open_time) AS t FROM candles WHERE tf=?", (tf,)).fetchone()
+            if row and row["t"]:
+                out[f"candles_{tf}"] = datetime.fromtimestamp(row["t"] / 1000, tz=UTC)
+        news = self.kdb.execute("SELECT MAX(fetched_at) AS t FROM news_items").fetchone()
+        if news and news["t"]:
+            try:
+                out["news"] = datetime.fromisoformat(str(news["t"]).replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        return out
+
+    def write_freshness(self) -> None:
+        """Refresh ``knowledge/state/freshness.json`` after every phase.
+
+        ``ops.lib.freshness`` owns the writer and the exact on-disk shape, and it is the
+        ONLY writer: this used to carry a second implementation of the same file for the
+        window before that module landed, which meant two places could disagree about the
+        shape the gate's staleness check reads. Never raises — a freshness write failing
+        must not fail an ingest phase.
+        """
+        try:
+            sources = self.freshness_sources()
+            if not sources:
+                return
+            from ops.lib import freshness as fresh
+
+            fresh.record_many(sources, now=self.now, root=self.root)
+        except Exception as e:  # noqa: BLE001 — telemetry only
+            print(f"freshness write failed: {e}", file=sys.stderr)
 
     # ------------------------------------------------------------------ candles
 
@@ -116,12 +193,12 @@ class Ingest:
         pairs = [*self.cfg.universe.pairs, *self.cfg.universe.data_only_symbols]
         now_ms = int(self.now.timestamp() * 1000)
         for pair in pairs:
-            for tf in TFS:
+            for tf in self.timeframes:
                 row = self.kdb.execute(
                     "SELECT MAX(open_time) FROM candles WHERE pair=? AND tf=?",
                     (pair, tf)).fetchone()
                 start = row[0] if row[0] is not None else int(
-                    (self.now - timedelta(days=COLD_START_DAYS)).timestamp() * 1000)
+                    (self.now - timedelta(days=self.cold_start_days)).timestamp() * 1000)
                 while True:
                     r = self._get(f"{SPOT}/api/v3/klines",
                                   {"symbol": sym(pair), "interval": tf,
@@ -140,7 +217,10 @@ class Ingest:
                     self.kdb.commit()
                     if len(klines) < 1000:
                         break
-                    start = klines[-1][0] + TF_MS[tf]
+                    step = TF_MS.get(tf)
+                    if step is None:
+                        break  # a timeframe the stepper does not know: one page only
+                    start = klines[-1][0] + step
 
     # ------------------------------------------------------------------ books
 
@@ -244,15 +324,52 @@ class Ingest:
             )
         self.kdb.commit()
 
+    def classify_prompt(self, pending: list[dict]) -> str:
+        """Render the tier-1 classify prompt (``research.stage_prompts.classify``)."""
+        from runs.signals import stage_prompt_text
+
+        template = stage_prompt_text(self.cfg, "classify", self.root)
+        return (template
+                .replace("{{EVENT_CLASSES}}", json.dumps(sorted(self.event_keywords)))
+                .replace("{{ASSETS}}", json.dumps(sorted(self.asset_keywords)))
+                .replace("{{ITEMS}}", json.dumps(pending, indent=2, sort_keys=True)))
+
+    def _classify_call(self, prompt: str, schema: dict) -> tuple[bool, str | None, str | None]:
+        """One classify call. ``stage_runner`` set = the legacy single-model path;
+        otherwise the chain router, so classify falls over to a local model like every
+        other task."""
+        if self.stage_runner is not None:
+            from runs import router
+
+            choice = router.resolve("classify",
+                                    models_cfg=router.load_models_cfg(
+                                        self.root / "config" / "models.yaml"))
+            res = self.stage_runner(prompt, model=choice.model, max_turns=1,
+                                    max_usd=choice.max_usd, effort=choice.effort,
+                                    allowed_tools=[], output_schema=schema,
+                                    deadline_s=120)
+            return res.ok, res.text, res.meta.error
+        from ops.models_config import load_models_cfg
+        from runs.signals import run_task
+
+        try:
+            models_cfg = load_models_cfg(self.root / "config" / "models.yaml")
+        except Exception:  # noqa: BLE001 — an unreadable models file is not fatal here
+            models_cfg = None
+        outcome = run_task("classify", prompt, models_cfg=models_cfg,
+                           output_schema=schema, tools_profile="none", deadline_s=120)
+        return outcome.ok, outcome.text, outcome.error or outcome.failure
+
     def classify_news(self) -> None:
-        """Haiku labels the items the keyword rules can't (spec: the classifier
+        """A cheap model labels the items the keyword rules can't (spec: the classifier
         never escalates — any failure leaves the rule labels standing)."""
         if not self.cfg.news.classify.enabled:
             return
         from ops.lib import claude_auth
 
-        if claude_auth.resolve().source == "none":
+        if claude_auth.resolve_any().source == "none":
             return
+        events, assets_kw = self.event_keywords, self.asset_keywords
         since = now_iso(self.now - timedelta(hours=24))
         rows = self.kdb.execute(
             "SELECT url_hash, title FROM news_items WHERE fetched_at >= ?"
@@ -260,50 +377,32 @@ class Ingest:
         pending = []
         for r in rows:
             title_l = r["title"].lower()
-            if any(k in title_l for kws in EVENT_KEYWORDS.values() for k in kws):
+            if any(k in title_l for kws in events.values() for k in kws):
                 continue  # the keyword rule will label it in corroborate
             pending.append({"url_hash": r["url_hash"], "title": r["title"]})
         if not pending:
             return
         pending = pending[:25]
-        from runs import router
-
-        choice = router.resolve("classify",
-                                models_cfg=router.load_models_cfg(
-                                    self.root / "config" / "models.yaml"))
-        runner = self.stage_runner
-        if runner is None:
-            from runs import decision_core
-
-            runner = decision_core.run_stage
-        prompt = (
-            "Label each crypto news headline. event_class must be one of "
-            f"{sorted(EVENT_KEYWORDS)} or null when none applies; assets is the "
-            "subset of [\"BTC\", \"ETH\"] the headline is about (often empty). "
-            "Use ONLY the headline text — no outside knowledge of the story. "
-            "Return JSON {\"labels\": [{url_hash, event_class, assets}, ...]} "
-            "covering every input item.\n\nItems:\n" + json.dumps(pending))
-        res = runner(prompt, model=choice.model, max_turns=1,
-                     max_usd=choice.max_usd, effort=choice.effort,
-                     allowed_tools=[], output_schema=CLASSIFY_SCHEMA,
-                     deadline_s=120)
-        if not res.ok or not res.text:
-            raise RuntimeError(f"classifier failed: {res.meta.error}")
-        parsed = json.loads(res.text)
+        ok, text, error = self._classify_call(
+            self.classify_prompt(pending), classify_schema(sorted(events), sorted(assets_kw)))
+        if not ok or not text:
+            raise RuntimeError(f"classifier failed: {error}")
+        parsed = json.loads(text)
         labels = parsed.get("labels", []) if isinstance(parsed, dict) else parsed
         valid_hashes = {p["url_hash"] for p in pending}
         for item in labels:
             h = item.get("url_hash")
             ev = item.get("event_class")
-            if h not in valid_hashes or (ev is not None and ev not in EVENT_KEYWORDS):
+            if h not in valid_hashes or (ev is not None and ev not in events):
                 continue
-            assets = sorted(a for a in (item.get("assets") or []) if a in ASSET_KEYWORDS)
+            assets = sorted(a for a in (item.get("assets") or []) if a in assets_kw)
             self.kdb.execute(
                 "UPDATE news_items SET event_class=?, assets=?, classified_by='model'"
                 " WHERE url_hash=?", (ev, json.dumps(assets), h))
         self.kdb.commit()
 
     def corroborate(self) -> None:
+        event_kw, asset_kw = self.event_keywords, self.asset_keywords
         since = now_iso(self.now - timedelta(hours=24))
         rows = self.kdb.execute(
             "SELECT id, url_hash, source, source_class, title, published_at,"
@@ -317,9 +416,9 @@ class Ingest:
                 assets = sorted(json.loads(r["assets_json"] or "[]"))
                 event = r["event_class"]
             else:
-                assets = sorted(a for a, kws in ASSET_KEYWORDS.items()
+                assets = sorted(a for a, kws in asset_kw.items()
                                 if any(k in title_l for k in kws))
-                event = next((ev for ev, kws in EVENT_KEYWORDS.items()
+                event = next((ev for ev, kws in event_kw.items()
                               if any(k in title_l for k in kws)), None)
             ts = r["published_at"] or r["fetched_at"]
             bucket = ts[:11] + ("00" if ts[11:13] < "12" else "12")
@@ -453,17 +552,37 @@ class Ingest:
         return 0 if ok else 1
 
     def _maybe_trigger(self) -> None:
-        """Post-ingest trigger evaluation — fully isolated: a trigger failure
-        never fails ingest (and never blocks the next cycle)."""
+        """Post-ingest signal evaluation — fully isolated: a failure here never fails
+        ingest (and never blocks the next cycle).
+
+        ``signals.integration: pipeline`` with ``scanner.run_after_ingest`` runs one
+        scanner cycle right after the data lands, so a */5 cron miss still gets a scan
+        every 15 minutes. ``legacy`` keeps the original ``TriggerEngine.evaluate()``.
+        """
         try:
             from runs import triggers as triggerslib
+
+            if (self.cfg.signals.enabled
+                    and self.cfg.signals.integration == "pipeline"
+                    and self.cfg.signals.scanner.run_after_ingest):
+                from runs.signals import pipeline as pipelinelib
+
+                with db.connect(self.root / self.cfg.paths.journal_db) as jdb:
+                    report = pipelinelib.on_ingest(self.cfg, jdb, self.kdb,
+                                                   root=self.root, now=self.now)
+                if report is not None:
+                    self._record("scanner", "ok",
+                                 f"candidates={report.candidates} new={len(report.new)}"
+                                 f" screened={len(report.screened)}"
+                                 f" planned={len(report.planned)}")
+                return
 
             result = triggerslib.evaluate_and_fire(self.cfg, self.kdb,
                                                    root=self.root, now=self.now)
             if result and result["fired"]:
                 self._record("trigger", "fired", ",".join(result["reasons"]))
         except Exception as e:  # noqa: BLE001
-            print(f"trigger evaluation failed: {e}", file=sys.stderr)
+            print(f"signal evaluation failed: {e}", file=sys.stderr)
 
 
 def main() -> int:

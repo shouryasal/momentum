@@ -27,7 +27,7 @@ from pathlib import Path
 import yaml
 
 from ops import db
-from ops.config import REPO_ROOT, EarnConfig, load_config
+from ops.config import REPO_ROOT, EarnConfig, load_config, seed_for
 
 
 def measured_cost_bps(root: Path) -> float:
@@ -78,7 +78,7 @@ def run_whatif(cfg: EarnConfig, jdb: sqlite3.Connection, kdb: sqlite3.Connection
         jdb.commit()
         return 0
 
-    nav = float(cfg.sleeves.b.capital_usdt)
+    nav = float(seed_for(cfg, "b"))
     weights: dict[str, float] = {a: 0.0 for a in assets} | {"USDT": 1.0}
     last_rid: str | None = None
     prev_prices: dict[str, float] | None = None

@@ -1,0 +1,10 @@
+# Tier-1 prompt overlay — written ONLY by runs/apply_changes.py and by the console's
+# prompt activation (step-up protected). `active` maps a prompt family to the version that
+# production should use; it wins over the committed default in config/earn.yaml
+# (research.prompt_version, research.stage_prompts) so a prompt change can actually reach
+# production without a tier-2 edit (spec §11 issue 19).
+#
+# Versions are immutable once a snapshot has referenced them: saving a prompt writes a NEW
+# version file, it never rewrites an old one.
+version: 1
+active: {}

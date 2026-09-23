@@ -27,6 +27,8 @@ INPUT_FILES = {
     "graded": "graded_recent.txt", "lessons": "lessons.md", "flags": "flags.json",
     # v2 asset intelligence; pre-v2 snapshots lack these files and read as ""
     "dossiers": "dossiers.md", "event_stats": "event_stats.json",
+    # v3: the validated signal that fired this run (empty for a scheduled run)
+    "signal": "signal.json",
 }
 
 
@@ -44,6 +46,7 @@ class SnapshotMeta:
     token_budget: int
     escalation_reasons: list[str] = field(default_factory=list)
     effort: str | None = None  # default keeps pre-v2 manifests loadable
+    signal_id: str | None = None  # the validated signal that fired this run, if any
 
 
 def slug_for(run_id: str) -> str:

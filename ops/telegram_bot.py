@@ -100,6 +100,88 @@ def cmd_unfreeze(cfg: EarnConfig, now: datetime) -> str:
     return "tier1_freeze cleared" if ok else "tier1_freeze was not active"
 
 
+def cmd_mode(cfg: EarnConfig) -> str:
+    """Per-sleeve mode, straight from the signed file (unverified reads as TEST)."""
+    from ops.lib import mode_state as ms
+
+    state = ms.load()
+    lines = [f"mode: {ms.describe(state)}"]
+    for sleeve in ("a", "b"):
+        sl = state.sleeve(sleeve)
+        seed = f"{sl.seed_usdt:g}" if sl.seed_usdt is not None else "?"
+        lines.append(
+            f"  {sleeve}: {sl.state}"
+            + (f"·{sl.submode}" if sl.submode else "")
+            + f" seed {seed} run {sl.run_id or '-'}"
+        )
+    return "\n".join(lines)
+
+
+def cmd_pending(cfg: EarnConfig, jdb, now: datetime) -> str:
+    """Proposals waiting on a human, with the time left on each."""
+    from runs import approvals
+
+    rows = approvals.pending(jdb, cfg, now=now, limit=10)
+    waiting = [r for r in rows if r["status"] == approvals.STATUS_PENDING]
+    if not waiting:
+        return "no proposals awaiting approval"
+    return "\n".join(
+        f"{r['run_id']} — {r['seconds_left'] // 60} min left"
+        f" ({'abstain' if r['abstain'] else 'targets'})"
+        for r in waiting
+    )
+
+
+def cmd_proposal_decision(cfg: EarnConfig, jdb, run_id: str, decision: str,
+                          now: datetime, note: str | None = None) -> str:
+    """``/approve <run_id>`` and ``/reject <run_id>`` — the live propose-mode gate.
+
+    Signs the approval with ``$EARN_APPROVAL_KEY`` and writes it where the in-container
+    proposal loader can verify it; the console shows the same row.
+    """
+    from ops.lib import audit
+    from runs import approvals
+
+    try:
+        decided = approvals.decide(
+            jdb, cfg, run_id=run_id, decision=decision, actor=audit.actor_telegram(),
+            channel="telegram", note=note, now=now,
+        )
+    except approvals.ApprovalError as e:
+        return f"{decision} failed: {e}"
+    if decision == "approve":
+        return (
+            f"proposal {run_id} APPROVED — valid until {decided.expires_utc}"
+            f" ({decided.path.name if decided.path else 'no file'})"
+        )
+    return f"proposal {run_id} rejected"
+
+
+def cmd_approve(cfg: EarnConfig, jdb, args: list[str], user_id: int,
+                now: datetime) -> str:
+    """``/approve <run_id>`` for a proposal, ``/approve change <id>`` for a change."""
+    if not args:
+        return "usage: /approve <proposal run_id> | /approve change <change_id>"
+    if args[0] == "change":
+        if len(args) < 2:
+            return "usage: /approve change <change_id>"
+        return cmd_approval(jdb, "change", args[1], "approve", user_id)
+    return cmd_proposal_decision(cfg, jdb, args[0], "approve", now,
+                                 " ".join(args[1:]) or None)
+
+
+def cmd_reject(cfg: EarnConfig, jdb, args: list[str], user_id: int,
+               now: datetime) -> str:
+    if not args:
+        return "usage: /reject <proposal run_id> | /reject change <change_id>"
+    if args[0] == "change":
+        if len(args) < 2:
+            return "usage: /reject change <change_id>"
+        return cmd_approval(jdb, "change", args[1], "reject", user_id)
+    return cmd_proposal_decision(cfg, jdb, args[0], "reject", now,
+                                 " ".join(args[1:]) or None)
+
+
 def cmd_approval(jdb, kind: str, ref: str, decision: str, user_id: int) -> str:
     jdb.execute("INSERT INTO approvals(ts_utc, kind, ref, decision, by_user)"
                 " VALUES (?,?,?,?,?)",
@@ -143,14 +225,13 @@ def run_bot() -> int:  # pragma: no cover — needs a live token; logic is teste
     app.add_handler(CommandHandler("kill", guard(
         lambda u, c: cmd_kill(cfg, " ".join(c.args)))))
     app.add_handler(CommandHandler("unfreeze", guard(lambda u, c: cmd_unfreeze(cfg, now()))))
+    app.add_handler(CommandHandler("mode", guard(lambda u, c: cmd_mode(cfg))))
+    app.add_handler(CommandHandler("pending", guard(
+        lambda u, c: cmd_pending(cfg, jdb, now()))))
     app.add_handler(CommandHandler("approve", guard(
-        lambda u, c: cmd_approval(jdb, "change", c.args[0], "approve",
-                                  u.effective_user.id) if c.args
-        else "usage: /approve <id>")))
+        lambda u, c: cmd_approve(cfg, jdb, list(c.args), u.effective_user.id, now()))))
     app.add_handler(CommandHandler("reject", guard(
-        lambda u, c: cmd_approval(jdb, "change", c.args[0], "reject",
-                                  u.effective_user.id) if c.args
-        else "usage: /reject <id>")))
+        lambda u, c: cmd_reject(cfg, jdb, list(c.args), u.effective_user.id, now()))))
     app.add_handler(MessageHandler(filters.COMMAND, guard(lambda u, c: "unknown command")))
     # Long polling ONLY — never a webhook, never a listening socket.
     app.run_polling(allowed_updates=["message"])

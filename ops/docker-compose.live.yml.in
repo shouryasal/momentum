@@ -1,0 +1,42 @@
+# GENERATED FROM ops/docker-compose.live.yml.in by ops.lib.compose.write_live_file().
+# Rendered to var/runtime/docker-compose.live.yml and passed as the SECOND -f layer,
+# after ops/docker-compose.yml and before var/runtime/compose.override.yml.
+#
+# Why this layer exists at all:
+#   * the committed base file always runs the committed config, which always says
+#     dry_run: true — a config save can therefore never flip a bot live;
+#   * mode-dependent settings (dry_run, seed, per-run db_url, stoploss_on_exchange)
+#     live in var/runtime/freqtrade-<s>.mode.json, rendered only from a VERIFIED
+#     var/state/mode.json, and reach freqtrade as a second --config;
+#   * the base command's `--db-url` would override that overlay's db_url, so the
+#     command is replaced here WITHOUT it: the per-run database wins, which is what
+#     gives every test run a fresh Freqtrade DB.
+#
+# __EARN_ROOT__ is substituted with the absolute repo root at render time, so this
+# file is valid regardless of the directory docker compose is invoked from.
+name: __EARN_COMPOSE_PROJECT__
+
+services:
+  freqtrade-a:
+    environment:
+      EARN_RUNTIME: /freqtrade/earn-runtime/runtime-a.json
+    volumes:
+      - __EARN_ROOT__/var/runtime:/freqtrade/earn-runtime:ro
+      - __EARN_ROOT__/ft_userdata/a/runs:/freqtrade/user_data/runs
+      - __EARN_ROOT__/proposals:/freqtrade/proposals:ro
+    command: >
+      trade --logfile /freqtrade/user_data/logs/freqtrade.log
+            --config /freqtrade/earn-config/freqtrade-a.json
+            --config /freqtrade/earn-runtime/freqtrade-a.mode.json
+
+  freqtrade-b:
+    environment:
+      EARN_RUNTIME: /freqtrade/earn-runtime/runtime-b.json
+    volumes:
+      - __EARN_ROOT__/var/runtime:/freqtrade/earn-runtime:ro
+      - __EARN_ROOT__/ft_userdata/b/runs:/freqtrade/user_data/runs
+      - __EARN_ROOT__/proposals:/freqtrade/proposals:ro
+    command: >
+      trade --logfile /freqtrade/user_data/logs/freqtrade.log
+            --config /freqtrade/earn-config/freqtrade-b.json
+            --config /freqtrade/earn-runtime/freqtrade-b.mode.json

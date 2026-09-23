@@ -1,9 +1,26 @@
-"""Model routing (spec §3a): per-task defaults from config/models.yaml merged with
-the tier-1 overlay config/models-auto.yaml (auto-shadow / auto-promotion writes),
-the six hard-case escalation flags, the code-enforced reasoning-effort floor
-("high"; decide/review run at "max"), rate-limit-aware brief throttling under the
-Claude Max subscription (decide runs are never skipped), and the 30-day shadow
-window."""
+"""Model routing — the pre-chain compatibility layer.
+
+The router of record is now ``runs/llm/chain.py``: ordered chains, capability and tier
+filtering, circuit breakers, budgets, journaled switches. This module stays for the
+callers that still speak the old vocabulary — ``research_run``, ``review_run``,
+``daily_review``, ``ingest``, ``maintenance``, ``triggers`` and the replay harness — and
+keeps doing three things the chain router does not:
+
+* :func:`load_models_cfg` returns ``config/models.yaml`` deep-merged with the tier-1
+  overlay ``config/models-auto.yaml`` **as a v1-shaped dict**: ``models`` is
+  alias → pinned string and every task carries a single ``model``. ``models.yaml`` itself
+  is v2 now (ordered ``chain:`` per task), so this view is computed — see :func:`_v1_view`.
+  The overlay keeps working in either shape, which is what lets auto-promotion write
+  ``tasks.decide.model`` while the base file declares ``chain``.
+* :func:`resolve` picks the head of a task's chain **that the direct SDK path can
+  serve**. Local (Ollama) entries are skipped here, because these callers hand
+  ``choice.model`` straight to ``decision_core.run_stage`` — a pinned Claude model id is
+  the only thing that means anything there. Routing to a local model is ``run_task``'s
+  job, and only ``run_task`` knows how to give it a context pack.
+* the hard-case escalation flags, the code-enforced effort floor (``high``; decide and
+  review run at ``max``), rate-limit-aware brief throttling under the Claude Max
+  subscription (decide runs are never skipped), and the 30-day shadow window.
+"""
 
 from __future__ import annotations
 
@@ -69,20 +86,62 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
     return out
 
 
+def _is_local(entry) -> bool:
+    """A models entry that lives on the local Ollama daemon.
+
+    Overlay-added pins are bare strings with no provider; those are Claude models (that
+    is the only thing auto-promotion ever pins), so an unknown shape is not local.
+    """
+    return isinstance(entry, dict) and entry.get("provider") == "ollama"
+
+
+def _v1_view(merged: dict) -> dict:
+    """Project the merged v2 config onto the v1 shape the legacy callers read.
+
+    ``models`` becomes alias → pinned string; each task gains a ``model`` (the first
+    chain entry the SDK path can serve) and a ``fallback`` (v1's key, or the v2
+    ``on_all_failed`` policy name). ``chain`` is left in place for anything that wants it.
+    """
+    out = dict(merged)
+    raw_models = dict(merged.get("models") or {})
+    local = {alias for alias, entry in raw_models.items() if _is_local(entry)}
+    out["models"] = {
+        alias: (entry.get("id") if isinstance(entry, dict) else entry)
+        for alias, entry in raw_models.items()
+        if entry is not None
+    }
+    tasks: dict = {}
+    for name, raw in (merged.get("tasks") or {}).items():
+        task = dict(raw or {})
+        chain = [c for c in (task.get("chain") or []) if c]
+        if not task.get("model"):
+            servable = [c for c in chain if c not in local] or chain
+            if servable:
+                task["model"] = servable[0]
+        if "fallback" not in task:
+            task["fallback"] = task.get("on_all_failed")
+        tasks[name] = task
+    out["tasks"] = tasks
+    return out
+
+
 def load_models_cfg(path: Path | None = None,
                     overlay_path: Path | None = None) -> dict:
     """config/models.yaml (tier-2, human base) deep-merged with the tier-1 overlay
-    config/models-auto.yaml where auto-shadow windows and auto-promotions live.
-    The overlay may add `models:` pins, override `tasks.<t>.model` and own the
-    whole `shadow:` block; it can never lower effort below the floor (clamped in
-    resolve())."""
+    config/models-auto.yaml where auto-shadow windows and auto-promotions live,
+    projected onto the v1 shape these callers read.
+
+    The overlay may add `models:` pins, override `tasks.<t>.model` (or `chain`) and own
+    the whole `shadow:` block; it can never lower effort below the floor (clamped in
+    resolve()). The strict v2 overlay whitelist lives in `ops.models_config.apply_overlay`
+    and is what the console and `runs/llm/chain.py` load through."""
     base = yaml.safe_load((path or REPO_ROOT / "config" / "models.yaml").read_text())
     op = overlay_path or (path.parent / "models-auto.yaml" if path else OVERLAY_PATH)
     try:
         overlay = yaml.safe_load(Path(op).read_text()) or {}
     except OSError:
         overlay = {}
-    return _deep_merge(base, overlay)
+    return _v1_view(_deep_merge(base, overlay))
 
 
 def write_models_overlay(mutate_fn, overlay_path: Path | None = None) -> dict:
@@ -184,7 +243,8 @@ def resolve(task: str, flags: HardCaseFlags | None = None,
         task=task, model=models[key], escalated=escalated,
         escalation_reasons=reasons,
         fallback=t.get("fallback"), retry=int(t.get("retry", 0)),
-        max_usd=float(t["max_usd_per_run"]), max_turns=int(t["max_turns"]),
+        max_usd=float(t.get("max_usd_per_run") or 0.0),
+        max_turns=int(t.get("max_turns") or 1),
         effort=clamp_effort(t.get("effort")),
     )
 

@@ -28,7 +28,11 @@ INPUT_BUDGETS = {
     "state": 1000, "brief": 2500, "positions": 1000,
     "graded": 2000, "lessons": 2500, "flags": 500,
     "dossiers": 1500, "event_stats": 600,   # v2 asset intelligence
+    "signal": 1500,                          # v3 validated-signal block
 }
+
+#: The tier-1 overlay the change gate may write; it may only pin a prompt version.
+PROMPTS_OVERLAY = "config/prompts-auto.yaml"
 HARD_CAP = 20000
 TARGET_CAP = 12000
 
@@ -76,8 +80,74 @@ def _forbid_pnl(graded: str) -> str:
     return graded
 
 
+def prompt_version_for(cfg: EarnConfig, root: Path | None = None) -> str:
+    """``research.prompt_version`` with the tier-1 ``config/prompts-auto.yaml`` overlay.
+
+    The overlay may pin only the version (``research: {prompt_version: research.v4}``);
+    anything else in it is ignored here, because the file's whole remit is "which prompt
+    version is active" and the change gate is what decides whether it may say so.
+    """
+    root = root or REPO_ROOT
+    version = cfg.research.prompt_version
+    try:
+        overlay = yaml.safe_load((root / PROMPTS_OVERLAY).read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return version
+    candidate = (overlay.get("research") or {}).get("prompt_version")
+    if isinstance(candidate, str) and candidate.startswith("research.v"):
+        return candidate
+    return version
+
+
+def signal_block(jdb: sqlite3.Connection, signal_id: str | None) -> str:
+    """The VALIDATED SIGNAL block: candidate, features, thesis, counter-evidence.
+
+    Built from the journal, not from anything a model said in passing — the validator's
+    row is the record. Missing or unvalidated ⇒ ``""``, which renders as "(none)".
+    """
+    if not signal_id:
+        return ""
+    try:
+        sig = jdb.execute("SELECT * FROM signals WHERE signal_id=?",
+                          (signal_id,)).fetchone()
+        val = jdb.execute(
+            "SELECT * FROM signal_validations WHERE signal_id=? ORDER BY id DESC LIMIT 1",
+            (signal_id,)).fetchone()
+    except sqlite3.Error:
+        return ""
+    if sig is None:
+        return ""
+
+    def _j(text, default):
+        try:
+            return json.loads(text) if text else default
+        except (TypeError, json.JSONDecodeError):
+            return default
+
+    payload = {
+        "signal_id": sig["signal_id"], "detected_at": sig["ts_utc"],
+        "detector": sig["detector"], "pair": sig["pair"], "direction": sig["direction"],
+        "detector_score": sig["detector_score"], "screen_score": sig["screen_score"],
+        "screen_rationale": sig["screen_rationale"], "status": sig["status"],
+        "features": _j(sig["features_json"], {}).get("cited", {}),
+        "detector_detail": _j(sig["features_json"], {}).get("detail", {}),
+    }
+    if val is not None:
+        payload["validation"] = {
+            "verdict": val["verdict"], "confidence": val["confidence"],
+            "model": val["model"], "provider": val["provider"],
+            "thesis": val["thesis"], "reasons": _j(val["reasons_json"], []),
+            "counter_evidence": _j(val["counter_evidence_json"], []),
+            "invalidation": val["invalidation"],
+            "horizon_hours": val["horizon_hours"],
+            "suggested": _j(val["suggested_json"], None),
+        }
+    return json.dumps(payload, indent=2, sort_keys=True)
+
+
 def gather_inputs(cfg: EarnConfig, jdb: sqlite3.Connection,
-                  root: Path | None = None) -> dict[str, str]:
+                  root: Path | None = None,
+                  signal_id: str | None = None) -> dict[str, str]:
     root = root or REPO_ROOT
 
     def read(p: Path, default: str) -> str:
@@ -125,6 +195,7 @@ def gather_inputs(cfg: EarnConfig, jdb: sqlite3.Connection,
         "flags": json.dumps(active, indent=2, sort_keys=True),
         "dossiers": dossiers,
         "event_stats": event_stats,
+        "signal": signal_block(jdb, signal_id),
     }
 
 
@@ -170,7 +241,8 @@ def load_fewshot(root: Path, cfg: EarnConfig, now: datetime) -> str:
 def build(template: str, *, run_id: str, limits: str, fewshot: str,
           inputs: dict[str, str], escalation_reasons: list[str],
           prompt_version: str) -> BuiltPrompt:
-    inputs = {k: _truncate(v, INPUT_BUDGETS[k]) for k, v in inputs.items()}
+    inputs = {k: _truncate(v, INPUT_BUDGETS[k]) for k, v in inputs.items()
+              if k in INPUT_BUDGETS}
     _forbid_pnl(inputs["graded"])
     text = (template
             .replace("{{LIMITS}}", limits.rstrip("\n"))
@@ -184,7 +256,8 @@ def build(template: str, *, run_id: str, limits: str, fewshot: str,
             .replace("{{LESSONS}}", inputs["lessons"])
             .replace("{{FLAGS}}", inputs["flags"])
             .replace("{{DOSSIERS}}", inputs.get("dossiers") or "(no dossiers yet)")
-            .replace("{{EVENT_STATS}}", inputs.get("event_stats") or "{}"))
+            .replace("{{EVENT_STATS}}", inputs.get("event_stats") or "{}")
+            .replace("{{SIGNAL}}", inputs.get("signal") or "null"))
     est = token_estimate(text)
     if est > HARD_CAP:
         raise PromptBudgetExceeded(f"prompt estimate {est} > {HARD_CAP} tokens")
@@ -197,15 +270,21 @@ def build(template: str, *, run_id: str, limits: str, fewshot: str,
 def build_research_prompt(cfg: EarnConfig, jdb: sqlite3.Connection, run_id: str,
                           escalation_reasons: list[str], now: datetime,
                           root: Path | None = None,
-                          prompt_version: str = "research.v2"
+                          prompt_version: str | None = None,
+                          signal_id: str | None = None
                           ) -> tuple[BuiltPrompt, dict[str, str], str, str]:
     """Returns (prompt, inputs, limits, fewshot) — inputs/limits/fewshot go into the
-    snapshot so replay can rebuild byte-identically."""
+    snapshot so replay can rebuild byte-identically.
+
+    ``prompt_version`` defaults to ``research.prompt_version`` (plus the tier-1
+    ``config/prompts-auto.yaml`` overlay) instead of a constant in this file.
+    """
     root = root or REPO_ROOT
+    prompt_version = prompt_version or prompt_version_for(cfg, root)
     template = (root / "prompts" / f"{prompt_version}.md").read_text()
     limits = limits_yaml(cfg)
     fewshot = load_fewshot(root, cfg, now)
-    inputs = gather_inputs(cfg, jdb, root)
+    inputs = gather_inputs(cfg, jdb, root, signal_id=signal_id)
     bp = build(template, run_id=run_id, limits=limits, fewshot=fewshot, inputs=inputs,
                escalation_reasons=escalation_reasons, prompt_version=prompt_version)
     return bp, inputs, limits, fewshot
@@ -237,6 +316,7 @@ def build_from_snapshot(snapshot_dir: Path, prompt_version: str | None = None,
         "flags": _read("flags.json"),
         "dossiers": _read("dossiers.md"),
         "event_stats": _read("event_stats.json"),
+        "signal": _read("signal.json"),
     }
     limits = (snapshot_dir / "limits.yaml").read_text()
     fewshot = (snapshot_dir / "fewshot.txt").read_text()

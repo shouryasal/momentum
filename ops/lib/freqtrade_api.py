@@ -75,13 +75,59 @@ class BotApi:
     def profit(self) -> dict:
         return self._get("profit")
 
+    def show_config(self) -> dict:
+        """The bot's effective config: ``dry_run``, ``strategy``, ``bot_name``, ``state``…
+
+        This is what the mode transition verifies at step 9 and what the console's bot
+        cards and the live preflight read, so a mismatch is caught before an order is.
+        """
+        return self._get("show_config")
+
+    def locks(self) -> dict:
+        """Active pair locks (``{"lock_count": N, "locks": [...]}``)."""
+        return self._get("locks")
+
+    def trades(self, limit: int = 100, offset: int = 0) -> dict:
+        """Closed trades, newest first."""
+        return self._get(f"trades?limit={int(limit)}&offset={int(offset)}")
+
+    def performance(self) -> list[dict]:
+        """Per-pair realised performance."""
+        return self._get("performance")
+
     # -- actions ---------------------------------------------------------------
 
     def forceexit(self, tradeid: str = "all") -> dict:
         return self._post("forceexit", {"tradeid": tradeid})
 
+    def stopentry(self) -> dict:
+        """Stop opening new trades. ``stopentry`` on 2026.8, ``stopbuy`` before it.
+
+        THE one implementation. Five callers used to carry their own
+        ``getattr(api, 'stopentry', 'stopbuy')`` shim, which meant five places to be
+        wrong about which name this freqtrade answers to.
+        """
+        try:
+            return self._post("stopentry")
+        except FreqtradeApiError as e:
+            if " -> 404" not in str(e) and " -> 405" not in str(e):
+                raise
+            return self._post("stopbuy")
+
     def stopbuy(self) -> dict:
+        """Pre-2026.8 name for :meth:`stopentry`. Kept for the older API only."""
         return self._post("stopbuy")
+
+    def start(self) -> dict:
+        """Leave the ``stopped``/``stop_entry`` state and trade normally again."""
+        return self._post("start")
+
+    def stop(self) -> dict:
+        return self._post("stop")
+
+    def delete_lock(self, lock_id: int | str) -> dict:
+        """Remove one freqtrade pair lock (the Risk page's resume wizard)."""
+        return self._delete(f"locks/{lock_id}")
 
     def cancel_open_order(self, trade_id: int) -> dict:
         return self._delete(f"trades/{trade_id}/open-order")

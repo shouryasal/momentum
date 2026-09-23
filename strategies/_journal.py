@@ -77,17 +77,20 @@ def record_gate_decision(
     nav: float | None = None,
     gross_exposure: float | None = None,
     strategy_version: str | None = None,
+    run_id: str | None = None,
+    action: str | None = None,
+    trade_id: int | None = None,
 ) -> int | None:
     sev = severity or ("allow" if allowed else "reject")
     q_ts, q_bid, q_ask = quote if quote else (None, None, None)
     return _execute(
         "INSERT INTO gate_decisions(ts_utc, sleeve, pair, side, intent, callback, allowed,"
         " reason, severity, checks_json, proposed_stake, quote_bid, quote_ask, quote_ts,"
-        " nav, gross_exposure, strategy_version)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " nav, gross_exposure, strategy_version, run_id, action, trade_id)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (utc_now(), sleeve.lower(), pair, side, intent, callback, int(allowed), reason, sev,
          json.dumps(checks) if checks else None, proposed_stake, q_bid, q_ask, q_ts,
-         nav, gross_exposure, strategy_version),
+         nav, gross_exposure, strategy_version, run_id, action, trade_id),
     )
 
 
@@ -104,13 +107,15 @@ def record_order(
     ft_trade_id: int | None = None,
     ft_order_id: str | None = None,
     proposal_run_id: str | None = None,
+    mode: str | None = None,
+    run_id: str | None = None,
 ) -> int | None:
     return _execute(
         "INSERT INTO orders(gate_decision_id, ts_utc, sleeve, pair, side, order_type,"
-        " ft_trade_id, ft_order_id, amount, price, status, proposal_run_id)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        " ft_trade_id, ft_order_id, amount, price, status, proposal_run_id, mode, run_id)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (gate_decision_id, utc_now(), sleeve.lower(), pair, side, order_type,
-         ft_trade_id, ft_order_id, amount, price, status, proposal_run_id),
+         ft_trade_id, ft_order_id, amount, price, status, proposal_run_id, mode, run_id),
     )
 
 
@@ -127,15 +132,18 @@ def record_fill(
     fee_currency: str | None = None,
     ft_order_id: str | None = None,
     quote: tuple[str, float, float] | None = None,  # (ts_utc, bid, ask) — the TCA anchor
+    mode: str | None = None,
+    run_id: str | None = None,
 ) -> int | None:
     q_ts, q_bid, q_ask = quote if quote else (None, None, None)
     return _execute(
         "INSERT INTO fills(order_id, gate_decision_id, ts_utc, sleeve, pair, side,"
         " fill_amount, fill_price, fee_amount, fee_currency, ft_order_id,"
-        " quote_bid, quote_ask, quote_ts)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " quote_bid, quote_ask, quote_ts, mode, run_id)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (order_id, gate_decision_id, utc_now(), sleeve.lower(), pair, side,
-         fill_amount, fill_price, fee_amount, fee_currency, ft_order_id, q_bid, q_ask, q_ts),
+         fill_amount, fill_price, fee_amount, fee_currency, ft_order_id, q_bid, q_ask, q_ts,
+         mode, run_id),
     )
 
 

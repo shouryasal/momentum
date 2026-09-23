@@ -1,20 +1,27 @@
 """Sleeve A — the rules sleeve: 200d-MA trend regime (with hysteresis), volatility
-targeting, weekly DCA top-ups. Parameters come from config/params-sleeve-a.json
-(tier 1, reloaded on mtime change); bounds live in earn.yaml (tier 2).
+targeting, calendar DCA top-ups. Parameters come from config/params-sleeve-a.json
+(tier 1, reloaded on mtime change and clamped to earn.yaml bounds); every limit and
+every mechanic comes from config, never from this file.
+
+The only thing this class adds to ``EarnBaseStrategy`` is *what* it wants: target
+weights from the rules, and a calendar DCA chunk. How that is sized, priced, gated and
+clamped lives in ``earn_base``/``riskgate``/``mechanics``.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime
 
 from freqtrade.strategy import informative
 from pandas import DataFrame
 
 try:
+    from strategies import mechanics as mx
     from strategies import sleeve_common as sc
     from strategies.earn_base import EarnBaseStrategy
     from strategies.riskgate import PortfolioState
 except ImportError:  # in-container flat layout
+    import mechanics as mx
     import sleeve_common as sc
     from earn_base import EarnBaseStrategy
     from riskgate import PortfolioState
@@ -41,7 +48,8 @@ class SleeveA(EarnBaseStrategy):
         )
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe["atr"] = sc.atr(dataframe, 14)
+        atr_period = int((self.mech.get("stoploss") or {}).get("atr", {}).get("period", 14))
+        dataframe["atr"] = sc.atr(dataframe, atr_period)
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -76,43 +84,57 @@ class SleeveA(EarnBaseStrategy):
 
     def _desired_stake(self, pair: str, ps: PortfolioState, proposed: float,
                        entry_tag: str | None) -> float:
+        if self._reentry_blocked(pair, ps.now):
+            return 0.0
         gap = sc.desired_stake_for_target(
             self._target_weight(pair), ps.nav, ps.positions.get(pair, 0.0))
         if entry_tag == "dca":
-            chunk = self._p("dca", "chunk_pct_nav", default=0.05) * ps.nav
-            return min(gap, chunk)
+            return min(gap, self._scheduled_chunk(ps))
         return gap
 
-    # ------------------------------------------------------------------ DCA top-ups
+    # ------------------------------------------------------------------ calendar DCA
+
+    def _scheduled(self) -> dict:
+        """``trading.*.scheduled_dca`` with the tier-1 params file as the override."""
+        cfg = dict(self.mech.get("scheduled_dca") or {})
+        for key, source in (("interval_days", "interval_days"), ("chunk_pct_nav", "chunk_pct_nav")):
+            value = self._p("dca", source, default=None)
+            if value is not None:
+                cfg[key] = value
+        return cfg
+
+    def _scheduled_chunk(self, ps: PortfolioState) -> float:
+        return float(self._scheduled().get("chunk_pct_nav", 0.05) or 0.0) * ps.nav
 
     def _dca_due(self, pair: str, now: datetime) -> bool:
+        """Due only ``interval_days`` after the last DCA **fill** (spec section 9)."""
         raw = self.gate.store.get(f"last_dca_fill_{pair}")
-        if not raw:
-            return True
-        try:
-            last = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            return True
-        return now - last >= timedelta(days=self._p("dca", "interval_days", default=7))
+        last = None
+        if raw:
+            try:
+                last = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except ValueError:
+                last = None
+            else:
+                last = last if last.tzinfo else last.replace(tzinfo=UTC)
+        return mx.scheduled_dca_due(self._scheduled(), now=now, last_fill=last)
 
-    def adjust_trade_position(self, trade, current_time, current_rate, current_profit,
-                              min_stake, max_stake, current_entry_rate, current_exit_rate,
-                              current_entry_profit, current_exit_profit, **kwargs):
-        pair = trade.pair
-        ps = self._portfolio_state(current_time)
+    def _sleeve_adjust(self, trade, ps: PortfolioState, current_time: datetime,
+                       current_rate: float, current_profit: float) -> float | None:
+        """Sleeve A's calendar DCA: one chunk toward the target, gated like any entry.
+
+        The ``last_dca_fill_<pair>`` stamp is written in ``order_filled`` — on the
+        FILL, not here on submission — so a cancelled or unfilled chunk does not
+        consume the week's DCA.
+        """
+        pair = str(trade.pair)
+        if self._reentry_blocked(pair, current_time):
+            return None
         target_w = self._target_weight(pair)
         if target_w <= 0 or not self._dca_due(pair, current_time):
             return None
         gap = target_w * ps.nav - ps.positions.get(pair, 0.0)
-        if gap / max(ps.nav, 1e-9) <= self.gate_cfg.rebalance_band:
+        if gap <= 0 or mx.within_band(gap, ps.nav, self.gate_cfg.rebalance_band):
             return None
-        chunk = min(gap, self._p("dca", "chunk_pct_nav", default=0.05) * ps.nav)
-        d = self.gate.check_entry(pair, chunk, ps)
-        if not d.allowed:
-            return None
-        stake = self.gate.cap_stake(pair, chunk, ps)
-        if stake <= 0:
-            return None
-        self.gate.store.set(f"last_dca_fill_{pair}",
-                            current_time.strftime("%Y-%m-%dT%H:%M:%SZ"))
-        return stake
+        chunk = min(gap, self._scheduled_chunk(ps))
+        return self._gated_add(pair, chunk, ps, trade=trade, tag="scheduled_dca")

@@ -54,6 +54,57 @@ def _json_block(text: str | None) -> list[str]:
         return [str(text)]
 
 
+def _signal_section(jdb: sqlite3.Connection, run_id: str, run) -> list[str]:
+    """The tiered-signal story behind a triggered run: detector, screener, validator.
+
+    A scheduled run has no signal and the section says so in one line, so the trace shape
+    stays the same whichever way a decision was reached.
+    """
+    L = ["## 2b · Signal that fired this run", ""]
+    signal_id = None
+    try:
+        signal_id = run["signal_id"] if run is not None else None
+    except (IndexError, KeyError):
+        signal_id = None
+    sig = None
+    if signal_id:
+        sig = _row(jdb, "SELECT * FROM signals WHERE signal_id=?", (signal_id,))
+    if sig is None:
+        sig = _row(jdb, "SELECT * FROM signals WHERE run_id=? OR proposal_run_id=?"
+                        " ORDER BY ts_utc DESC LIMIT 1", (run_id, run_id))
+    if sig is None:
+        return [*L, "Scheduled run — no signal.", ""]
+    L += [f"- signal: `{sig['signal_id']}` ({sig['detector']}"
+          f" · {_fmt(sig['pair'])} · {_fmt(sig['direction'])})",
+          f"- detected: {_fmt(sig['ts_utc'])} · scan `{_fmt(sig['scan_id'])}`"
+          f" · fast path: {bool(sig['fast_path'])}",
+          f"- detector score: {_fmt(sig['detector_score'])}"
+          f" · screen score: {_fmt(sig['screen_score'])}"
+          f" · combined: {_fmt(sig['strength'])}",
+          f"- screener: {_fmt(sig['screen_provider'])} / {_fmt(sig['screen_model'])}"
+          f" — {_fmt(sig['screen_rationale'])}",
+          f"- status: {sig['status']} ({_fmt(sig['status_reason'])})"]
+    if sig["blocked_json"]:
+        L.append(f"- guards blocked: {sig['blocked_json']}")
+    val = _row(jdb, "SELECT * FROM signal_validations WHERE signal_id=?"
+                    " ORDER BY id DESC LIMIT 1", (sig["signal_id"],))
+    if val is None:
+        L += ["- validator: (not run)", ""]
+        return L
+    L += [f"- validator: {_fmt(val['provider'])} / {_fmt(val['model'])}"
+          f" — **{val['verdict']}** at confidence {_fmt(val['confidence'])}"
+          f" (escalated: {bool(val['escalated'])})",
+          f"- thesis: {_fmt(val['thesis'])}",
+          "- reasons:", *_json_block(val["reasons_json"]),
+          "- counter-evidence:", *_json_block(val["counter_evidence_json"]),
+          f"- invalidation: {_fmt(val['invalidation'])}",
+          f"- horizon: {_fmt(val['horizon_hours'], 'h')}"
+          f" · outcome: {_fmt(val['outcome_ret'], '%')}"
+          f" · hit: {_fmt(val['outcome_hit'])}",
+          f"- evidence pack: `{_fmt(val['pack_path'])}`", ""]
+    return L
+
+
 def build_trace(cfg: EarnConfig, jdb: sqlite3.Connection, run_id: str,
                 root: Path | None = None) -> str:
     root = root or REPO_ROOT
@@ -100,6 +151,9 @@ def build_trace(cfg: EarnConfig, jdb: sqlite3.Connection, run_id: str,
         L.append("- raw responses: " + ", ".join(
             f"`{p.name}`" for p in sorted(outputs.iterdir())))
     L.append("")
+
+    # ---- 2b the signal that fired this run, if any
+    L += _signal_section(jdb, run_id, run)
 
     # ---- 3 proposal
     L += ["## 3 · Proposal & validation", ""]

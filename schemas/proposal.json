@@ -1,32 +1,148 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Earn proposal (spec section 6)",
+  "title": "Earn proposal (spec section 7, schema_version 3)",
   "type": "object",
   "additionalProperties": false,
-  "required": ["run_id", "prompt_version", "module", "targets", "exposure_scale",
-               "confidence", "abstain", "horizon_days", "rationale", "invalidation"],
+  "required": [
+    "run_id",
+    "prompt_version",
+    "module",
+    "targets",
+    "exposure_scale",
+    "confidence",
+    "abstain",
+    "horizon_days",
+    "rationale",
+    "invalidation"
+  ],
   "properties": {
-    "run_id": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}[+-]\\d{2}:\\d{2}$" },
-    "prompt_version": { "type": "string", "pattern": "^research\\.v\\d+$" },
-    "module": { "enum": ["trend", "dca", "cash", "hold"] },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 3
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}[+-]\\d{2}:\\d{2}$"
+    },
+    "prompt_version": {
+      "type": "string",
+      "pattern": "^research\\.v\\d+$"
+    },
+    "module": {
+      "enum": [
+        "trend",
+        "dca",
+        "cash",
+        "hold"
+      ]
+    },
     "targets": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["BTC", "ETH", "USDT"],
+      "required": [
+        "BTC",
+        "ETH",
+        "USDT"
+      ],
       "properties": {
-        "BTC": { "type": "number", "minimum": 0, "maximum": 1 },
-        "ETH": { "type": "number", "minimum": 0, "maximum": 1 },
-        "USDT": { "type": "number", "minimum": 0, "maximum": 1 }
+        "BTC": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "ETH": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "USDT": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
       }
     },
-    "exposure_scale": { "type": "number", "minimum": 0, "maximum": 1 },
-    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-    "abstain": { "type": "boolean" },
-    "horizon_days": { "type": "integer", "minimum": 1, "maximum": 30 },
-    "rationale": {
-      "type": "array", "minItems": 1, "maxItems": 6,
-      "items": { "type": "string", "maxLength": 200 }
+    "exposure_scale": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
     },
-    "invalidation": { "type": "string", "minLength": 10, "maxLength": 300 }
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "abstain": {
+      "type": "boolean"
+    },
+    "horizon_days": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 30
+    },
+    "rationale": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    },
+    "invalidation": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 300
+    },
+    "signal_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 120
+    },
+    "plan": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "entry_style": {
+          "enum": [
+            "passive",
+            "cross"
+          ]
+        },
+        "stop_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "take_profit_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "dca_allowed": {
+          "type": "boolean"
+        },
+        "valid_for_hours": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 720
+        }
+      }
+    }
   }
 }

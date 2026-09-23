@@ -1,16 +1,55 @@
 # config/earn.yaml — the single source of truth for Earn's limits, universe and schedules.
-# TIER 2: human-only. Every risk default below is a spec-§9 value; tests assert them literally.
+# TIER 2: human-only, edited through the console (or `python -m console.cli`), which writes
+# the bless digest. Every risk default below is a spec-§9 value; tests assert them literally.
 # Generated configs (freqtrade-*.json, riskgate.json, params-sleeve-*.json) are rendered
-# from this file by `python -m ops.gen_freqtrade_config`.
+# from this file by `python -m ops.gen_freqtrade_config`; machine-local, mode-dependent
+# output goes to var/runtime/ and is never committed.
+#
+# `phase:` is GONE. The live/test state per sleeve lives in the signed var/state/mode.json
+# (ops/lib/mode_state.py) and EarnConfig.phase is computed from it. A legacy `phase:` key
+# still loads, warns and is ignored.
 
 meta:
-  config_version: 1
+  config_version: 2
   display_timezone: "Asia/Dubai"   # schedules below are Gulf time (UTC+4, no DST)
 
-phase: paper                       # paper | live_propose | live_execute
+runtime:                           # host facts ops/setup.sh writes and preflight re-checks
+  data_root: null                  # null = repo root; must be ext4 (9p/drvfs is refused)
+  docker: { runtime: engine, compose_project: earn }
+  require_host_awake_for_live: true
+  require_keepalive_task_for_live: true
+
+console:
+  port: 8765                       # the bind address is the code constant 127.0.0.1
+  session_hours: 12
+  stepup_minutes: 10
+  git_commit_on_save: true
+  effects_default: apply_now
+  poll_ms: { db: 2000, bots: 10000 }
+
+git:
+  live_branch: claude/code-building-plan-qxzqsg
+  worktree_root: "../earn-worktrees"
+  worktree_ttl_days: 14
+
+security:
+  agent_user: null                 # e.g. "earn-agent" once ops/setup_agent_user.sh has run
+  agent_cli_wrapper: null          # "ops/agent_cli.sh" — required for LIVE_EXECUTE
+  console_bind_note: "127.0.0.1 only (invariant)"
 
 autonomy:
-  tier1_auto_merge: true           # paper phase: auto-merge tier-1 changes when thresholds pass
+  tier1_auto_merge: true           # master switch; false = every tier-1 change is HELD
+  kinds:                           # kind -> {test|live: auto|approve|off}
+    params:     { test: auto,    live: approve }
+    prompt:     { test: auto,    live: approve }
+    skill_edit: { test: auto,    live: approve }
+    skill_new:  { test: approve, live: approve }   # with scripts/**: ALWAYS approve (code invariant)
+    skill_bind: { test: approve, live: approve }
+    model:      { test: approve, live: approve }
+    revert:     { test: auto,    live: auto }      # restoring a previously approved state
+  live_forces_human: true
+  max_auto_merges_per_week: 5
+  auto_revert: { enabled: true, window_days: 7, validity_drop_pct: 10, breach_increase: 1 }
 
 universe:
   quote: USDT
@@ -23,9 +62,28 @@ exchange:
   fee_bps_assumed: 10              # base taker; BNB discount is measured by TCA, not assumed
 
 sleeves:
-  a: { label: rules,  strategy: Scaffold, capital_usdt: 10000 }   # capital = PLACEHOLDER until live
-  b: { label: claude, strategy: Scaffold, capital_usdt: 10000 }   # strategy -> SleeveA/SleeveB (M2/M4)
+  a: { label: rules,  strategy: SleeveA }   # seed: modes.test.seed_usdt / the live mode file
+  b: { label: claude, strategy: SleeveB }
   benchmark: { label: hold_btc, pair: "BTC/USDT" }
+
+modes:
+  test:
+    seed_usdt: { a: 10000, b: 10000 }       # seed for the NEXT test run (reset required)
+    label: "baseline"
+    simulate_approval: false                # rehearse propose-mode approvals in TEST
+    benchmark_from_run_start: true
+  live:
+    max_seed_usdt: { a: 1000, b: 1000 }     # hard ceiling enforced by preflight
+    min_test_days: 90                       # planning doc §10 (G3)
+    min_propose_days: 30                    # before LIVE_EXECUTE (G6)
+    require_zero_breach_days: 30
+    submode_default: propose
+    approval_ttl_hours: 6
+    flatten_on_exit: true
+    require_agent_user_for_execute: true
+    require_stoploss_on_exchange: true
+    one_live_sleeve_per_account: true
+    confirm_phrase: "GO LIVE {sleeve} {seed} USDT"
 
 risk:                              # the gate reads these (via riskgate.json); one test per control
   max_weight: { BTC: 0.40, default: 0.30 }   # fraction of sleeve NAV, keyed by base asset
@@ -42,6 +100,50 @@ risk:                              # the gate reads these (via riskgate.json); o
   stoploss_per_trade: 0.15         # per-trade safety net (freqtrade stoploss, market order)
   blackout: { macro_events: [US_CPI, FOMC], window_minutes: 60 }
   kill_file: ops/killdir/KILL
+  max_entries_per_trade: 4         # initial + DCA + pyramid adds
+  max_order_notional_pct: 0.20     # single order <= 20% of ledger NAV
+  max_orders_per_day: 12           # discretionary orders per sleeve per Gulf day
+  max_turnover_pct_per_day: 0.50   # traded notional / NAV per Gulf day
+  max_fee_pct_per_month: 0.01      # 1% NAV/month fee budget (matches G2/G3)
+  market_entries_allowed: false    # market ENTRY orders need an explicit human opt-in
+  protections: { max_drawdown: { lookback_candles: 6, trade_limit: 2 } }
+  reconcile: { tolerance_pct: 0.005, dust_usdt: 10.0, block_on_mismatch: true }
+
+trading:                           # every value bounded by risk.*; all human-only
+  timeframe: "4h"
+  startup_candles: auto            # auto => (bounds['sleeve_a.trend.ma_days'].max + 20) days
+  defaults:
+    sizing_mode: target_weight
+    order_types: { entry: limit, exit: limit }   # stoploss/emergency_exit/force_exit are market
+    entry_price: { side: bid, offset_bps: 0 }
+    exit_price:  { side: ask, offset_bps: 0 }
+    reprice_on_timeout: false
+    stoploss:
+      fixed_pct: 0.10              # <= risk.stoploss_per_trade (cross-validated)
+      on_exchange: auto            # auto => true in LIVE (required), false in TEST
+      trailing: { enabled: false, activate_profit_pct: 0.04, distance_pct: 0.03,
+                  only_offset_reached: true }
+      atr: { enabled: false, period: 14, mult: 3.0, timeframe: "4h" }
+      reentry_cooldown_hours: 24
+    take_profit:
+      roi_table: { "0": 10.0 }     # 10.0 = effectively off (today's behaviour)
+      ladder: []                   # e.g. [{at_profit_pct: 0.10, sell_fraction: 0.25}]
+    dca:      { enabled: false, max_adds: 2, step_pct: 0.05, size_multiplier: 1.0,
+                cooldown_hours: 24, only_if_regime_up: true }
+    pyramid:  { enabled: false, max_adds: 1, trigger_profit_pct: 0.05, size_multiplier: 0.5,
+                cooldown_hours: 24 }
+    scheduled_dca: { enabled: true, interval_days: 7, chunk_pct_nav: 0.05 }
+    rebalance: { min_interval_hours: 4, band_source: execution }
+    exchange_limits: { respect_min_stake: true, full_exit_below_min: true,
+                       backoff_minutes: [15, 60, 240] }
+  sleeves:
+    a: { dca: { enabled: false } }  # deep-merged over defaults
+    b: {}
+  plan_bounds:                      # clamps for the optional proposal.plan block
+    stop_pct: { min: 0.03, max: 0.15 }
+    take_profit_pct: { min: 0.03, max: 0.50 }
+    allowed_entry_styles: [passive, cross]
+    allow_model_urgency: false
 
 proposal:
   schema: schemas/proposal.json
@@ -93,6 +195,65 @@ tca:
   quote_fallback_max_s: 900
   alert_bps: 30                    # rolling 7d cost above this -> healthcheck alert + hard-case flag
 
+research:
+  slots: ["08:30", "16:00"]        # THE single source: cron lines, nearest_slot, healthcheck artifact
+  deadline_s: 2400
+  stage_deadlines_s: { flags: 240, brief: 360, decide: 900, shadow: 240 }
+  postflight_margin_s: 120
+  prompt_version: research.v3
+  stage_prompts:                   # code constants moved to files (tier 1, editable in the UI)
+    flags: prompts/stages/flags.v1.md
+    brief: prompts/stages/brief.v1.md
+    brief_short: prompts/stages/brief_short.v1.md
+    classify: prompts/stages/classify.v1.md
+    scan: prompts/stages/scan.v1.md
+    validate: prompts/stages/validate.v1.md
+
+signals:
+  enabled: true
+  integration: pipeline            # legacy (today's TriggerEngine) | pipeline
+  scanner:
+    cron: "*/5 * * * *"
+    run_after_ingest: true
+    deadline_s: 240
+    dedupe_minutes: 240
+    max_candidates_per_cycle: 5
+    detectors:
+      news_event:    { enabled: true, events: [hack, depeg, delist, lawsuit, outage],
+                       corroborated_only: true, fast_path_events: [hack, depeg, delist] }
+      regime_flip:   { enabled: true }
+      move:          { enabled: true, pct: { "1h": 2.5, "4h": 5.0, "24h": 8.0 } }
+      near_stop:     { enabled: true, fast_path: true }
+      funding:       { enabled: true, abs_8h: 0.0010 }
+      breakout:      { enabled: true, tf: "1d", lookback: 20, confirm_close: true }
+      rsi_extreme:   { enabled: true, tf: "4h", period: 14, low: 25, high: 75 }
+      volume_spike:  { enabled: true, tf: "1h", zscore: 3.0, lookback: 72 }
+      dip_from_high: { enabled: true, tf: "1d", pct: 12.0, lookback_days: 30 }
+      ma_cross:      { enabled: false, tf: "1d", fast: 50, slow: 200 }
+    screen: { enabled: true, task: scan, min_score: 0.60, gray_zone: [0.45, 0.65],
+              allow_novel: true, news_since_min: 60 }
+    scoring: { detector_weight: 0.6, screen_weight: 0.4 }
+  validator:
+    task: validate
+    min_confidence: 0.65
+    max_per_day: 6
+    cooldown_min_per_asset: 120
+    expire_after_min: 90
+    deadline_s: 600
+  planner:
+    enabled: true                  # false = observe mode: validate but never fire research
+    min_verdict: valid
+    max_per_day: 3                 # replaces triggers.max_per_day (legacy key still accepted)
+    cooldown_hours: 4
+  outcomes: { resolve_after_hours: 24, measure_tf: "1h" }
+
+triggers:                          # kept for back-compat; unset keys derive from signals.*
+  enabled: true
+
+ingest:
+  timeframes: ["1h", "4h", "1d"]
+  cold_start_days: 7
+
 news:
   window_hours: 12
   min_sources: 2                   # two-source corroboration rule
@@ -107,6 +268,32 @@ news:
     - { name: EthereumFoundation, url: "https://blog.ethereum.org/en/feed.xml", class: primary }
     - { name: BitcoinCore, url: "https://bitcoincore.org/en/rss.xml", class: primary }
     - { name: FederalReserve, url: "https://www.federalreserve.gov/feeds/press_all.xml", class: primary }
+  event_keywords:                  # moved out of runs/ingest.py
+    etf:     [etf]
+    hack:    [hack, exploit, stolen, breach]
+    delist:  [delist]
+    lawsuit: [sec, lawsuit, charges, settle]
+    upgrade: [upgrade, fork, "hard fork"]
+    outage:  [outage, halt, paused]
+    depeg:   [depeg, de-peg]
+    macro:   [fomc, cpi, "rate cut", "rate hike", fed]
+  asset_keywords:                  # must cover universe.assets
+    BTC: [bitcoin, btc]
+    ETH: [ethereum, "eth ", "ether "]
+
+skills:
+  bindings:                        # human base (tier 2); tier-1 overlay: config/skills-registry.auto.yaml
+    research.flags: [reg-watch]
+    research.brief: [crypto-brief]
+    validate: [market-state, asset-dossier]
+    review: [post-mortem, strategy-lab, tca, risk-gate, skill-smith]
+    daily_review: [post-mortem, strategy-lab, asset-dossier]
+  policy:                          # who may edit what: human | gated
+    default: { body: gated, scripts: human, tests: gated }
+    ops-runbook: { body: human, scripts: human, tests: human }
+    tca: { body: gated, scripts: human, tests: human }
+    risk-gate: { body: gated, scripts: human, tests: human }
+  eval: { min_pass_rate: 0.8, timeout_s: 300 }
 
 telegram:
   chat_id: 0                       # the ONE chat the bot accepts; 0 until configured
@@ -119,23 +306,30 @@ ops:
   container_heartbeat_min: 10
   max_restarts_per_hour: 3
   summary_time_local: "21:00"      # daily digest; silence is itself an alert
+  cron_mailto: ""                  # "" keeps today's behaviour; the setup wizard suggests the local user
   bots:
     a: { service: freqtrade-a, api: "http://127.0.0.1:8080", password_env: FT_API_PASSWORD_A }
     b: { service: freqtrade-b, api: "http://127.0.0.1:8081", password_env: FT_API_PASSWORD_B }
   schedules:                       # Gulf time; the crontab must match (asserted by test)
     ingest:        { cron: "*/15 * * * *",  deadline_s: 600,  artifact: ingest_runs }
+    scanner:       { cron: "*/5 * * * *",   deadline_s: 240,  artifact: none }
+    nav_tick:      { cron: "*/15 * * * *",  deadline_s: 120,  artifact: none }
+    reconcile:     { cron: "*/15 * * * *",  deadline_s: 120,  artifact: none }
     tca_job:       { cron: "5 * * * *",     deadline_s: 1500, artifact: tca_rows }
     nav_job:       { cron: "10 0 * * *",    deadline_s: 300,  artifact: nav_rows }
     healthcheck:   { cron: "*/5 * * * *",   deadline_s: 240,  artifact: none }
-    research_run:  { cron: "30 8,16 * * *", deadline_s: 1800, artifact: proposals_file }
-    review_run:    { cron: "0 20 * * 0",    deadline_s: 5400, artifact: report_file }
+    research_run:  { cron: derived,         deadline_s: 2700, artifact: proposals_file }
+    review_run:    { cron: "0 20 * * 0",    deadline_s: 6600, artifact: report_file }
     backtest_data: { cron: "0 18 * * 0",    deadline_s: 1800, artifact: none }
     backup:        { cron: "0 3 * * *",     deadline_s: 2700, artifact: backup_file }
     maintenance:   { cron: "0 2 * * 1",     deadline_s: 3600, artifact: maintenance_row }
-    daily_review:  { cron: "30 21 * * *",   deadline_s: 2700, artifact: daily_report }
+    daily_review:  { cron: "30 21 * * *",   deadline_s: 3300, artifact: daily_report }
+    # research_run.cron is `derived`: ops/gen_ops_files.py renders one line per
+    # research.slots entry, which is also what nearest_slot and the healthcheck read.
 
 backup:
-  dest: /mnt/d/earn-backups        # a second physical disk (WSL2 mount) or adjust per machine
+  dest: "~/earn-backups"           # ~ and $VARS are expanded
+  mirror_dest: null                # e.g. /mnt/c/Users/<you>/OneDrive/earn-backups (warn only)
   keep_daily: 14
   keep_weekly: 8
 
@@ -143,14 +337,6 @@ maintenance:                       # Monday 02:00 Gulf self-maintenance (runs/ma
   sdk_floor: "0.2.157"             # claude-agent-sdk auto-upgrade window: pip resolves
   sdk_ceiling: "0.5"               # within [floor, ceiling); red tests -> exact rollback
   shadow_days: 30                  # auto-shadow window for a newly detected model
-
-triggers:                          # event-driven decision runs (runs/triggers.py, post-ingest)
-  enabled: true
-  cooldown_hours: 4                # no trigger within 4h of ANY decide run
-  max_per_day: 3                   # fired triggers per UTC day
-  news_events: [hack, depeg, delist, lawsuit, outage]   # corroborated only
-  move_4h_pct: 5.0                 # |last closed 4h candle move| above this fires
-  funding_abs_8h: 0.0010           # |current funding rate| above this fires
 
 daily_review:                      # nightly learning loop (runs/daily_review.py, 21:30 Gulf)
   model: claude-fable-5-1          # grades the PREVIOUS Gulf day at max effort

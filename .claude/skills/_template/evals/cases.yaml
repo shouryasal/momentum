@@ -1,0 +1,19 @@
+# Eval cases for a new skill. `evals/skill_eval.py` runs these; the pass rate gates the
+# change (config/earn.yaml: skills.eval.min_pass_rate).
+#
+# `run:` cases are deterministic — a script, its arguments and what its output must contain.
+# `ask:` cases need a model session and are SKIPPED by the code-only gate; a skipped case is
+# not a pass, so a skill whose evals are all `ask:` can never clear the floor.
+cases:
+  - id: replace-me-with-a-real-script-case
+    run: scripts/example.py
+    args: ["--dry-run"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["rows="]
+      stdout_not_contains: ["Traceback"]
+
+  - id: replace-me-with-a-real-judgement-case
+    ask: "The exact question a run would put to this skill."
+    expect:
+      contains: ["the phrase the answer must contain"]

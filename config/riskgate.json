@@ -1,4 +1,26 @@
 {
+  "bounds": {
+    "execution.rebalance_band": {
+      "max": 0.1,
+      "max_step": 0.02,
+      "min": 0.02
+    },
+    "sleeve_a.dca.chunk_pct_nav": {
+      "max": 0.1,
+      "max_step": 0.02,
+      "min": 0.01
+    },
+    "sleeve_a.trend.ma_days": {
+      "max": 300.0,
+      "max_step": 25.0,
+      "min": 100.0
+    },
+    "sleeve_a.vol.target_annual": {
+      "max": 0.5,
+      "max_step": 0.05,
+      "min": 0.1
+    }
+  },
   "container_paths": {
     "config_dir": "/freqtrade/earn-config",
     "data_dir": "/freqtrade/user_data/data",
@@ -35,14 +57,31 @@
     "daily_loss_stop": 0.03,
     "daily_stop_lock_hours": 24,
     "kill_file": "ops/killdir/KILL",
+    "market_entries_allowed": false,
+    "max_entries_per_trade": 4,
+    "max_fee_pct_per_month": 0.01,
     "max_gross_exposure": 0.8,
+    "max_order_notional_pct": 0.2,
+    "max_orders_per_day": 12,
     "max_trades_per_day": 4,
+    "max_turnover_pct_per_day": 0.5,
     "max_weight": {
       "BTC": 0.4,
       "default": 0.3
     },
     "min_notional_usdt": 25.0,
     "monthly_loss_stop": 0.1,
+    "protections": {
+      "max_drawdown": {
+        "lookback_candles": 6,
+        "trade_limit": 2
+      }
+    },
+    "reconcile": {
+      "block_on_mismatch": true,
+      "dust_usdt": 10.0,
+      "tolerance_pct": 0.005
+    },
     "staleness_minutes": 30,
     "stoploss_guard": {
       "count": 3,
@@ -55,7 +94,172 @@
   "sleeve_b": {
     "drift_to_a_after_h": 48
   },
-  "source_sha256": "03a09e23f4f636a544d0ee3a0ba069ba8bda741852756dde92d8d7742d433b5d",
+  "source_sha256": "df00663d5867a7213701980ce07dc592503d19716cfd118ad8eabaa76b91f89d",
+  "trading": {
+    "plan_bounds": {
+      "allow_model_urgency": false,
+      "allowed_entry_styles": [
+        "passive",
+        "cross"
+      ],
+      "stop_pct": {
+        "max": 0.15,
+        "min": 0.03
+      },
+      "take_profit_pct": {
+        "max": 0.5,
+        "min": 0.03
+      }
+    },
+    "sleeves": {
+      "a": {
+        "dca": {
+          "cooldown_hours": 24,
+          "enabled": false,
+          "max_adds": 2,
+          "only_if_regime_up": true,
+          "size_multiplier": 1.0,
+          "step_pct": 0.05
+        },
+        "entry_price": {
+          "offset_bps": 0.0,
+          "side": "bid"
+        },
+        "exchange_limits": {
+          "backoff_minutes": [
+            15,
+            60,
+            240
+          ],
+          "full_exit_below_min": true,
+          "respect_min_stake": true
+        },
+        "exit_price": {
+          "offset_bps": 0.0,
+          "side": "ask"
+        },
+        "order_types": {
+          "entry": "limit",
+          "exit": "limit"
+        },
+        "pyramid": {
+          "cooldown_hours": 24,
+          "enabled": false,
+          "max_adds": 1,
+          "size_multiplier": 0.5,
+          "trigger_profit_pct": 0.05
+        },
+        "rebalance": {
+          "band_source": "execution",
+          "min_interval_hours": 4
+        },
+        "reprice_on_timeout": false,
+        "scheduled_dca": {
+          "chunk_pct_nav": 0.05,
+          "enabled": true,
+          "interval_days": 7
+        },
+        "sizing_mode": "target_weight",
+        "stoploss": {
+          "atr": {
+            "enabled": false,
+            "mult": 3.0,
+            "period": 14,
+            "timeframe": "4h"
+          },
+          "fixed_pct": 0.1,
+          "on_exchange": "auto",
+          "reentry_cooldown_hours": 24,
+          "trailing": {
+            "activate_profit_pct": 0.04,
+            "distance_pct": 0.03,
+            "enabled": false,
+            "only_offset_reached": true
+          }
+        },
+        "take_profit": {
+          "ladder": [],
+          "roi_table": {
+            "0": 10.0
+          }
+        }
+      },
+      "b": {
+        "dca": {
+          "cooldown_hours": 24,
+          "enabled": false,
+          "max_adds": 2,
+          "only_if_regime_up": true,
+          "size_multiplier": 1.0,
+          "step_pct": 0.05
+        },
+        "entry_price": {
+          "offset_bps": 0.0,
+          "side": "bid"
+        },
+        "exchange_limits": {
+          "backoff_minutes": [
+            15,
+            60,
+            240
+          ],
+          "full_exit_below_min": true,
+          "respect_min_stake": true
+        },
+        "exit_price": {
+          "offset_bps": 0.0,
+          "side": "ask"
+        },
+        "order_types": {
+          "entry": "limit",
+          "exit": "limit"
+        },
+        "pyramid": {
+          "cooldown_hours": 24,
+          "enabled": false,
+          "max_adds": 1,
+          "size_multiplier": 0.5,
+          "trigger_profit_pct": 0.05
+        },
+        "rebalance": {
+          "band_source": "execution",
+          "min_interval_hours": 4
+        },
+        "reprice_on_timeout": false,
+        "scheduled_dca": {
+          "chunk_pct_nav": 0.05,
+          "enabled": true,
+          "interval_days": 7
+        },
+        "sizing_mode": "target_weight",
+        "stoploss": {
+          "atr": {
+            "enabled": false,
+            "mult": 3.0,
+            "period": 14,
+            "timeframe": "4h"
+          },
+          "fixed_pct": 0.1,
+          "on_exchange": "auto",
+          "reentry_cooldown_hours": 24,
+          "trailing": {
+            "activate_profit_pct": 0.04,
+            "distance_pct": 0.03,
+            "enabled": false,
+            "only_offset_reached": true
+          }
+        },
+        "take_profit": {
+          "ladder": [],
+          "roi_table": {
+            "0": 10.0
+          }
+        }
+      }
+    },
+    "startup_candles": 1920,
+    "timeframe": "4h"
+  },
   "universe": {
     "assets": [
       "BTC",

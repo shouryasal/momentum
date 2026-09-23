@@ -34,8 +34,19 @@ def sleeve_nav(api: BotApi) -> tuple[float, float, dict] | None:
     return total, cash, positions
 
 
+def active_run_id(jdb, sleeve: str) -> str | None:
+    """The sleeve_runs row this day belongs to, so a day can be attributed to a run."""
+    try:
+        row = jdb.execute(
+            "SELECT run_id FROM sleeve_runs WHERE sleeve=? AND status='active'"
+            " ORDER BY started_utc DESC LIMIT 1", (sleeve,)).fetchone()
+    except Exception:  # noqa: BLE001 - an older journal has no sleeve_runs table
+        return None
+    return str(row["run_id"]) if row else None
+
+
 def write_nav(jdb, sleeve: str, date_utc: str, nav: float, cash: float,
-              positions: dict) -> None:
+              positions: dict, run_id: str | None = None) -> None:
     prev_max = jdb.execute(
         "SELECT MAX(nav_usdt) AS m FROM nav_daily WHERE sleeve=?", (sleeve,)).fetchone()
     dd = None
@@ -47,11 +58,12 @@ def write_nav(jdb, sleeve: str, date_utc: str, nav: float, cash: float,
         (sleeve, f"{date_utc}%")).fetchone()["n"]
     jdb.execute(
         "INSERT INTO nav_daily(date_utc, sleeve, nav_usdt, cash_usdt, positions_json,"
-        " drawdown_pct, trades_today) VALUES (?,?,?,?,?,?,?)"
+        " drawdown_pct, trades_today, run_id) VALUES (?,?,?,?,?,?,?,?)"
         " ON CONFLICT(date_utc, sleeve) DO UPDATE SET nav_usdt=excluded.nav_usdt,"
         " cash_usdt=excluded.cash_usdt, positions_json=excluded.positions_json,"
-        " drawdown_pct=excluded.drawdown_pct, trades_today=excluded.trades_today",
-        (date_utc, sleeve, nav, cash, json.dumps(positions), dd, trades))
+        " drawdown_pct=excluded.drawdown_pct, trades_today=excluded.trades_today,"
+        " run_id=COALESCE(excluded.run_id, nav_daily.run_id)",
+        (date_utc, sleeve, nav, cash, json.dumps(positions), dd, trades, run_id))
     jdb.commit()
 
 
@@ -64,7 +76,7 @@ def run(cfg: EarnConfig, jdb, apis: dict[str, BotApi], now: datetime) -> int:
             missing.append(sleeve)
             continue
         nav, cash, positions = got
-        write_nav(jdb, sleeve, date_utc, nav, cash, positions)
+        write_nav(jdb, sleeve, date_utc, nav, cash, positions, active_run_id(jdb, sleeve))
     if missing:
         print(f"nav_job: bot(s) unreachable: {missing}", file=sys.stderr)
     return 1 if missing else 0

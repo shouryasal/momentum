@@ -1,0 +1,11 @@
+# Tier-1 skills overlay — written ONLY by runs/apply_changes.py (and by the console's
+# Skills page, which goes through the same helpers). The human base lives in
+# config/earn.yaml: skills.bindings / skills.policy and is never edited from here.
+#
+# A skill created by a `skill_new` change lands here as `incubating`: it exists, it is
+# linted and tested, and it is loaded by nothing. Binding it to a production task is a
+# separate decision — a `skill_bind` change (human approval by default) or a human edit in
+# the console.
+version: 1
+skills: {}
+bindings: {}

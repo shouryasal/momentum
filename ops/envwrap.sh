@@ -1,69 +1,192 @@
 #!/usr/bin/env bash
-# Per-job secret allowlisting: every cron job runs through this wrapper so a job's
-# process environment carries ONLY the secrets it needs. In particular the research
-# and review runs get the Anthropic key and NOTHING else (spec §4).
+# Per-job secret allowlisting: every scheduled job runs through this wrapper, so a job's
+# process environment carries ONLY the secrets that job needs. A model-facing job gets a
+# Claude credential and nothing else; an exchange credential never reaches one (runs/
+# common.py:guard_env() hard-fails if one ever did).
 #
-# Usage: ops/envwrap.sh <job> -- <command...>
-#   e.g. ops/envwrap.sh research -- .venv/bin/python -m runs.research_run 0830
+# Usage:
+#   ops/envwrap.sh <job> -- <command...>
+#   ops/envwrap.sh --print-allowlist <job>      # names only, for tests and the UI
+#   ops/envwrap.sh --print-env <job>            # NAMES only of what would be exported
+#
+# Claude auth mode (EARN_CLAUDE_AUTH_MODE in .env, kept in sync by the console when
+# models.yaml auth.claude_mode is saved; anything unknown falls back to subscription):
+#
+#   subscription  CLAUDE_CODE_OAUTH_TOKEN only — a present ANTHROPIC_API_KEY would
+#                 preempt subscription auth in headless runs, so it is dropped.
+#   api_key       ANTHROPIC_API_KEY only; the OAuth token is dropped.
+#   auto          the OAuth token (if any) PLUS the API key renamed to
+#                 EARN_FALLBACK_ANTHROPIC_API_KEY, a name the CLI can never pick up
+#                 implicitly — only runs/llm/providers/claude_sdk.py reads it. The
+#                 rename is unconditional: a host with no OAuth token still must not
+#                 spend metered money except through an explicit api_key attempt.
+#
+# The console's signing secret and login token appear in NO allowlist below (asserted by
+# a test that greps this file): an automated run must never be able to sign a mode file
+# or log into the console.
 
 set -euo pipefail
 
-JOB="${1:?usage: envwrap.sh <job> -- <cmd...>}"
-shift
+usage() {
+  echo "usage: envwrap.sh <job> -- <cmd...> | --print-allowlist <job> | --print-env <job>" >&2
+  exit 2
+}
+
+MODE="run"
+case "${1:-}" in
+  --print-allowlist) MODE="allowlist"; shift ;;
+  --print-env)       MODE="printenv";  shift ;;
+  -h|--help)         usage ;;
+esac
+
+JOB="${1:-}"
+[ -n "$JOB" ] || usage
+shift || true
 [ "${1:-}" = "--" ] && shift
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="$REPO_ROOT/.env"
+ENV_FILE="${EARN_ENV_FILE:-$REPO_ROOT/.env}"
+
+# ---------------------------------------------------------------- allowlists
 
 allowlist() {
   case "$1" in
-    research|review|daily_review|maintenance)
-                         echo "CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY" ;;
-    healthcheck|digest|telegram)
-                         echo "TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID FT_API_PASSWORD_A FT_API_PASSWORD_B FT_JWT_SECRET HEALTHCHECKS_URL" ;;
-    nav)                 echo "FT_API_PASSWORD_A FT_API_PASSWORD_B FT_JWT_SECRET" ;;
-    ingest)              echo "CLAUDE_CODE_OAUTH_TOKEN" ;;   # Haiku news classifier
-    backup)              echo "BACKUP_RCLONE_REMOTE" ;;
-    tca|excel)           echo "" ;;
+    # Model-facing jobs: a Claude credential only. Nothing else, ever.
+    research|review|daily_review|maintenance|signals|scanner|ingest)
+                    echo "CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY" ;;
+    # Alerting + bot control. healthcheck also drains the alert outbox, so it is the one
+    # job that always has the Telegram token.
+    healthcheck|digest)
+                    echo "TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID FT_API_PASSWORD_A FT_API_PASSWORD_B FT_JWT_SECRET HEALTHCHECKS_URL" ;;
+    # The Telegram command bot additionally verifies /approve HMACs.
+    telegram)
+                    echo "TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID FT_API_PASSWORD_A FT_API_PASSWORD_B FT_JWT_SECRET HEALTHCHECKS_URL EARN_APPROVAL_KEY" ;;
+    nav|nav_tick)   echo "FT_API_PASSWORD_A FT_API_PASSWORD_B FT_JWT_SECRET" ;;
+    # Host-side only: ledger-vs-exchange reconciliation and the live preflight read the
+    # exchange account. Never a model job.
+    reconcile|preflight)
+                    echo "FT_API_PASSWORD_A FT_API_PASSWORD_B FT_JWT_SECRET BINANCE_KEY_A BINANCE_SECRET_A BINANCE_KEY_B BINANCE_SECRET_B" ;;
+    backup)         echo "BACKUP_RCLONE_REMOTE" ;;
+    # The console is NOT run through envwrap (it needs its own secrets and refuses to
+    # start under EARN_AUTOMATED_RUN=1); the entry exists so tooling can ask, and get
+    # "nothing".
+    console)        echo "" ;;
+    tca|excel)      echo "" ;;
     *) echo "envwrap: unknown job '$1'" >&2; exit 2 ;;
   esac
 }
 
 ALLOWED="$(allowlist "$JOB")"
 
-# Read .env without exporting everything, then hand the command a scrubbed environment
-# containing PATH/HOME/LANG plus only the allowlisted keys.
+if [ "$MODE" = "allowlist" ]; then
+  for k in $ALLOWED; do echo "$k"; done
+  exit 0
+fi
+
+# ---------------------------------------------------------------- .env parsing
+# Tolerant of CRLF line endings (the repo is edited from Windows), `export KEY=v`,
+# surrounding single or double quotes, and inline padding. Nothing is exported into this
+# shell: values are collected and handed to `env -i` explicitly.
+
 declare -A WANT
 for k in $ALLOWED; do WANT[$k]=1; done
 
-ENV_ARGS=()
-HAVE_OAUTH=0
+declare -A VALUES
+AUTH_MODE_RAW="${EARN_CLAUDE_AUTH_MODE:-}"
+
+strip_quotes() {
+  local v="$1"
+  v="${v%$'\r'}"
+  v="${v#"${v%%[![:space:]]*}"}"   # ltrim
+  v="${v%"${v##*[![:space:]]}"}"   # rtrim
+  if [[ ${#v} -ge 2 && "${v:0:1}" == '"' && "${v: -1}" == '"' ]]; then
+    v="${v:1:${#v}-2}"
+  elif [[ ${#v} -ge 2 && "${v:0:1}" == "'" && "${v: -1}" == "'" ]]; then
+    v="${v:1:${#v}-2}"
+  fi
+  printf '%s' "$v"
+}
+
 if [ -f "$ENV_FILE" ]; then
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
     [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" != *"="* ]] && continue
     key="${line%%=*}"
     val="${line#*=}"
-    if [[ -n "${WANT[$key]:-}" && -n "$val" ]]; then
-      ENV_ARGS+=("$key=$val")
-      [[ "$key" == "CLAUDE_CODE_OAUTH_TOKEN" ]] && HAVE_OAUTH=1
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    key="${key#export }"
+    key="${key#"${key%%[![:space:]]*}"}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    val="$(strip_quotes "$val")"
+    if [ "$key" = "EARN_CLAUDE_AUTH_MODE" ] && [ -z "$AUTH_MODE_RAW" ]; then
+      AUTH_MODE_RAW="$val"
     fi
+    [[ -n "${WANT[$key]:-}" && -n "$val" ]] && VALUES[$key]="$val"
   done < "$ENV_FILE"
 fi
 
-# Subscription-first: a present ANTHROPIC_API_KEY preempts subscription auth in
-# headless Claude Code runs, so strip it whenever the OAuth token is available.
-if [[ "$HAVE_OAUTH" == "1" ]]; then
-  FILTERED=()
-  for kv in "${ENV_ARGS[@]}"; do
-    [[ "$kv" == ANTHROPIC_API_KEY=* ]] && continue
-    FILTERED+=("$kv")
-  done
-  ENV_ARGS=("${FILTERED[@]}")
+# ---------------------------------------------------------------- auth mode
+
+case "$AUTH_MODE_RAW" in
+  subscription|api_key|auto) AUTH_MODE="$AUTH_MODE_RAW" ;;
+  *)                         AUTH_MODE="subscription" ;;
+esac
+
+HAVE_OAUTH=0; [ -n "${VALUES[CLAUDE_CODE_OAUTH_TOKEN]:-}" ] && HAVE_OAUTH=1
+HAVE_KEY=0;   [ -n "${VALUES[ANTHROPIC_API_KEY]:-}" ]       && HAVE_KEY=1
+
+case "$AUTH_MODE" in
+  subscription)
+    # Subscription-first: drop the API key only when the token can actually serve.
+    [ "$HAVE_OAUTH" = "1" ] && unset 'VALUES[ANTHROPIC_API_KEY]'
+    ;;
+  api_key)
+    [ "$HAVE_KEY" = "1" ] && unset 'VALUES[CLAUDE_CODE_OAUTH_TOKEN]'
+    ;;
+  auto)
+    # ALWAYS rename, token or no token. `auto` means "metered spend is a deliberate
+    # fallback", and the only thing that makes it deliberate is that the CLI cannot see
+    # the key on its own. Handing a key-only host the plain name would turn every
+    # unattended run into a metered one with no chain control and no monthly cap — and
+    # the credential is not lost: ops.lib.claude_auth.api_key_from() reads the fallback
+    # name first, and env_for('claude:api_key') materialises it for an explicit attempt.
+    if [ "$HAVE_KEY" = "1" ]; then
+      VALUES[EARN_FALLBACK_ANTHROPIC_API_KEY]="${VALUES[ANTHROPIC_API_KEY]}"
+      unset 'VALUES[ANTHROPIC_API_KEY]'
+    fi
+    ;;
+esac
+
+# ---------------------------------------------------------------- environment
+
+ENV_ARGS=()
+for k in "${!VALUES[@]}"; do ENV_ARGS+=("$k=${VALUES[$k]}"); done
+
+# Roots a worktree session needs. Not secrets; passed through only when already set.
+for passthru in EARN_STATE_ROOT EARN_WORKTREE EARN_LIVE_ROOT; do
+  [ -n "${!passthru:-}" ] && ENV_ARGS+=("$passthru=${!passthru}")
+done
+
+if [ "$MODE" = "printenv" ]; then
+  # Names only — this must stay safe to paste into a log or a bug report.
+  for kv in "${ENV_ARGS[@]:-}"; do [ -n "$kv" ] && echo "${kv%%=*}"; done | sort
+  echo "EARN_AUTOMATED_RUN"
+  echo "EARN_JOB"
+  echo "EARN_CLAUDE_AUTH_MODE=$AUTH_MODE"
+  exit 0
 fi
 
+[ "$#" -gt 0 ] || usage
+
+# The venv must lead PATH: skill scripts and `python` inside a job otherwise run on the
+# system interpreter, which has none of Earn's dependencies.
 exec env -i \
-  PATH="$PATH" HOME="$HOME" LANG="${LANG:-C.UTF-8}" TZ="${TZ:-Asia/Dubai}" \
-  EARN_AUTOMATED_RUN=1 EARN_JOB="$JOB" \
-  "${ENV_ARGS[@]}" \
+  PATH="$REPO_ROOT/.venv/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}" \
+  VIRTUAL_ENV="$REPO_ROOT/.venv" \
+  HOME="${HOME:-/root}" LANG="${LANG:-C.UTF-8}" TZ="${TZ:-Asia/Dubai}" \
+  EARN_AUTOMATED_RUN=1 EARN_JOB="$JOB" EARN_CLAUDE_AUTH_MODE="$AUTH_MODE" \
+  ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} \
   "$@"

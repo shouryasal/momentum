@@ -141,6 +141,8 @@ CREATE TABLE IF NOT EXISTS ops_runs (
   finished_at TEXT,
   status TEXT,
   rerun_count INTEGER NOT NULL DEFAULT 0,
+  detached_pid INTEGER,                -- pid of a detached rerun the healthcheck spawned
+  rerun_started_utc TEXT,              -- when that rerun was spawned (grace starts here)
   PRIMARY KEY (job, scheduled_for)
 );
 
@@ -192,3 +194,21 @@ CREATE TABLE IF NOT EXISTS source_reliability (
   score REAL NOT NULL DEFAULT 0.5,     -- Laplace-smoothed
   updated_at TEXT
 );
+
+-- ================================================================== SCHEMA v3
+-- Mirrors ops/sql/migrations/003_knowledge.sql so a fresh DB and a migrated DB match.
+-- The v3 columns on ops_runs (detached_pid, rerun_started_utc) are declared in the
+-- ops_runs definition above and applied to older DBs by ops.db.MIGRATIONS[3].
+--
+-- Documented ops_state keys (no DDL of their own; ops_state is a key/value table):
+--   ollama_base_url             the probed Ollama endpoint
+--   ollama_probe_at             when it was last probed (10 minute cache)
+--   claude_auth_degraded_until  set when the preferred credential is failing
+--   gate_breach_cursor          last gate_decisions id the healthcheck reported
+--   reconcile_cursor            last reconciliation the healthcheck reported
+--   install_utc                 floor for missed-run detection (set by ops/setup.sh)
+--   rate_limit_status / rate_limit_utilization / rate_limit_resets_at
+
+CREATE INDEX IF NOT EXISTS idx_ops_runs_status ON ops_runs(status, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_trigger_events_ts ON trigger_events(ts_utc);
+CREATE INDEX IF NOT EXISTS idx_news_published ON news_items(published_at);

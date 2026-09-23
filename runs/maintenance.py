@@ -34,12 +34,20 @@ from pathlib import Path
 
 from ops import db
 from ops.config import REPO_ROOT, EarnConfig, load_config
-from ops.lib import claude_auth, locks, tg
+from ops.lib import claude_auth, locks, paths, tg
 from runs import router
 from runs.common import atomic_write_json, guard_env, utc_iso
 
-# name-token tier heuristic: candidates must be same-or-higher, never lower
+# name-token tier heuristic: candidates must be same-or-higher, never lower.
+# This is a RANK for that comparison only — it is not the capability tier the config
+# speaks in. Keep the two apart: 0 here means "haiku-class", not "tier 0".
 TIER_TOKENS = (("haiku", 0), ("sonnet", 1), ("opus", 2), ("fable", 3), ("mythos", 3))
+
+#: rank -> the ``models.yaml`` capability tier (1-5) for the same family, so a
+#: ``models-auto.yaml`` declaration says what every other declaration says. Getting this
+#: wrong is not cosmetic: ``min_tier`` floors and the overlay's "same or higher tier"
+#: rule both read it, so a haiku-class model declared as tier 4 could head ``decide``.
+CONFIG_TIER_BY_RANK: dict[int, int] = {0: 2, 1: 3, 2: 4, 3: 5}
 
 
 def model_tier(model_id: str) -> int | None:
@@ -50,15 +58,24 @@ def model_tier(model_id: str) -> int | None:
     return None
 
 
+def config_tier(model_id: str) -> int | None:
+    """The ``models.yaml`` tier for a model id, or ``None`` when its family is unknown."""
+    rank = model_tier(model_id)
+    return None if rank is None else CONFIG_TIER_BY_RANK.get(rank)
+
+
 class Maintenance:
     def __init__(self, cfg: EarnConfig, jdb: sqlite3.Connection,
                  kdb: sqlite3.Connection, *, root: Path | None = None,
+                 state_root: Path | None = None,
                  now: datetime | None = None, runner=None, alert=None,
                  client_factory=None, version_fn=None, git_runner=None):
         self.cfg = cfg
         self.jdb = jdb
         self.kdb = kdb
-        self.root = root or REPO_ROOT
+        self.root = root or REPO_ROOT                       # the checkout
+        #: the data/state root — where the KILL file is, via ``paths.state_root()``.
+        self.state_root = Path(state_root) if state_root is not None else paths.state_root()
         self.now = now or datetime.now(UTC)
         self.run_id = f"maint-{self.now.strftime('%Y-%m-%d')}"
         self.runner = runner or self._real_runner
@@ -109,6 +126,13 @@ class Maintenance:
     # ---------------------------------------------------------------- shadow
 
     def detect_new_models(self, catalog: dict | None) -> str | None:
+        """A catalogue model worth shadowing, or ``None``.
+
+        The catalogue is Anthropic's; a local (Ollama) model can never appear in it, and
+        :func:`model_tier` returns ``None`` for anything without a known name token — so
+        nothing here can ever nominate a local model as the decide model. The code floor
+        in ``runs/llm/types.py`` would refuse it anyway; this is the earlier of the two.
+        """
         if not catalog or not catalog.get("models"):
             return None
         mc = router.load_models_cfg(self.root / "config" / "models.yaml")
@@ -137,8 +161,21 @@ class Maintenance:
         days = self.cfg.maintenance.shadow_days
         started = self.now.strftime("%Y-%m-%d")
 
+        # A window only ever opens for a model whose family `model_tier` recognised, so
+        # this is never the fallback in practice; 4 is the conservative floor for a
+        # frontier candidate if the tables ever disagree.
+        tier = config_tier(model_id) or 4
+
         def mutate(cur: dict) -> dict:
-            cur.setdefault("models", {})[key] = model_id
+            # The v2 ModelRef shape, not a bare pinned string: the strict overlay
+            # whitelist in ops.models_config only accepts a full {provider, id, tier}
+            # declaration, and `runs.router._v1_view` reads `.id` out of it for the
+            # callers still on the v1 view. A bare string loaded as v1 and guessed at a
+            # tier, which is not something to guess about for a model that may serve
+            # `decide`.
+            cur.setdefault("models", {})[key] = {
+                "provider": "claude", "id": model_id, "tier": tier,
+            }
             cur["shadow"] = {"enabled": True, "model": key, "started": started,
                              "days": days}
             return cur
@@ -207,7 +244,7 @@ class Maintenance:
     def main_flow(self) -> int:
         from ops.lib import kill as killlib
 
-        if killlib.is_engaged(self.cfg, self.root):
+        if killlib.is_engaged(self.cfg, self.state_root):
             self.journal("killed")
             return 0
         catalog = self._phase("catalog", self.refresh_catalog)

@@ -19,7 +19,16 @@ postflight  (all code, no model)
     items did next (corroborated later? numeric claims verified?)
   - apply_changes over anything the session authored on the branch (same gates
     as Sunday; params cap ≤2/month holds, prompt/skill changes uncapped)
+  - auto-revert watch: for every change merged inside autonomy.auto_revert.window_days,
+    the proposal validity rate and gate-breach count before vs after. Past the
+    thresholds this writes an `auto_revert_requested` change_event — and stops.
+    apply_changes (never this job) executes the revert, so the live HEAD keeps
+    exactly two movers: apply_changes and the human.
   - reports/daily/<day>.md gets the deterministic appendix
+
+Like the Sunday review, the session runs in its own git WORKTREE off git.live_branch
+with EARN_STATE_ROOT pointing at the live data root: the live checkout never changes
+branch and is never reset (spec §11 issue 6).
 
 Idempotent on the report file; Sunday's deep pass (counterfactuals,
 walk-forward, fewshot, shadow verdicts) stays in review_run.
@@ -37,32 +46,62 @@ from pathlib import Path
 from ops import db
 from ops.config import REPO_ROOT, EarnConfig, load_config
 from ops.lib import kill as killlib
-from ops.lib import locks, tg
-from runs import apply_changes, decision_core, router
+from ops.lib import locks, paths, tg
+from runs import apply_changes, decision_core, router, worktree
 from runs import trace as tracelib
 from runs.common import guard_env, gulf_now, utc_iso
+from runs.review_run import (
+    DAILY_POSTFLIGHT_RESERVE_S,
+    run_session_in,
+    session_deadline_s,
+)
 
 LINK_RE = re.compile(r"https?://[^\s)\]>\"']+")
+
+#: Explicit script paths instead of ``Bash(python3 *)`` / ``Bash(bash *)`` (spec §10).
+DAILY_BASH_ALLOWLIST = [
+    "Bash(git add *)",
+    "Bash(git commit *)",
+    "Bash(git diff *)",
+    "Bash(git status *)",
+    "Bash(git log *)",
+    "Bash(git rev-parse *)",
+    "Bash(python3 .claude/skills/post-mortem/scripts/*)",
+    "Bash(python3 .claude/skills/strategy-lab/scripts/*)",
+    "Bash(python3 .claude/skills/asset-dossier/scripts/*)",
+    "Bash(python3 .claude/skills/skill-smith/scripts/*)",
+    "Bash(python3 -m evals.skill_lint *)",
+    "Bash(pytest .claude/skills/*)",
+]
 
 
 class DailyReview:
     def __init__(self, cfg: EarnConfig, jdb, kdb, *, root: Path | None = None,
+                 state_root: Path | None = None,
                  now: datetime | None = None, session_runner=None, alert=None,
                  git_runner=None):
         self.cfg = cfg
         self.jdb = jdb
         self.kdb = kdb
-        self.root = root or REPO_ROOT
+        self.root = root or REPO_ROOT          # the LIVE checkout
+        #: the data/state root — where the KILL file is, via ``paths.state_root()``.
+        self.state_root = Path(state_root) if state_root is not None else paths.state_root()
         self.now = now or datetime.now(UTC)
         self.day = (gulf_now(self.now) - timedelta(days=1)).strftime("%Y-%m-%d")
         self.run_id = f"daily-{self.day}"
         self.session_runner = session_runner or decision_core.run_stage
         self.alert = alert or (lambda text, sev="info": tg.send(text, sev, conn=kdb))
         self.git = git_runner or self._git
+        self.wt: worktree.Worktree | None = None
 
     def _git(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(["git", *args], cwd=self.root, capture_output=True,
                               text=True)
+
+    @property
+    def cwd(self) -> Path:
+        """Where the session works: the worktree when there is one, else the live root."""
+        return self.wt.path if self.wt is not None else self.root
 
     # ------------------------------------------------------------- day window
 
@@ -91,7 +130,7 @@ class DailyReview:
     def preflight(self) -> None:
         import os
 
-        self.git("checkout", "-B", f"daily/{self.day}")
+        self.wt = worktree.create(self.cfg, "daily", self.day, live_root=self.root)
         pack = self.root / "reports" / "daily" / "packs" / f"{self.day}-inputs.json"
         pack.parent.mkdir(parents=True, exist_ok=True)
         script = self.root / ".claude/skills/post-mortem/scripts/grade_inputs.py"
@@ -109,27 +148,39 @@ class DailyReview:
 
     # ------------------------------------------------------------- session
 
+    def prompt_path(self) -> Path:
+        v2 = self.root / "prompts" / "daily_review.v2.md"
+        return v2 if v2.exists() else self.root / "prompts" / "daily_review.v1.md"
+
     def _session_prompt(self, model: str, run_ids: list[str]) -> str:
-        template = (self.root / "prompts" / "daily_review.v1.md").read_text()
+        template = self.prompt_path().read_text(encoding="utf-8")
         listed = "\n".join(f"- {r}" for r in run_ids) or "- (none — all graded)"
         return (template.replace("{{DAY}}", self.day)
                 .replace("{{MODEL}}", model)
                 .replace("{{RUN_ID}}", self.run_id)
-                .replace("{{RUN_IDS}}", listed))
+                .replace("{{RUN_IDS}}", listed)
+                .replace("{{WORKTREE}}", str(self.cwd))
+                .replace("{{BRANCH}}", self.wt.branch if self.wt else "")
+                .replace("{{STATE_ROOT}}", str(self.root)))
+
+    def skills_for_session(self) -> list[str]:
+        return apply_changes.effective_bindings(self.cfg, self.root, "daily_review")
 
     def run_session(self, model: str, run_ids: list[str]):
         effort = router.resolve(
             "review", models_cfg=router.load_models_cfg(
                 self.root / "config" / "models.yaml")).effort
-        return self.session_runner(
-            self._session_prompt(model, run_ids), model=model,
+        env = self.wt.env() if self.wt is not None else {}
+        return run_session_in(
+            self.cwd, session_runner=self.session_runner,
+            prompt=self._session_prompt(model, run_ids), model=model, env=env,
             max_turns=self.cfg.daily_review.max_turns, effort=effort,
-            max_usd=self.cfg.daily_review.max_budget_usd, cwd=self.root,
+            max_usd=self.cfg.daily_review.max_budget_usd,
             allowed_tools=["Read", "Grep", "Glob", "Write", "Edit", "Skill",
-                           "Bash(python3 *)", "Bash(pytest *)",
-                           "Bash(git add *)", "Bash(git commit *)"],
-            skills=["post-mortem", "strategy-lab", "asset-dossier"],
-            deadline_s=2400)
+                           *DAILY_BASH_ALLOWLIST],
+            skills=self.skills_for_session(),
+            deadline_s=session_deadline_s(self.cfg, "daily_review",
+                                          DAILY_POSTFLIGHT_RESERVE_S))
 
     def _session_outputs_ok(self, run_ids: list[str]) -> bool:
         if not self.report_path().exists():
@@ -247,13 +298,107 @@ class DailyReview:
         self.kdb.commit()
         return len(per)
 
+    # ------------------------------------------------------- auto-revert watch
+
+    def _validity_and_breaches(self, start: str, end: str) -> tuple[float | None, int]:
+        row = self.jdb.execute(
+            "SELECT COUNT(*) AS n, AVG(valid) AS v FROM proposals"
+            " WHERE shadow=0 AND ts_utc >= ? AND ts_utc < ?", (start, end)).fetchone()
+        validity = (float(row["v"]) * 100.0) if row and row["n"] and row["v"] is not None \
+            else None
+        b = self.jdb.execute(
+            "SELECT COUNT(*) AS n FROM gate_decisions"
+            " WHERE severity='breach' AND ts_utc >= ? AND ts_utc < ?",
+            (start, end)).fetchone()
+        return validity, int(b["n"] if b else 0)
+
+    def auto_revert_candidates(self) -> list[tuple[str, str, dict]]:
+        """Changes merged inside the window that made the numbers worse.
+
+        Compares the window *before* the merge with the window *after* it: proposal
+        validity rate (percentage points) and gate breaches. Returns the evidence; writing
+        the request and executing it are separate steps on purpose.
+        """
+        ar = self.cfg.autonomy.auto_revert
+        if not ar.enabled:
+            return []
+        window = timedelta(days=int(ar.window_days))
+        cutoff = (self.now - window).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows = self.jdb.execute(
+            "SELECT change_id, decided_at FROM change_log"
+            " WHERE status IN ('auto_merged','approved') AND merge_commit IS NOT NULL"
+            " AND decided_at >= ? ORDER BY decided_at", (cutoff,)).fetchall()
+        out: list[tuple[str, str, dict]] = []
+        for r in rows:
+            merged_at = str(r["decided_at"])
+            try:
+                t = datetime.strptime(merged_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+            except ValueError:
+                continue
+            before_start = (t - window).strftime("%Y-%m-%dT%H:%M:%SZ")
+            now_iso = self.now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            v_before, b_before = self._validity_and_breaches(before_start, merged_at)
+            v_after, b_after = self._validity_and_breaches(merged_at, now_iso)
+            reasons = []
+            if v_before is not None and v_after is not None and \
+                    (v_before - v_after) >= float(ar.validity_drop_pct):
+                reasons.append(f"validity {v_before:.0f}% -> {v_after:.0f}%"
+                               f" (drop >= {ar.validity_drop_pct}pp)")
+            if (b_after - b_before) >= int(ar.breach_increase):
+                reasons.append(f"gate breaches {b_before} -> {b_after}"
+                               f" (+{b_after - b_before})")
+            if reasons:
+                out.append((r["change_id"], "; ".join(reasons),
+                            {"validity_before": v_before, "validity_after": v_after,
+                             "breaches_before": b_before, "breaches_after": b_after,
+                             "merged_at": merged_at}))
+        return out
+
+    def request_auto_reverts(self) -> list[tuple[str, str]]:
+        """Write the ``auto_revert_requested`` events. This job never reverts anything."""
+        requested: list[tuple[str, str]] = []
+        for change_id, reason, evidence in self.auto_revert_candidates():
+            already = self.jdb.execute(
+                "SELECT 1 FROM change_events WHERE change_id=?"
+                " AND event IN ('auto_revert_requested','reverted')",
+                (change_id,)).fetchone()
+            if already:
+                continue
+            apply_changes.record_event(
+                self.jdb, change_id, "auto_revert_requested", "system:daily_review",
+                note=reason, now=self.now)
+            self.alert(f"AUTO-REVERT REQUESTED for change {change_id}: {reason}"
+                       f" — apply_changes will execute it ({json.dumps(evidence)})",
+                       "critical")
+            requested.append((change_id, reason))
+        return requested
+
+    def merge_tier0(self) -> list[str]:
+        if self.wt is None:
+            return []
+        return apply_changes.merge_tier0(self.wt.branch, self.cfg, self.root)
+
+    def prune_worktrees(self) -> list[str]:
+        try:
+            if self.wt is not None:
+                worktree.remove(self.wt)
+            return worktree.prune(self.cfg, live_root=self.root, now=self.now)
+        except Exception as exc:  # noqa: BLE001 - pruning must never fail the run
+            self.alert(f"worktree pruning failed: {exc}", "warn")
+            return []
+
     def postflight(self, model_used: str, meta, run_ids: list[str],
                    session_status: str) -> None:
         wrong = self.wrong_decisions()
         bad_links = self.citation_lint()
         n_sources = self.update_source_reliability()
-        results = apply_changes.apply_all(self.cfg, self.jdb, self.root, self.now,
-                                          alert=self.alert)
+        tier0 = self.merge_tier0()
+        results = apply_changes.apply_all(
+            self.cfg, self.jdb, self.root, self.now, alert=self.alert,
+            worktree=self.cwd if self.wt is not None else None,
+            skills=self.skills_for_session())
+        requested = self.request_auto_reverts()
+        self.prune_worktrees()
         lines = ["", "## Deterministic appendix (code)", "",
                  f"- graded this session: {len(run_ids)} run_id(s)"]
         for rid, why, path in wrong:
@@ -265,6 +410,10 @@ class DailyReview:
         lines.append(f"- source reliability updated for {n_sources} source(s)")
         for cid, status, reason in results:
             lines.append(f"- change {cid}: {status} ({reason})")
+        for cid, reason in requested:
+            lines.append(f"- AUTO-REVERT REQUESTED {cid}: {reason}")
+        if tier0:
+            lines.append(f"- tier-0 commits merged onto the live branch: {len(tier0)}")
         rp = self.report_path()
         rp.parent.mkdir(parents=True, exist_ok=True)
         base = rp.read_text().rstrip("\n") if rp.exists() else \
@@ -288,7 +437,7 @@ class DailyReview:
     # ------------------------------------------------------------- flow
 
     def main_flow(self) -> int:
-        if killlib.is_engaged(self.cfg, self.root):
+        if killlib.is_engaged(self.cfg, self.state_root):
             self.jdb.execute(
                 "INSERT OR REPLACE INTO runs(run_id, stage, kind, started_utc,"
                 " status) VALUES (?,?,?,?, 'killed')",
@@ -307,8 +456,8 @@ class DailyReview:
                        f" ({res.meta.error}); rerunning on"
                        f" {self.cfg.daily_review.fallback_model} — its changes"
                        f" will be HELD", "warn")
-            self.git("reset", "--hard")
-            self.git("checkout", "-B", f"daily/{self.day}")
+            if self.wt is not None:
+                worktree.reset(self.wt)   # the WORKTREE, never the live checkout
             model = self.cfg.daily_review.fallback_model
             res = self.run_session(model, run_ids)
         status = "success" if (res.ok and self._session_outputs_ok(run_ids)) \

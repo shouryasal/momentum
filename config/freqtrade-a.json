@@ -52,7 +52,7 @@
   ],
   "stake_amount": "unlimited",
   "stake_currency": "USDT",
-  "strategy": "Scaffold",
+  "strategy": "SleeveA",
   "telegram": {
     "enabled": false
   },

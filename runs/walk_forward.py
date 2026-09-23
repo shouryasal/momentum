@@ -42,14 +42,24 @@ def windows(start: str, oos_months: int, today: date) -> list[tuple[str, str]]:
     return out
 
 
-def parse_backtest_zip(zip_path: Path) -> dict:
-    """Extract the metrics g2 needs from a freqtrade backtest result zip."""
+def parse_backtest_zip(zip_path: Path, strategy: str | None = None) -> dict:
+    """Extract the metrics g2 needs from a freqtrade backtest result zip.
+
+    ``strategy`` names which block to read; the default takes the only one present, so the
+    same parser serves Sleeve A's walk-forward and the console's Sleeve B backtests.
+    """
     with zipfile.ZipFile(zip_path) as z:
         name = next(n for n in z.namelist()
                     if n.endswith(".json") and not n.endswith("_config.json")
                     and "market_change" not in n)
         data = json.loads(z.read(name))
-    res = data["strategy"]["SleeveA"]
+    strategies = data["strategy"]
+    if strategy is not None:
+        res = strategies[strategy]
+    elif len(strategies) == 1:
+        res = next(iter(strategies.values()))
+    else:
+        res = strategies["SleeveA"]
     return {
         "profit_total_pct": res.get("profit_total") * 100 if res.get("profit_total") is not None else None,
         "max_drawdown_pct": (res.get("max_drawdown_account") or res.get("max_drawdown") or 0) * 100,

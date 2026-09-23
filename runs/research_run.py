@@ -22,7 +22,7 @@ from evals import snapshot as snapshotlib
 from ops import db
 from ops.config import REPO_ROOT, EarnConfig, load_config
 from ops.lib import kill as killlib
-from ops.lib import locks, tg
+from ops.lib import locks, paths, tg
 from runs import build_prompt, decision_core, router
 from runs.common import (
     atomic_write_json,
@@ -33,25 +33,22 @@ from runs.common import (
     utc_iso,
 )
 from schemas.flags import FLAG_LIST_SCHEMA, apply_reg_flags, parse_reg_flags
-from schemas.proposal import ProposalInvalid, json_schema, validate_proposal
+from schemas.proposal import ProposalInvalid, json_schema, to_file, validate_proposal
 
-FLAGS_PROMPT = """Run the reg-watch procedure (the reg-watch skill): scan the last 7
-days of regulator and exchange notices in the news archive for delistings,
-stablecoin depegs, licence changes and trading halts affecting BTC, ETH or Binance,
-and return the flag proposals as the JSON object the schema requires. Propose only
-what the evidence supports; an empty flags list is a normal result. Do NOT include
-scheduled macro events (CPI/FOMC) — a deterministic calendar handles those."""
 
-BRIEF_PROMPT = """Write today's crypto brief using the crypto-brief skill: pull the
-corroborated news for the last 24 hours from the knowledge archive, apply the
-two-source rule (single-source items are marked [unconfirmed]), and write
-knowledge/briefs/{date}.md (append an '## Update 16:00' section if the file already
-exists today). Max 600 words, every claim carries its source link, no price
-predictions, no numbers that are not in the inputs."""
+def stage_text(cfg: EarnConfig, stage: str, root: Path) -> str:
+    """The stage prompt body, from ``research.stage_prompts.<stage>`` (tier 1).
 
-BRIEF_PROMPT_SHORT = """Write a SHORT brief (max 200 words) for today using the
-crypto-brief skill: only corroborated, high-impact items from the last 24 hours into
-knowledge/briefs/{date}.md (append '## Update 16:00' if it exists)."""
+    These were module constants; they are files now, so the console can edit them and the
+    change gate can replay a candidate against the same inputs. The comment header of a
+    prompt file is stripped so the model sees the instruction only.
+    """
+    from runs.signals import stage_prompt_text
+
+    text = stage_prompt_text(cfg, stage, root)
+    if text.lstrip().startswith("<!--"):
+        _, _, text = text.partition("-->")
+    return text.strip()
 
 
 def load_compute_state(root: Path):
@@ -64,12 +61,15 @@ def load_compute_state(root: Path):
 
 class ResearchRun:
     def __init__(self, cfg: EarnConfig, jdb, kdb, *, root: Path | None = None,
+                 state_root: Path | None = None,
                  now: datetime | None = None, stage_runner=None, alert=None,
                  models_cfg: dict | None = None):
         self.cfg = cfg
         self.jdb = jdb
         self.kdb = kdb
-        self.root = root or REPO_ROOT
+        self.root = root or REPO_ROOT                       # the checkout
+        #: the data/state root — where the KILL file is, via ``paths.state_root()``.
+        self.state_root = Path(state_root) if state_root is not None else paths.state_root()
         self.now = now or datetime.now(UTC)
         self.stage_runner = stage_runner or decision_core.run_stage
         self.alert = alert or (lambda text, sev="warn": tg.send(text, sev, conn=kdb))
@@ -77,6 +77,7 @@ class ResearchRun:
         self.slot = ""
         self.run_id = ""
         self.trigger_reasons: list[str] = []
+        self.signal_id: str | None = None
 
     # ------------------------------------------------------------- journaling
 
@@ -90,8 +91,8 @@ class ResearchRun:
             " requested_model, served_model, prompt_version, escalated,"
             " escalation_reasons, input_tokens, output_tokens, cache_read_tokens,"
             " cache_write_tokens, cost_usd, num_turns, effort, auth_source,"
-            " trigger_reason, status, error)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " trigger_reason, signal_id, status, error)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (self.run_id, stage, "research", utc_iso(self.now), utc_iso(),
              choice.model if choice else None, m.served_model, prompt_version,
              int(bool(choice and choice.escalated)),
@@ -99,8 +100,8 @@ class ResearchRun:
              m.input_tokens, m.output_tokens, m.cache_read_tokens,
              m.cache_write_tokens, m.cost_usd, m.num_turns,
              m.applied_effort or (choice.effort if choice else None),
-             m.auth_source, ",".join(self.trigger_reasons) or None, status,
-             error or m.error))
+             m.auth_source, ",".join(self.trigger_reasons) or None, self.signal_id,
+             status, error or m.error))
         self.jdb.commit()
         self._persist_rate_limit(m)
 
@@ -123,15 +124,16 @@ class ResearchRun:
     def journal_proposal(self, prop, *, path: str | None, valid: bool,
                          invalid_reason: str | None, model: str,
                          prompt_version: str, hard_flags: list[str],
-                         shadow: bool = False) -> None:
+                         shadow: bool = False,
+                         approval_status: str | None = None) -> None:
         import json as _json
 
         self.jdb.execute(
             "INSERT OR REPLACE INTO proposals(run_id, shadow, ts_utc, path,"
             " prompt_version, model, module, targets_json, exposure_scale, confidence,"
             " abstain, horizon_days, rationale_json, invalidation,"
-            " hard_case_flags_json, valid, invalid_reason)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " hard_case_flags_json, valid, invalid_reason, signal_id, approval_status)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (self.run_id, int(shadow), utc_iso(self.now), path, prompt_version, model,
              prop.module if prop else None,
              _json.dumps(prop.targets.model_dump()) if prop else None,
@@ -141,7 +143,8 @@ class ResearchRun:
              prop.horizon_days if prop else None,
              _json.dumps(prop.rationale) if prop else None,
              prop.invalidation if prop else None,
-             _json.dumps(hard_flags), int(valid), invalid_reason))
+             _json.dumps(hard_flags), int(valid), invalid_reason,
+             None if shadow else self.signal_id, approval_status))
         self.jdb.commit()
 
     def _save_response(self, name: str, res, model: str) -> None:
@@ -164,10 +167,11 @@ class ResearchRun:
         skill_bash = "Bash(python3 .claude/skills/reg-watch/scripts/*)"
         for _attempt in range(1 + choice.retry):
             res = self.stage_runner(
-                FLAGS_PROMPT, model=choice.model, max_turns=choice.max_turns,
+                stage_text(self.cfg, "flags", self.root), model=choice.model, max_turns=choice.max_turns,
                 max_usd=choice.max_usd, cwd=self.root, effort=choice.effort,
                 allowed_tools=["Read", "Glob", "Grep", "Skill", skill_bash],
-                output_schema=FLAG_LIST_SCHEMA, skills=["reg-watch"])
+                output_schema=FLAG_LIST_SCHEMA, skills=["reg-watch"],
+                deadline_s=self.stage_deadline("flags", 240))
             if res.ok:
                 try:
                     import json as _json
@@ -195,20 +199,31 @@ class ResearchRun:
         tools = ["Read", "Glob", "Grep", "Skill", "Write",
                  "Bash(python3 .claude/skills/crypto-brief/scripts/*)"]
         res = self.stage_runner(
-            BRIEF_PROMPT.format(date=date_s), model=choice.model,
+            stage_text(self.cfg, "brief", self.root).format(date=date_s), model=choice.model,
             max_turns=choice.max_turns, max_usd=choice.max_usd, cwd=self.root,
-            effort=choice.effort, allowed_tools=tools, skills=["crypto-brief"])
+            effort=choice.effort, allowed_tools=tools, skills=["crypto-brief"],
+            deadline_s=self.stage_deadline("brief", 360))
         if not res.ok and res.meta.subtype != "error_max_budget_usd":
             # semantic fallback per spec: shorter brief on haiku (explicit re-dispatch)
             res = self.stage_runner(
-                BRIEF_PROMPT_SHORT.format(date=date_s),
+                stage_text(self.cfg, "brief_short", self.root).format(date=date_s),
                 model=self.models_cfg["models"]["haiku"],
                 max_turns=choice.max_turns, max_usd=choice.max_usd, cwd=self.root,
-                effort=choice.effort, allowed_tools=tools, skills=["crypto-brief"])
+                effort=choice.effort, allowed_tools=tools, skills=["crypto-brief"],
+                deadline_s=self.stage_deadline("brief", 360))
         self.journal("brief", "success" if res.ok else "failed", choice=choice,
                      meta=res.meta)
         if not res.ok:
             self.alert(f"brief stage failed: {res.meta.error}")
+
+    def stage_deadline(self, stage: str, default: float) -> float:
+        """The per-stage wall-clock budget from ``research.stage_deadlines_s``.
+
+        The run-level budget is the sum plus ``postflight_margin_s``, and the config
+        cross-validation already proved it fits inside the cron ``timeout``; here we only
+        hand the stage its share so a stuck call cannot eat the whole run.
+        """
+        return float(self.cfg.research.stage_deadlines_s.get(stage, default))
 
     def _decide_once(self, choice, bp) -> tuple:
         res = self.stage_runner(
@@ -216,11 +231,13 @@ class ResearchRun:
             max_usd=choice.max_usd, cwd=self.root, effort=choice.effort,
             allowed_tools=decision_core.READ_ONLY_TOOLS,
             extra_disallowed=["Write", "Bash"],
-            output_schema=json_schema())
+            output_schema=json_schema(),
+            deadline_s=self.stage_deadline("decide", 900))
         if not res.ok:
             return None, res
         try:
-            prop = validate_proposal(res.text)
+            prop = validate_proposal(res.text, self.cfg.universe.assets,
+                                     self.cfg.universe.quote)
         except ProposalInvalid as e:
             res.meta.error = f"schema: {e}"
             return None, res
@@ -237,13 +254,14 @@ class ResearchRun:
                                 force_escalation=self.trigger_reasons or None)
         bp, inputs, limits, fewshot = build_prompt.build_research_prompt(
             self.cfg, self.jdb, self.run_id, choice.escalation_reasons, self.now,
-            root=self.root)
+            root=self.root, signal_id=self.signal_id)
         meta = snapshotlib.SnapshotMeta(
             run_id=self.run_id, created_at=utc_iso(self.now),
             prompt_version=bp.prompt_version, model=choice.model,
             git_commit=snapshotlib.git_commit(self.root),
             token_budget=self.cfg.budgets.context_tokens["research"],
-            escalation_reasons=choice.escalation_reasons)
+            escalation_reasons=choice.escalation_reasons,
+            signal_id=self.signal_id)
         try:
             snapshotlib.write_snapshot(self.run_id, inputs=inputs, limits=limits,
                                        fewshot=fewshot, rendered_prompt=bp.text,
@@ -268,15 +286,49 @@ class ResearchRun:
                        " valid targets", "critical")
             return False
 
-        rel = f"{self.cfg.paths.proposals_dir}/{proposal_filename(self.slot, self.now)}"
-        atomic_write_json(self.root / rel, prop.model_dump())
+        subdir, approval = self.proposal_destination()
+        rel = (f"{self.cfg.paths.proposals_dir}/{subdir}"
+               f"{proposal_filename(self.slot, self.now)}")
+        atomic_write_json(self.root / rel, to_file(prop, signal_id=self.signal_id))
         self.journal("decide", "success", choice=choice, meta=res.meta,
                      prompt_version=bp.prompt_version)
         self.journal_proposal(prop, path=rel, valid=True, invalid_reason=None,
                               model=choice.model, prompt_version=bp.prompt_version,
-                              hard_flags=choice.escalation_reasons)
+                              hard_flags=choice.escalation_reasons,
+                              approval_status=approval)
+        self._mark_signal_acted()
         self._maybe_shadow(bp, choice)
         return True
+
+    def proposal_destination(self) -> tuple[str, str]:
+        """``("", "n/a")`` normally; ``("pending/", "pending")`` in propose mode.
+
+        In ``LIVE_PROPOSE`` a proposal is a REQUEST, not an instruction: it lands in
+        ``proposals/pending/`` and only an approval (HMAC-signed, verified inside the
+        container) moves it where the strategy reads it. Unverifiable mode state reads as
+        TEST, so this fails closed to the normal directory.
+        """
+        try:
+            from ops.lib import mode_state
+
+            state = mode_state.load()
+        except Exception:  # noqa: BLE001 — unreadable mode state means TEST
+            return "", "n/a"
+        if state.verified and any(state.sleeve(s).requires_approval
+                                  for s in ("a", "b")):
+            return "pending/", "pending"
+        return "", "n/a"
+
+    def _mark_signal_acted(self) -> None:
+        """Close the loop: the signal that fired this run now has a proposal."""
+        if not self.signal_id:
+            return
+        try:
+            from runs.signals import pipeline as pipelinelib
+
+            pipelinelib.mark_acted(self.jdb, self.signal_id, self.run_id, now=self.now)
+        except Exception as e:  # noqa: BLE001 — bookkeeping never fails a run
+            print(f"signal status update failed: {e}", file=sys.stderr)
 
     def _maybe_shadow(self, bp, base_choice) -> None:
         shadow_model = router.shadow_active(self.models_cfg, self.now.date())
@@ -286,12 +338,14 @@ class ResearchRun:
             bp.text, model=shadow_model, max_turns=base_choice.max_turns,
             max_usd=base_choice.max_usd, cwd=self.root, effort=base_choice.effort,
             allowed_tools=decision_core.READ_ONLY_TOOLS,
-            extra_disallowed=["Write", "Bash"], output_schema=json_schema())
+            extra_disallowed=["Write", "Bash"], output_schema=json_schema(),
+            deadline_s=self.stage_deadline("shadow", 240))
         self._save_response("response_shadow.json", res, shadow_model)
         status, prop, reason = "failed", None, res.meta.error
         if res.ok:
             try:
-                prop = validate_proposal(res.text)
+                prop = validate_proposal(res.text, self.cfg.universe.assets,
+                                         self.cfg.universe.quote)
                 status, reason = "success", None
             except ProposalInvalid as e:
                 reason = str(e)
@@ -299,7 +353,7 @@ class ResearchRun:
                      prompt_version=bp.prompt_version)
         rel = f"{self.cfg.paths.proposals_dir}/shadow/{proposal_filename(self.slot, self.now)}"
         if prop is not None:
-            atomic_write_json(self.root / rel, prop.model_dump())
+            atomic_write_json(self.root / rel, to_file(prop))
         self.journal_proposal(prop, path=rel if prop else None,
                               valid=prop is not None, invalid_reason=reason,
                               model=shadow_model, prompt_version=bp.prompt_version,
@@ -307,12 +361,14 @@ class ResearchRun:
 
     # ------------------------------------------------------------- flow
 
-    def main_flow(self, slot: str, triggered_by: list[str] | None = None) -> int:
+    def main_flow(self, slot: str, triggered_by: list[str] | None = None,
+                  signal_id: str | None = None) -> int:
         self.slot = slot
         self.run_id = run_id_for(slot, self.now)
         self.trigger_reasons = triggered_by or []
+        self.signal_id = signal_id
 
-        if killlib.is_engaged(self.cfg, self.root):
+        if killlib.is_engaged(self.cfg, self.state_root):
             self.journal("decide", "killed")
             return 0
         target = self.root / self.cfg.paths.proposals_dir / proposal_filename(slot, self.now)
@@ -343,26 +399,30 @@ class ResearchRun:
         return 0 if ok else 1
 
 
-def parse_args(argv: list[str]) -> tuple[str, list[str]]:
-    slot, triggered = None, []
+def parse_args(argv: list[str]) -> tuple[str, list[str], str | None]:
+    """``<slot> [--triggered-by a,b] [--signal-id sig-...]``."""
+    slot, triggered, signal_id = None, [], None
     it = iter(argv)
     for a in it:
         if a == "--triggered-by":
             triggered = [r for r in (next(it, "") or "").split(",") if r]
+        elif a == "--signal-id":
+            signal_id = next(it, None) or None
         elif slot is None:
             slot = a
-    return slot or nearest_slot(), triggered
+    return slot or nearest_slot(), triggered, signal_id
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     guard_env()
     cfg = load_config()
-    slot, triggered = parse_args(argv)
+    slot, triggered, signal_id = parse_args(argv)
     with locks.acquire("research"):
         with db.connect(REPO_ROOT / cfg.paths.journal_db) as jdb, \
                 db.connect(REPO_ROOT / cfg.paths.knowledge_db) as kdb:
-            return ResearchRun(cfg, jdb, kdb).main_flow(slot, triggered_by=triggered)
+            return ResearchRun(cfg, jdb, kdb).main_flow(
+                slot, triggered_by=triggered, signal_id=signal_id)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Earn tier-1 change proposal (spec section 7)",
+  "title": "Earn tier-1 change proposal (spec sections 7 and 10)",
+  "description": "What an automated session PROPOSES. Every number under backtest, walk_forward, replay and counterfactual is a CLAIM: apply_changes stores it in change_log.claimed_evidence_json and gates only on what evals/verify_change.py recomputes.",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "created_at", "author_run_id", "author_model", "prompt_version",
-               "tier", "kind", "target", "what", "why", "backtest", "walk_forward",
-               "replay", "counterfactual", "branch", "status"],
+               "tier", "kind", "target", "what", "why", "branch", "status"],
   "properties": {
     "id": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}-[a-z0-9-]+$" },
     "created_at": { "type": "string" },
@@ -14,15 +14,28 @@
     "prompt_version": { "type": "string" },
     "tier": { "const": 1 },
     "kind": { "enum": ["params", "prompt", "skill", "model"] },
-    "target": { "type": "string" },
+    "target": {
+      "type": "string",
+      "description": "The one path (file, or skill folder for skill kinds) the commit may touch."
+    },
     "what": {
       "type": "object", "additionalProperties": false,
       "required": ["summary", "commit"],
-      "properties": { "summary": { "type": "string" }, "commit": { "type": "string" } }
+      "properties": {
+        "summary": { "type": "string" },
+        "commit": { "type": "string", "minLength": 7 },
+        "op": { "enum": ["edit", "create", "delete", "bind", "revert"], "default": "edit" },
+        "bind_task": {
+          "type": "string",
+          "description": "op=bind only: the skills.bindings key the skill would be bound to."
+        },
+        "files": { "type": "array", "items": { "type": "string" } }
+      }
     },
     "why": { "type": "string", "minLength": 20 },
     "bounds_check": {
       "type": "array",
+      "description": "CLAIMED bounds arithmetic. verify_change recomputes it from the commit.",
       "items": {
         "type": "object", "additionalProperties": false,
         "required": ["param", "old", "new", "min", "max", "max_step", "ok"],
@@ -78,9 +91,38 @@
         "process_grade_delta": { "type": "number" }
       }
     },
+    "skill_evidence": {
+      "type": "object", "additionalProperties": true,
+      "description": "CLAIMED skill lint / tests / eval outcome; recomputed by verify_change.",
+      "properties": {
+        "lint_ok": { "type": "boolean" },
+        "tests_ok": { "type": "boolean" },
+        "eval_pass_rate": { "type": "number" }
+      }
+    },
+    "signal_replay": {
+      "type": "object", "additionalProperties": true,
+      "description": "Scanner/validator prompt changes: claimed precision and recall.",
+      "properties": {
+        "precision": { "type": "number" },
+        "recall": { "type": "number" },
+        "n": { "type": "integer" }
+      }
+    },
     "param_changes_this_month": { "type": "integer" },
     "branch": { "type": "string" },
-    "status": { "enum": ["proposed", "auto_merged", "approved", "rejected", "held"] },
+    "worktree": {
+      "type": "string",
+      "description": "Absolute path of the worktree the session authored this in."
+    },
+    "revert_of": {
+      "type": "string",
+      "description": "op=revert only: the change_id this undoes."
+    },
+    "status": {
+      "enum": ["proposed", "verifying", "auto_merged", "approved", "rejected", "held",
+               "reverted", "superseded"]
+    },
     "decision": {
       "type": "object", "additionalProperties": false,
       "properties": {

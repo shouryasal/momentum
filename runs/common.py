@@ -10,6 +10,9 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 GULF = timezone(timedelta(hours=4))
+
+#: Fallback research slots, used only when ``config/earn.yaml`` cannot be read. The single
+#: source is ``research.slots`` — read it through :func:`slots_for`.
 SLOTS = ("0830", "1600")
 
 
@@ -45,9 +48,41 @@ def proposal_filename(slot: str, now: datetime | None = None) -> str:
     return f"{gulf_now(now).strftime('%Y-%m-%d')}-{slot}.json"
 
 
-def nearest_slot(now: datetime | None = None) -> str:
+def compact_slot(slot: str) -> str:
+    """``"08:30"`` (config form) → ``"0830"`` (run-id / filename form)."""
+    return slot.replace(":", "").strip()
+
+
+def slots_for(cfg=None) -> tuple[str, ...]:
+    """Research slots in compact ``HHMM`` form, from ``research.slots``.
+
+    THE single source for cron fire times, ``nearest_slot`` and the healthcheck's
+    ``proposals_file`` artifact name — the 16:30-vs-16:00 mismatch existed only because
+    three places each kept their own copy. Falls back to :data:`SLOTS` when the config
+    cannot be loaded (an unconfigured checkout must not break a run id).
+    """
+    if cfg is None:
+        try:
+            from ops.config import load_config
+
+            cfg = load_config()
+        except Exception:
+            return SLOTS
+    try:
+        from ops.config import slots_for as _cfg_slots
+
+        raw = _cfg_slots(cfg)
+    except Exception:
+        return SLOTS
+    out = tuple(compact_slot(s) for s in raw if compact_slot(s))
+    return out or SLOTS
+
+
+def nearest_slot(now: datetime | None = None, slots: tuple[str, ...] | None = None) -> str:
     g = gulf_now(now)
-    return min(SLOTS, key=lambda s: abs((g.hour * 60 + g.minute) - (int(s[:2]) * 60 + int(s[2:]))))
+    candidates = tuple(slots) if slots else slots_for()
+    return min(candidates,
+               key=lambda s: abs((g.hour * 60 + g.minute) - (int(s[:2]) * 60 + int(s[2:]))))
 
 
 def utc_iso(now: datetime | None = None) -> str:
