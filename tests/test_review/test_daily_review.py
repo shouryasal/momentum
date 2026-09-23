@@ -1,10 +1,11 @@
-"""daily_review: nightly grading of the previous Gulf day, wrong-decision rule
--> trace reports, hallucinated-citation lint, Laplace source reliability,
-fallback rerun, idempotence, Sunday-grade respect."""
+"""daily_review, v2: nightly grading of the previous Gulf day in a git WORKTREE,
+wrong-decision rule -> trace reports, hallucinated-citation lint, Laplace source
+reliability, the auto-revert watch (which only *requests*), fallback rerun, idempotence,
+Sunday-grade respect."""
 
 import json
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -17,29 +18,43 @@ NOW = datetime(2026, 9, 22, 17, 30, tzinfo=UTC)  # 21:30 Gulf on 2026-09-22
 DAY = "2026-09-21"                               # the graded (previous) Gulf day
 RID1 = "2026-09-21T08:30+04:00"
 RID2 = "2026-09-21T16:00+04:00"
+LIVE_BRANCH = "live-main"
+
+
+def git(root, *args):
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
 
 
 @pytest.fixture
-def env(tmp_path):
+def env(tmp_path, monkeypatch):
     cfg = load_config()
-    root = tmp_path
-    subprocess.run(["git", "init", "-b", "main"], cwd=root, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=root, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "t"], cwd=root, capture_output=True)
+    cfg.git.live_branch = LIVE_BRANCH
+    cfg.git.worktree_root = str(tmp_path / "worktrees")
+    root = tmp_path / "live"
+    root.mkdir()
+    monkeypatch.setenv("EARN_STATE_ROOT", str(root))
+    git(root, "init", "-b", LIVE_BRANCH)
+    git(root, "config", "user.email", "t@t")
+    git(root, "config", "user.name", "t")
     (root / "prompts").mkdir()
-    (root / "prompts" / "daily_review.v1.md").write_text(
-        (REPO_ROOT / "prompts" / "daily_review.v1.md").read_text())
+    for name in ("daily_review.v1.md", "daily_review.v2.md"):
+        (root / "prompts" / name).write_text(
+            (REPO_ROOT / "prompts" / name).read_text())
     (root / "config").mkdir()
     (root / "config" / "models.yaml").write_text(
         (REPO_ROOT / "config" / "models.yaml").read_text())
     (root / "changes").mkdir()
+    (root / "reports").mkdir()
     (root / "lessons.md").write_text("# Earn lessons\n")
+    (root / ".gitignore").write_text(
+        "journal/\nvar/\nlogs/\nops/locks/\n"
+        "knowledge/*.db*\nknowledge/flags.json\nknowledge/state/\n__pycache__/\n")
     (root / ".claude").mkdir()
     for sub in ("hooks", "skills"):
         subprocess.run(["cp", "-r", str(REPO_ROOT / ".claude" / sub),
                         str(root / ".claude" / sub)], capture_output=True)
-    subprocess.run(["git", "add", "-A"], cwd=root, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=root, capture_output=True)
+    git(root, "add", "-A")
+    git(root, "commit", "-m", "base")
     journal, knowledge = db.init_all(cfg, root=root)
     jdb, kdb = db.connect(journal), db.connect(knowledge)
     alerts = []
@@ -288,3 +303,151 @@ def test_monthly_dossier_refresh_only_on_the_first(env, monkeypatch):
                 session_runner=session_ok(root, jdb),
                 alert=lambda t, s="info": alerts.append((s, t))).preflight()
     assert not any("asset_stats.py" in str(c) for c in calls)
+
+
+# --------------------------------------------------------------------------- worktree
+
+
+def test_the_session_runs_in_a_worktree_and_the_live_checkout_never_moves(env):
+    cfg, root, jdb, kdb, alerts = env
+    before_head = git(root, "rev-parse", "HEAD").stdout.strip()
+    seen = {}
+
+    def runner(prompt, *, model, **kwargs):
+        seen.update(kwargs)
+        return session_ok(root, jdb)(prompt, model=model, **kwargs)
+
+    dr = DailyReview(cfg, jdb, kdb, root=root, now=NOW, session_runner=runner,
+                     alert=lambda t, s="info": alerts.append((s, t)))
+    _proposal(jdb, RID1, "2026-09-21T04:30:00Z")
+    dr.main_flow()
+
+    assert dr.wt is not None and seen["cwd"] != root
+    assert seen["env"]["EARN_STATE_ROOT"] == str(root)
+    assert git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == LIVE_BRANCH
+    assert git(root, "rev-parse", "HEAD").stdout.strip() == before_head
+    assert "Bash(python3 *)" not in seen["allowed_tools"]
+
+
+# --------------------------------------------------------------------------- auto-revert
+
+
+def _merged_change(jdb, root, change_id, merged_at):
+    """A change that merged at ``merged_at`` with a (fake but present) merge commit."""
+    jdb.execute(
+        "INSERT INTO change_log(change_id, proposed_at, kind, target, status,"
+        " author_model, decided_at, merge_commit, is_param_change)"
+        " VALUES (?,?,'params','config/params-sleeve-a.json','auto_merged','m',?,?,1)",
+        (change_id, merged_at, merged_at, "deadbeef"))
+    jdb.commit()
+
+
+def _proposals_around(jdb, merged_at, *, before_valid, after_valid):
+    """Proposals either side of a merge, so the watch has something to compare."""
+    t = datetime.strptime(merged_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    for i, valid in enumerate(before_valid):
+        ts = (t - timedelta(hours=6 + i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        jdb.execute("INSERT INTO proposals(run_id, shadow, ts_utc, valid, module)"
+                    " VALUES (?,0,?,?,'trend')", (f"before-{i}", ts, int(valid)))
+    for i, valid in enumerate(after_valid):
+        ts = (t + timedelta(hours=1 + i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        jdb.execute("INSERT INTO proposals(run_id, shadow, ts_utc, valid, module)"
+                    " VALUES (?,0,?,?,'trend')", (f"after-{i}", ts, int(valid)))
+    jdb.commit()
+
+
+def test_a_validity_collapse_after_a_merge_requests_a_revert(env):
+    cfg, root, jdb, kdb, alerts = env
+    merged_at = (NOW - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _merged_change(jdb, root, "2026-09-20-vol", merged_at)
+    _proposals_around(jdb, merged_at, before_valid=[1, 1, 1, 1],
+                      after_valid=[0, 0, 0, 1])
+
+    dr = DailyReview(cfg, jdb, kdb, root=root, now=NOW,
+                     session_runner=session_ok(root, jdb),
+                     alert=lambda t, s="info": alerts.append((s, t)))
+    candidates = dr.auto_revert_candidates()
+    assert [c[0] for c in candidates] == ["2026-09-20-vol"]
+    assert "validity" in candidates[0][1]
+
+    requested = dr.request_auto_reverts()
+    assert requested and requested[0][0] == "2026-09-20-vol"
+    events = [r["event"] for r in jdb.execute(
+        "SELECT event FROM change_events WHERE change_id='2026-09-20-vol'")]
+    assert events == ["auto_revert_requested"]
+    # the daily review NEVER reverts anything itself
+    assert jdb.execute("SELECT status FROM change_log WHERE change_id='2026-09-20-vol'"
+                       ).fetchone()["status"] == "auto_merged"
+    assert any(s == "critical" and "AUTO-REVERT" in t for s, t in alerts)
+
+
+def test_extra_gate_breaches_after_a_merge_request_a_revert(env):
+    cfg, root, jdb, kdb, alerts = env
+    merged_at = (NOW - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _merged_change(jdb, root, "2026-09-20-vol", merged_at)
+    t = datetime.strptime(merged_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    for i in range(2):
+        jdb.execute(
+            "INSERT INTO gate_decisions(ts_utc, sleeve, pair, side, intent, callback,"
+            " allowed, reason, severity) VALUES (?,'a','BTC/USDT','buy','entry',"
+            "'confirm_trade_entry',0,'weight_cap','breach')",
+            ((t + timedelta(hours=1 + i)).strftime("%Y-%m-%dT%H:%M:%SZ"),))
+    jdb.commit()
+
+    dr = DailyReview(cfg, jdb, kdb, root=root, now=NOW,
+                     session_runner=session_ok(root, jdb),
+                     alert=lambda t, s="info": alerts.append((s, t)))
+    candidates = dr.auto_revert_candidates()
+    assert candidates and "breaches" in candidates[0][1]
+
+
+def test_a_healthy_change_is_left_alone(env):
+    cfg, root, jdb, kdb, alerts = env
+    merged_at = (NOW - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _merged_change(jdb, root, "2026-09-20-vol", merged_at)
+    _proposals_around(jdb, merged_at, before_valid=[1, 0, 1, 1],
+                      after_valid=[1, 1, 1, 1])
+    dr = DailyReview(cfg, jdb, kdb, root=root, now=NOW,
+                     session_runner=session_ok(root, jdb),
+                     alert=lambda t, s="info": alerts.append((s, t)))
+    assert dr.auto_revert_candidates() == []
+    assert dr.request_auto_reverts() == []
+
+
+def test_a_change_outside_the_window_is_not_reconsidered(env):
+    cfg, root, jdb, kdb, alerts = env
+    merged_at = (NOW - timedelta(days=int(cfg.autonomy.auto_revert.window_days) + 3)
+                 ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _merged_change(jdb, root, "2026-09-01-vol", merged_at)
+    _proposals_around(jdb, merged_at, before_valid=[1, 1, 1, 1],
+                      after_valid=[0, 0, 0, 0])
+    dr = DailyReview(cfg, jdb, kdb, root=root, now=NOW,
+                     session_runner=session_ok(root, jdb),
+                     alert=lambda t, s="info": alerts.append((s, t)))
+    assert dr.auto_revert_candidates() == []
+
+
+def test_the_request_is_not_repeated_night_after_night(env):
+    cfg, root, jdb, kdb, alerts = env
+    merged_at = (NOW - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _merged_change(jdb, root, "2026-09-20-vol", merged_at)
+    _proposals_around(jdb, merged_at, before_valid=[1, 1, 1, 1],
+                      after_valid=[0, 0, 0, 1])
+    dr = DailyReview(cfg, jdb, kdb, root=root, now=NOW,
+                     session_runner=session_ok(root, jdb),
+                     alert=lambda t, s="info": alerts.append((s, t)))
+    assert dr.request_auto_reverts()
+    assert dr.request_auto_reverts() == []
+
+
+def test_auto_revert_can_be_switched_off(env):
+    cfg, root, jdb, kdb, alerts = env
+    cfg.autonomy.auto_revert.enabled = False
+    merged_at = (NOW - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _merged_change(jdb, root, "2026-09-20-vol", merged_at)
+    _proposals_around(jdb, merged_at, before_valid=[1, 1, 1, 1],
+                      after_valid=[0, 0, 0, 0])
+    dr = DailyReview(cfg, jdb, kdb, root=root, now=NOW,
+                     session_runner=session_ok(root, jdb),
+                     alert=lambda t, s="info": alerts.append((s, t)))
+    assert dr.auto_revert_candidates() == []

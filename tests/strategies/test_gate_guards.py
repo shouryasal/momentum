@@ -2,12 +2,16 @@
 kill switch, exits-always-allowed, and check ordering."""
 
 import json
+import pathlib
 from datetime import timedelta
+
+import pytest
 
 from ops.lib import flags as host_flags
 from strategies import riskgate
+from strategies.riskgate import MemoryStateStore, RiskGate
 
-from .conftest import NOW, benign_gate, ps
+from .conftest import NOW, benign_gate, ps, write_freshness
 
 
 class TestBlackout:
@@ -74,24 +78,43 @@ class TestStaleness:
             if not expect:
                 assert d.reason == "staleness"
 
-    def test_missing_knowledge_db_fail_closed(self, gate_cfg, tmp_path):
-        assert riskgate.data_age_minutes(tmp_path / "none.db", NOW) == float("inf")
+    def test_missing_freshness_file_fail_closed(self, tmp_path):
+        assert riskgate.data_age_minutes(tmp_path / "none.json", NOW) == float("inf")
 
-    def test_data_age_from_real_rows(self, gate_cfg, tmp_path):
-        import sqlite3
+    def test_corrupt_freshness_fail_closed(self, tmp_path):
+        bad = tmp_path / "bad.json"
+        bad.write_text("{oops")
+        assert riskgate.data_age_minutes(bad, NOW) == float("inf")
+        empty = tmp_path / "empty.json"
+        empty.write_text(json.dumps({"version": 1, "sources": {}}))
+        assert riskgate.data_age_minutes(empty, NOW) == float("inf")
+        junk = tmp_path / "junk.json"
+        junk.write_text(json.dumps({"sources": {"book_snapshots": "not-a-time"}}))
+        assert riskgate.data_age_minutes(junk, NOW) == float("inf")
 
-        db = tmp_path / "k.db"
-        conn = sqlite3.connect(db)
-        conn.execute("CREATE TABLE book_snapshots(pair, captured_at, best_bid, best_ask, mid, spread_bps)")
-        conn.execute("CREATE TABLE candles(pair, tf, open_time)")
-        conn.execute("INSERT INTO book_snapshots VALUES ('BTC/USDT', ?, 1, 1, 1, 0)",
-                     ((NOW - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),))
-        conn.execute("INSERT INTO candles VALUES ('BTC/USDT', '1h', ?)",
-                     (int((NOW - timedelta(minutes=40)).timestamp() * 1000),))
-        conn.commit()
-        conn.close()
-        # book age 10; candle age 40-60 -> 0 => max 10
-        assert riskgate.data_age_minutes(db, NOW) == 10.0
+    def test_age_from_freshness_file(self, tmp_path):
+        # book age 10; 1h candle age 40 - 60 allowance -> 0 => max 10
+        f = write_freshness(tmp_path / "f.json", now=NOW, book_age_min=10, candle_age_min=40)
+        assert riskgate.data_age_minutes(f, NOW) == 10.0
+        # a stalled ingest: the book is 90 minutes old
+        f = write_freshness(tmp_path / "g.json", now=NOW, book_age_min=90, candle_age_min=95)
+        assert riskgate.data_age_minutes(f, NOW) == 90.0
+
+    def test_freshness_object_form_accepted(self, tmp_path):
+        f = tmp_path / "obj.json"
+        f.write_text(json.dumps({
+            "version": 1,
+            "sources": {"book_snapshots": {
+                "latest_utc": (NOW - timedelta(minutes=7)).strftime("%Y-%m-%dT%H:%M:%SZ")}},
+        }))
+        assert riskgate.data_age_minutes(f, NOW) == 7.0
+
+    def test_missing_freshness_blocks_entries(self, gate_cfg):
+        gate = RiskGate(gate_cfg, MemoryStateStore(),
+                        flags_provider=lambda pair, now: (False, ""),
+                        kill_provider=lambda: False)   # real freshness provider, no file
+        d = gate.check_entry("BTC/USDT", 100.0, ps())
+        assert not d.allowed and d.reason == "staleness"
 
 
 class TestKillSwitch:
@@ -115,3 +138,47 @@ def test_checks_dict_reports_every_check(gate):
     d = gate.check_entry("BTC/USDT", 100.0, ps())
     assert set(d.checks) == set(riskgate.CHECK_ORDER)
     assert all(d.checks.values())
+
+
+class TestFreshnessMatchesTheWriter:
+    """The in-container reader and ``ops.lib.freshness`` must agree on the same file.
+
+    The gate reads the sidecar with stdlib only (the knowledge DB is mounted read-only
+    and in WAL mode — verified HIGH #12). P1 owns the writer, P2 owns the reader, so the
+    contract is asserted here the same way the flags mirror is.
+    """
+
+    def _write(self, tmp_path, *, book_age, candle_age, name="freshness.json"):
+        from ops.lib import freshness
+
+        path = pathlib.Path(tmp_path) / name
+        freshness.record_many(
+            {
+                freshness.SOURCE_BOOKS: NOW - timedelta(minutes=book_age),
+                freshness.candles_source("1h"): NOW - timedelta(minutes=candle_age),
+            },
+            path=path,
+            now=NOW,
+        )
+        return path
+
+    def test_the_two_implementations_report_the_same_age(self, tmp_path):
+        from ops.lib import freshness
+
+        for book, candle in ((5, 20), (10, 40), (90, 95), (0, 300)):
+            path = self._write(tmp_path, book_age=book, candle_age=candle)
+            assert riskgate.data_age_minutes(path, NOW) == pytest.approx(
+                freshness.data_age_minutes(path, NOW)), (book, candle)
+
+    def test_a_written_file_unblocks_entries(self, gate_cfg, tmp_path):
+        # the fixture already points the gate's sidecar at this path
+        self._write(pathlib.Path(gate_cfg.freshness_path).parent, book_age=5,
+                    candle_age=30,
+                    name=pathlib.Path(gate_cfg.freshness_path).name)
+        gate = RiskGate(gate_cfg, MemoryStateStore(),
+                        flags_provider=lambda pair, now: (False, ""),
+                        kill_provider=lambda: False)
+        assert gate.check_entry("BTC/USDT", 100.0, ps()).allowed
+
+    def test_the_gate_derives_the_sidecar_path_beside_the_knowledge_db(self, gate_cfg):
+        assert pathlib.Path(gate_cfg.freshness_path).name == "freshness.json"

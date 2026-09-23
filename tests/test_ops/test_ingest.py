@@ -331,3 +331,121 @@ class TestClaimCheck:
             r = kdb.execute("SELECT claim_verified FROM news_items WHERE url_hash=?",
                             (h,)).fetchone()
             assert r["claim_verified"] is None, h
+
+
+# ---------------------------------------------------------------- config + pipeline (P4)
+
+
+def test_keyword_tables_come_from_config(ing):
+    ingest, _, _, _ = ing
+    assert ingest.event_keywords == dict(ingest.cfg.news.event_keywords)
+    assert ingest.asset_keywords == dict(ingest.cfg.news.asset_keywords)
+    ingest.cfg.news.event_keywords = {"custom": ["widget"]}
+    assert ingest.event_keywords == {"custom": ["widget"]}
+
+
+def test_timeframes_come_from_config(ing):
+    ingest, fake, kdb, _ = ing
+    ingest.cfg.ingest.timeframes = ["1h"]
+    ingest.refresh_candles()
+    tfs = {r[0] for r in kdb.execute("SELECT DISTINCT tf FROM candles")}
+    assert tfs == {"1h"}
+
+
+def test_freshness_file_is_written_after_every_phase(ing, cfg):
+    ingest, _, _, root = ing
+    ingest._phase("candles", ingest.refresh_candles)
+    p = root / "knowledge" / "state" / "freshness.json"
+    assert p.exists()
+    data = json.loads(p.read_text())
+    assert data["version"] == 1 and "candles_1h" in data["sources"]
+
+
+def test_freshness_failure_never_fails_a_phase(ing, monkeypatch):
+    ingest, _, _, _ = ing
+    monkeypatch.setattr(ingest, "freshness_sources",
+                        lambda: (_ for _ in ()).throw(RuntimeError("disk full")))
+    assert ingest._phase("books", ingest.snapshot_books) is True
+
+
+def test_classify_prompt_is_the_tier1_file(classify_env):
+    ingest, kdb, _ = classify_env
+    _seed_item(kdb, "Validators offline across the network", "p1")
+    calls = []
+    ingest.stage_runner = lambda prompt, **kw: (
+        calls.append(prompt) or StageResult(True, json.dumps({"labels": []}),
+                                            StageMeta(subtype="success")))
+    ingest.classify_news()
+    assert calls and "Label each crypto news headline" in calls[0]
+    assert '"outage"' in calls[0]           # the configured event classes
+    assert "p1" in calls[0]
+
+
+def test_classify_routes_through_the_chain_router_when_no_stage_runner(classify_env):
+    """With no injected stage runner, classify goes through runs.signals.run_task."""
+    ingest, kdb, _ = classify_env
+    _seed_item(kdb, "Validators offline across the network", "c1")
+    ingest.stage_runner = None
+    from runs.llm import base as llm_base
+    from runs.llm.stub import StubProvider, scripted
+
+    llm_base.registry.clear()
+    provider = StubProvider(key="claude:subscription", responses=[scripted(
+        text=json.dumps({"labels": [{"url_hash": "c1", "event_class": "outage",
+                                     "assets": ["ETH"]}]}))])
+    llm_base.registry.register(provider, replace=True)
+    try:
+        ingest.classify_news()
+    finally:
+        llm_base.registry.clear()
+    row = kdb.execute("SELECT * FROM news_items WHERE url_hash='c1'").fetchone()
+    assert row["event_class"] == "outage" and row["classified_by"] == "model"
+
+
+def test_ingest_runs_the_scanner_in_pipeline_mode(ing, monkeypatch):
+    ingest, _, kdb, root = ing
+    ingest.cfg.signals.integration = "pipeline"
+    ingest.cfg.signals.scanner.run_after_ingest = True
+    seen = {}
+
+    from runs.signals import pipeline as pipelinelib
+
+    class _Report:
+        candidates = 3
+        new = ["a"]
+        screened = []
+        planned = []
+
+    def fake_on_ingest(cfg, jdb, kdb_, **kwargs):
+        seen["called"] = True
+        return _Report()
+
+    monkeypatch.setattr(pipelinelib, "on_ingest", fake_on_ingest)
+    ingest._maybe_trigger()
+    assert seen.get("called") is True
+    row = kdb.execute("SELECT * FROM ingest_runs WHERE phase='scanner'").fetchone()
+    assert row is not None and row["status"] == "ok"
+
+
+def test_legacy_integration_still_uses_the_trigger_engine(ing, monkeypatch):
+    ingest, _, kdb, _ = ing
+    ingest.cfg.signals.integration = "legacy"
+    from runs import triggers as triggerslib
+
+    monkeypatch.setattr(triggerslib, "evaluate_and_fire",
+                        lambda *a, **k: {"fired": True, "reasons": ["news:hack"]})
+    ingest._maybe_trigger()
+    row = kdb.execute("SELECT * FROM ingest_runs WHERE phase='trigger'").fetchone()
+    assert row is not None and row["status"] == "fired"
+
+
+def test_a_scanner_failure_never_fails_ingest(ing, monkeypatch):
+    ingest, _, _, _ = ing
+    ingest.cfg.signals.integration = "pipeline"
+    from runs.signals import pipeline as pipelinelib
+
+    def boom(*a, **k):
+        raise RuntimeError("scanner exploded")
+
+    monkeypatch.setattr(pipelinelib, "on_ingest", boom)
+    ingest._maybe_trigger()   # must not raise

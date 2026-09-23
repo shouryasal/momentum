@@ -92,3 +92,97 @@ class TestComputeState:
         p = cs.portfolio_state(assets, None, datetime(2026, 9, 22, tzinfo=UTC))
         assert p["regime"] == "high_vol"
         assert p["modules"]["disagreement"] is True
+
+
+# --------------------------------------------------------------------------- v2 skills
+
+TIER1_SKILLS = ("post-mortem", "strategy-lab", "tca", "risk-gate", "skill-smith",
+                "asset-dossier", "crypto-brief", "reg-watch", "market-state", "decide")
+
+
+@pytest.mark.parametrize("name", TIER1_SKILLS)
+def test_no_skill_asks_for_the_network(name):
+    fm, _ = frontmatter(name)
+    tools = str(fm.get("allowed-tools", ""))
+    assert "WebFetch" not in tools and "WebSearch" not in tools, name
+
+
+def test_the_template_exists_and_is_complete():
+    d = REPO_ROOT / ".claude" / "skills" / "_template"
+    assert (d / "SKILL.md").exists()
+    assert (d / "references" / "checklist.md").exists()
+    assert any((d / "tests").glob("test_*.py"))
+    assert (d / "evals" / "cases.yaml").exists()
+    body = (d / "SKILL.md").read_text()
+    assert "{{SKILL_NAME}}" in body and "{{SKILL_TITLE}}" in body
+
+
+def test_the_template_lints_clean_once_its_placeholders_are_filled(tmp_path):
+    from evals.skill_lint import lint_skill
+
+    src = REPO_ROOT / ".claude" / "skills" / "_template"
+    dst = tmp_path / "example-skill"
+    for path in sorted(src.rglob("*")):
+        rel = path.relative_to(src)
+        # Running the template's scripts once leaves a ``__pycache__`` beside them, and a
+        # ``.pyc`` read as UTF-8 raises — the test would then fail on a machine state that
+        # says nothing about the template.
+        if "__pycache__" in path.parts or path.suffix in (".pyc", ".pyo"):
+            continue
+        if path.is_dir():
+            (dst / rel).mkdir(parents=True, exist_ok=True)
+            continue
+        (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+        (dst / rel).write_text(
+            path.read_text(encoding="utf-8")
+            .replace("{{SKILL_NAME}}", "example-skill")
+            .replace("{{SKILL_TITLE}}", "Example skill"),
+            encoding="utf-8")
+    result = lint_skill(dst)
+    assert result.ok, [f.as_dict() for f in result.errors]
+
+
+def test_skill_smith_lints_clean_under_the_strict_gate():
+    from evals.skill_lint import lint_skill
+
+    d = REPO_ROOT / ".claude" / "skills" / "skill-smith"
+    names = {p.name for p in d.parent.iterdir() if p.is_dir()}
+    result = lint_skill(d, existing_names=names)
+    assert result.ok, [f.as_dict() for f in result.errors]
+
+
+def test_skill_smith_declares_deterministic_eval_cases():
+    from evals.skill_eval import load_cases
+
+    cases = load_cases(REPO_ROOT / ".claude" / "skills" / "skill-smith")
+    assert cases, "skill-smith must declare eval cases"
+    # at least one runnable case, or the gate could never score it
+    assert any("run" in case for case in cases)
+
+
+def test_skill_smith_names_both_triggers_and_the_scripts_stop():
+    _, body = frontmatter("skill-smith")
+    lowered = body.lower()
+    assert "two" in lowered and "three" in lowered
+    assert "held for the human" in lowered
+    assert "incubating" in lowered
+
+
+def test_strategy_lab_tells_the_session_its_numbers_are_claims():
+    _, body = frontmatter("strategy-lab")
+    lowered = body.lower()
+    assert "recompute" in lowered
+    assert "worktree" in lowered
+    assert "op" in lowered
+
+
+def test_skill_smith_clears_its_own_eval_floor(tmp_path):
+    """Self-referential on purpose: one case checks skill-smith against its own rules."""
+    from evals.skill_eval import evaluate
+    from ops.config import load_config
+
+    cfg = load_config()
+    result = evaluate(REPO_ROOT / ".claude" / "skills" / "skill-smith",
+                      cwd=REPO_ROOT, repo_root=REPO_ROOT, timeout_s=120)
+    assert result.ok(float(cfg.skills.eval.min_pass_rate)), \
+        [case.as_dict() for case in result.cases]

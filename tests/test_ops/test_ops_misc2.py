@@ -129,6 +129,37 @@ class TestBackup:
         with sqlite3.connect(day / "db" / "journal.db") as c:
             assert c.execute("SELECT COUNT(*) FROM nav_daily").fetchone()[0] == 1
 
+    def test_dest_expands_home_and_env(self, cfg, monkeypatch, tmp_path):
+        """Verified HIGH #8: backup.dest was /mnt/d/..., which does not exist on this
+        machine, so every nightly run failed and alerted. The default is now ~-relative."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("EARN_BACKUP_ROOT", str(tmp_path / "envdir"))
+        cfg2 = cfg.model_copy(deep=True)
+        cfg2.backup.dest = "~/earn-backups"
+        assert backup.dest_for(cfg2) == tmp_path / "earn-backups"
+        cfg2.backup.dest = "$EARN_BACKUP_ROOT/b"
+        assert backup.dest_for(cfg2) == tmp_path / "envdir" / "b"
+        assert backup.mirror_for(cfg2) is None
+
+    def test_check_dest_reports_instead_of_raising(self, tmp_path):
+        good = backup.check_dest(tmp_path / "fresh")
+        assert good.ok and (tmp_path / "fresh").is_dir()
+        assert not (tmp_path / "fresh" / ".earn-write-probe").exists()
+        blocked = tmp_path / "file-not-a-dir"
+        blocked.write_text("x")
+        bad = backup.check_dest(blocked / "under")
+        assert not bad.ok and "cannot create" in bad.detail
+
+    def test_mirror_is_best_effort(self, cfg, dbs, tmp_path):
+        root, jdb, _ = dbs
+        dest, mirror_root = tmp_path / "dest", tmp_path / "mirror"
+        assert backup.run(cfg, root, dest, now=NOW, mirror_root=mirror_root) == 0
+        assert (mirror_root / "2026-09-22" / "db" / "journal.db").exists()
+        # an impossible mirror warns but never fails the backup
+        broken = tmp_path / "nope"
+        broken.write_text("not a directory")
+        assert backup.run(cfg, root, dest, now=NOW, mirror_root=broken / "under") == 0
+
     def test_prune_keeps_daily_and_sundays(self, cfg, tmp_path):
         dest = tmp_path / "b"
         days = [(NOW - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(40)]
@@ -146,6 +177,15 @@ class TestBackup:
 
 
 def test_crontab_matches_earn_yaml_schedules(cfg):
+    """The crontab is generated now (ops/gen_ops_files.py), so this asserts the *result*:
+    every schedule is present, wrapped, and fires when the config says it does.
+
+    research_run is the exception on purpose: its lines come from ``research.slots``, one
+    per slot, which is the 16:30-vs-16:00 fix. The stored expression is not consulted.
+    """
+    from ops import gen_ops_files as gen
+    from ops.config import slots_for
+
     text = (REPO_ROOT / "ops" / "crontab").read_text()
     lines = [line for line in text.splitlines()
              if line and not line.startswith("#") and "=" not in line.split()[0]]
@@ -156,21 +196,25 @@ def test_crontab_matches_earn_yaml_schedules(cfg):
         "refresh_backtest_data.sh": "backtest_data",
         "runs.maintenance": "maintenance",
         "runs.daily_review": "daily_review",
+        "runs.signals": "scanner",
+        "runs.nav_tick": "nav_tick",
+        "runs.reconcile": "reconcile",
     }
-    seen = {}
+    seen: dict[str, list[tuple[str, str]]] = {}
     for line in lines:
-        fields = line.split()
-        cron = " ".join(fields[:5])
+        cron = " ".join(line.split()[:5])
         assert croniter.is_valid(cron), line
         for needle, job in jobs.items():
             if needle in line:
-                seen[job] = (cron, line)
+                seen.setdefault(job, []).append((cron, line))
     for job, sched in cfg.ops.schedules.items():
         assert job in seen, f"{job} missing from crontab"
-        cron, line = seen[job]
-        assert cron == sched.cron, f"{job}: crontab {cron!r} != earn.yaml {sched.cron!r}"
-        assert f"timeout -k 30 {sched.deadline_s}" in line, f"{job} deadline mismatch"
-        assert "envwrap.sh" in line and "flock -n" in line
+        crons = sorted(c for c, _ in seen[job])
+        assert crons == sorted(gen.crons_for(cfg, job)), f"{job}: {crons}"
+        for _, line in seen[job]:
+            assert f"timeout -k 30 {sched.deadline_s}" in line, f"{job} deadline mismatch"
+            assert "envwrap.sh" in line and "flock -n" in line
+    assert len(seen["research_run"]) == len(slots_for(cfg))
 
 
 def test_compose_never_mounts_env_or_secrets():

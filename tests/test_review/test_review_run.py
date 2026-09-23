@@ -1,6 +1,6 @@
-"""review_run wrapper: preflight (branch, packs, lesson archiving), fable->opus
-explicit rerun with holds, recurring-cause escalation, per-model table, shadow
-verdict, fewshot refresh, review skill lint."""
+"""review_run wrapper, v2: preflight in a git WORKTREE (never the live checkout), the
+fable->opus rerun that resets the worktree only, recurring-cause escalation, the per-model
+table, the shadow verdict routed through the change gate, fewshot refresh, skill lint."""
 
 import json
 import re
@@ -13,35 +13,49 @@ import yaml
 from ops import db
 from ops.config import REPO_ROOT, load_config
 from runs.decision_core import StageMeta, StageResult
-from runs.review_run import ReviewRun, prev_weeks
+from runs.review_run import ReviewRun, prev_weeks, session_deadline_s
 
 NOW = datetime(2026, 9, 27, 16, 0, tzinfo=UTC)  # Sunday 20:00 Gulf
 WEEK = "2026-W39"
+LIVE_BRANCH = "live-main"
+
+
+def git(root, *args):
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
 
 
 @pytest.fixture
-def env(tmp_path):
+def env(tmp_path, monkeypatch):
     cfg = load_config()
-    root = tmp_path
-    subprocess.run(["git", "init", "-b", "main"], cwd=root, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=root, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "t"], cwd=root, capture_output=True)
+    cfg.git.live_branch = LIVE_BRANCH
+    cfg.git.worktree_root = str(tmp_path / "worktrees")
+    root = tmp_path / "live"
+    root.mkdir()
+    monkeypatch.setenv("EARN_STATE_ROOT", str(root))
+    git(root, "init", "-b", LIVE_BRANCH)
+    git(root, "config", "user.email", "t@t")
+    git(root, "config", "user.name", "t")
     (root / "prompts" / "examples").mkdir(parents=True)
-    (root / "prompts" / "review.v1.md").write_text(
-        (REPO_ROOT / "prompts" / "review.v1.md").read_text())
+    for name in ("review.v1.md", "review.v2.md"):
+        (root / "prompts" / name).write_text(
+            (REPO_ROOT / "prompts" / name).read_text())
     (root / "config").mkdir()
     (root / "config" / "models.yaml").write_text(
         (REPO_ROOT / "config" / "models.yaml").read_text())
     (root / "config" / "backtest.yaml").write_text(
         "costs:\n  fee_bps: 10.0\n  slippage_bps: 5.0\n")
     (root / "changes").mkdir()
+    (root / "reports").mkdir()
     (root / "lessons.md").write_text("# Earn lessons\n")
+    (root / ".gitignore").write_text(
+        "journal/\nvar/\nlogs/\nops/locks/\n"
+        "knowledge/*.db*\nknowledge/flags.json\nknowledge/state/\n__pycache__/\n")
     (root / ".claude").mkdir()
     for sub in ("hooks", "skills"):
         subprocess.run(["cp", "-r", str(REPO_ROOT / ".claude" / sub),
                         str(root / ".claude" / sub)], capture_output=True)
-    subprocess.run(["git", "add", "-A"], cwd=root, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=root, capture_output=True)
+    git(root, "add", "-A")
+    git(root, "commit", "-m", "base")
     journal, knowledge = db.init_all(cfg, root=root)
     jdb, kdb = db.connect(journal), db.connect(knowledge)
     alerts = []
@@ -69,6 +83,7 @@ def session_ok(week=WEEK, root=None, jdb=None):
 
 def test_happy_path_fable(env):
     cfg, root, jdb, kdb, alerts = env
+    before_head = git(root, "rev-parse", "HEAD").stdout.strip()
     rr = ReviewRun(cfg, jdb, kdb, root=root, now=NOW,
                    session_runner=session_ok(root=root, jdb=jdb),
                    alert=lambda t, s="info": alerts.append((s, t)))
@@ -77,12 +92,59 @@ def test_happy_path_fable(env):
     assert "## Per-model quality" in report
     row = jdb.execute("SELECT * FROM runs WHERE kind='review'").fetchone()
     assert row["status"] == "success" and row["requested_model"] == "claude-fable-5-1"
-    # branch created
-    branches = subprocess.run(["git", "branch"], cwd=root, capture_output=True,
-                              text=True).stdout
+    # the session branch exists, but the LIVE checkout never moved
+    branches = git(root, "branch").stdout
     assert f"review/{WEEK}" in branches
+    assert git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == LIVE_BRANCH
+    assert git(root, "rev-parse", "HEAD").stdout.strip() == before_head
     # grading packs generated
     assert (root / "reports" / "weekly" / WEEK / "inputs.json").exists()
+
+
+def test_the_session_runs_in_a_worktree_with_the_state_root_exported(env):
+    cfg, root, jdb, kdb, alerts = env
+    seen = {}
+
+    def runner(prompt, *, model, **kwargs):
+        seen.update(kwargs)
+        seen["prompt"] = prompt
+        return session_ok(root=root, jdb=jdb)(prompt, model=model, **kwargs)
+
+    rr = ReviewRun(cfg, jdb, kdb, root=root, now=NOW, session_runner=runner,
+                   alert=lambda t, s="info": alerts.append((s, t)))
+    rr.main_flow()
+
+    assert rr.wt is not None
+    assert seen["cwd"] != root                      # not the live checkout
+    assert str(seen["cwd"]).endswith(f"review-{WEEK}")
+    assert seen["env"]["EARN_STATE_ROOT"] == str(root)
+    assert seen["env"]["EARN_AUTOMATED_RUN"] == "1"
+    assert str(rr.wt.path) in seen["prompt"]        # the prompt tells it where it is
+
+
+def test_the_bash_allowlist_names_scripts_instead_of_python3_star(env):
+    cfg, root, jdb, kdb, alerts = env
+    seen = {}
+
+    def runner(prompt, *, model, **kwargs):
+        seen.update(kwargs)
+        return session_ok(root=root, jdb=jdb)(prompt, model=model, **kwargs)
+
+    ReviewRun(cfg, jdb, kdb, root=root, now=NOW, session_runner=runner,
+              alert=lambda t, s="info": alerts.append((s, t))).main_flow()
+
+    tools = seen["allowed_tools"]
+    assert "Bash(python3 *)" not in tools
+    assert "Bash(bash *)" not in tools
+    assert "Bash(docker compose *)" not in tools
+    assert "Bash(python3 .claude/skills/post-mortem/scripts/*)" in tools
+
+
+def test_the_session_deadline_reserves_time_for_the_postflight(env):
+    cfg, _root, _jdb, _kdb, _alerts = env
+    budget = cfg.ops.schedules["review_run"].deadline_s
+    assert session_deadline_s(cfg, "review_run", 900) == budget - 900
+    assert session_deadline_s(cfg, "review_run", 900) < budget
 
 
 def test_fable_failure_reruns_on_opus(env):
@@ -139,34 +201,50 @@ def _seed_shadow(root, jdb, n=10, extra=()):
     jdb.commit()
 
 
-def test_shadow_auto_promotion(env):
+def test_a_clean_shadow_window_proposes_a_change_instead_of_writing_the_overlay(env):
+    """Spec §10: model promotion goes through the gate, which always holds it for a human."""
     cfg, root, jdb, kdb, alerts = env
     _seed_shadow(root, jdb)
     rr = ReviewRun(cfg, jdb, kdb, root=root, now=NOW,
                    session_runner=session_ok(root=root, jdb=jdb),
                    alert=lambda t, s="info": alerts.append((s, t)))
+    rr.preflight()
     stats = rr.grade_shadow()
+
     assert stats["agreement_rate"] == 1.0 and stats["window_done"]
     assert stats["limit_violations"] == 0
     assert stats["recommendation"] == "PROMOTE"
-    # full autonomy: the overlay now routes decide to the promoted model
-    ov = yaml.safe_load((root / "config" / "models-auto.yaml").read_text())
-    assert ov["tasks"]["decide"]["model"] == "sonnet"
-    assert ov["shadow"]["enabled"] is False
-    from runs import router
-    mc2 = router.load_models_cfg(root / "config" / "models.yaml")
-    assert router.resolve("decide", models_cfg=mc2).model == "claude-sonnet-5"
+    # the LIVE overlay is untouched: nothing is promoted without a human
+    assert not (root / "config" / "models-auto.yaml").exists()
+    change_id = f"{NOW.strftime('%Y-%m-%d')}-promote-sonnet"
+    change = json.loads((root / "changes" / f"{change_id}.json").read_text())
+    assert change["kind"] == "model" and change["status"] == "proposed"
+    assert change["author_model"] == "code:grade_shadow"
+    assert change["what"]["commit"]
+    # the overlay edit exists, but only in the worktree, on the session branch
+    assert (rr.wt.path / "config" / "models-auto.yaml").exists()
+    assert any("proposed" in t for _, t in alerts)
+
+
+def test_the_proposed_promotion_is_held_by_the_gate(env):
+    cfg, root, jdb, kdb, alerts = env
+    _seed_shadow(root, jdb)
+    from ops.lib import flags as flagslib
+
+    flagslib.touch(root / cfg.paths.flags_file, now=NOW)
+    rr = ReviewRun(cfg, jdb, kdb, root=root, now=NOW,
+                   session_runner=session_ok(root=root, jdb=jdb),
+                   alert=lambda t, s="info": alerts.append((s, t)))
+    rr.main_flow()
+
     row = jdb.execute("SELECT * FROM change_log WHERE kind='model'").fetchone()
-    assert row["status"] == "auto_merged" and row["merge_commit"]
-    plog = (root / "knowledge" / "promotions.jsonl").read_text()
-    assert "claude-sonnet-5" in plog
-    assert any("PROMOTED" in t for _, t in alerts)
-    log = subprocess.run(["git", "log", "--oneline"], cwd=root,
-                         capture_output=True, text=True).stdout
-    assert "auto-promote" in log
+    assert row is not None
+    assert row["status"] == "held"
+    assert "human" in (row["reason"] or "")
+    assert row["merge_commit"] is None
 
 
-def test_shadow_limit_violation_blocks_promotion(env):
+def test_shadow_limit_violation_closes_the_window_without_promoting(env):
     cfg, root, jdb, kdb, alerts = env
     from evals.snapshot import SnapshotMeta, write_snapshot
 
@@ -184,11 +262,31 @@ def test_shadow_limit_violation_blocks_promotion(env):
     rr = ReviewRun(cfg, jdb, kdb, root=root, now=NOW,
                    session_runner=session_ok(root=root, jdb=jdb),
                    alert=lambda t, s="info": alerts.append((s, t)))
+    rr.preflight()
     stats = rr.grade_shadow()
     assert stats["limit_violations"] == 1 and stats["window_done"]
     assert stats["recommendation"] == "DO NOT PROMOTE"
-    assert not (root / "config" / "models-auto.yaml").exists()
     assert not any("PROMOTED" in t for _, t in alerts)
+    # the window is CLOSED so auto-shadow is never stuck on a model it rejected
+    ov = yaml.safe_load((root / "config" / "models-auto.yaml").read_text())
+    assert ov["shadow"]["enabled"] is False
+    assert "tasks" not in ov or "decide" not in ov.get("tasks", {})
+
+
+def test_an_open_shadow_window_is_left_alone(env):
+    cfg, root, jdb, kdb, alerts = env
+    _seed_shadow(root, jdb)
+    mc = yaml.safe_load((root / "config" / "models.yaml").read_text())
+    mc["shadow"]["started"] = NOW.strftime("%Y-%m-%d")   # started today
+    (root / "config" / "models.yaml").write_text(yaml.safe_dump(mc))
+    rr = ReviewRun(cfg, jdb, kdb, root=root, now=NOW,
+                   session_runner=session_ok(root=root, jdb=jdb),
+                   alert=lambda t, s="info": alerts.append((s, t)))
+    rr.preflight()
+    stats = rr.grade_shadow()
+    assert stats["recommendation"] == "continue"
+    assert not (root / "config" / "models-auto.yaml").exists()
+    assert not list((root / "changes").glob("*promote*"))
 
 
 def test_fewshot_refresh_monthly(env):

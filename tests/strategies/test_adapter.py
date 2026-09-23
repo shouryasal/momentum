@@ -62,7 +62,21 @@ def test_protections_traced_from_config(strategy_cls):
 
 def test_stoploss_from_config(strategy_cls):
     s = _mk(strategy_cls)
-    assert s.stoploss == -0.15
+    # -min(trading.stoploss.fixed_pct, risk.stoploss_per_trade) = -min(0.10, 0.15)
+    assert s.stoploss == -0.10
+
+
+def test_roi_and_timeouts_come_from_config(strategy_cls):
+    s = _mk(strategy_cls)
+    assert s.minimal_roi == {"0": 10.0}                 # effectively off, as configured
+    assert s.unfilledtimeout["entry"] == 20
+    assert s.unfilledtimeout["exit_timeout_count"] == 3
+
+
+def test_startup_candles_derived_from_bounds(strategy_cls):
+    s = _mk(strategy_cls)
+    # bounds['sleeve_a.trend.ma_days'].max = 300, +20 days, 6 candles per 4h day
+    assert s.startup_candle_count == (300 + 20) * 6
 
 
 def test_backtest_mode_uses_stubbed_providers(strategy_cls):

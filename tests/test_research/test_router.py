@@ -42,10 +42,51 @@ def test_other_tasks_never_escalate():
 
 
 def test_pinned_strings_are_exact():
+    """The v1 view flattens the v2 `models:` entries back to pinned strings."""
     mc = router.load_models_cfg()
     assert set(mc["models"].values()) == {
         "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5",
-        "claude-haiku-4-5-20251001"}
+        "claude-haiku-4-5-20251001", "llama3.1:8b"}
+
+
+class TestV2ChainCompatibility:
+    """models.yaml is v2 chains now; the legacy callers must not notice."""
+
+    def test_task_model_is_the_head_of_the_chain(self):
+        mc = router.load_models_cfg()
+        assert mc["tasks"]["decide"]["chain"] == ["opus"]
+        assert mc["tasks"]["decide"]["model"] == "opus"
+        assert router.resolve("decide").model == "claude-opus-5"
+
+    def test_a_local_head_is_skipped_by_the_legacy_shim(self):
+        """`classify`'s chain starts local, but resolve() feeds the Claude SDK directly.
+
+        `runs.ingest` passes `choice.model` to `decision_core.run_stage`, which can only
+        speak to Claude — so the shim returns the first SDK-servable entry. Routing to
+        the local model is `runs.llm.chain.run_task`'s job, with a context pack.
+        """
+        mc = router.load_models_cfg()
+        assert mc["tasks"]["classify"]["chain"][0] == "local_small"
+        assert router.resolve("classify", models_cfg=mc).model == \
+            "claude-haiku-4-5-20251001"
+        assert router.resolve("scan", models_cfg=mc).model == "claude-haiku-4-5-20251001"
+
+    def test_on_all_failed_is_exposed_as_the_v1_fallback(self):
+        mc = router.load_models_cfg()
+        assert router.resolve("flags", models_cfg=mc).fallback == "keep_last"
+        assert router.resolve("classify", models_cfg=mc).fallback == "rule"
+
+    def test_overlay_chain_head_still_resolves(self, tmp_path):
+        import shutil
+
+        from ops.config import REPO_ROOT
+
+        base = tmp_path / "models.yaml"
+        shutil.copy(REPO_ROOT / "config" / "models.yaml", base)
+        (tmp_path / "models-auto.yaml").write_text(
+            "tasks: { decide: { chain: [sonnet] } }\n")
+        mc = router.load_models_cfg(base)
+        assert router.resolve("decide", models_cfg=mc).model == "claude-sonnet-5"
 
 
 def _run_row(conn, stage, cost, started="2026-09-05T04:30:00Z"):

@@ -44,14 +44,26 @@ class TestGrossExposureAndFloor:
         assert not d.allowed and d.reason == "usdt_floor"
 
     def test_weight_cap_binds_before_gross_normally(self, gate):
-        d = gate.check_entry("BTC/USDT", 3100.0, ps(btc=1000, eth=1000))
+        # 1900 is inside max_order_notional_pct (20% of 10k) but past BTC's 40% cap
+        d = gate.check_entry("BTC/USDT", 1900.0, ps(btc=2500, eth=1000))
         assert not d.allowed and d.reason == "weight_cap:BTC/USDT"
         d = gate.check_entry("ETH/USDT", 1900.0, ps(btc=1000, eth=1000))
         assert d.allowed  # 29% ETH, gross 49%, free left 6100 > 2000
 
     def test_cap_stake_respects_floor(self, gate):
-        # free 8000, floor 2000 -> floor headroom 6000; weight headroom 3000
-        assert gate.cap_stake("BTC/USDT", 9000.0, ps(btc=1000, eth=1000)) == 3000.0
+        # free 8000, floor 2000 -> floor headroom 6000; weight headroom 3000;
+        # order_notional headroom 20% of 10k = 2000 is now the tightest
+        assert gate.cap_stake("BTC/USDT", 9000.0, ps(btc=1000, eth=1000)) == 2000.0
+
+    def test_cap_stake_floor_binds_when_order_notional_is_loose(self, gate_cfg, tmp_path):
+        from .conftest import gate_cfg_with
+
+        def loosen(raw):
+            raw["risk"]["max_order_notional_pct"] = 1.0
+
+        gate = benign_gate(gate_cfg_with(tmp_path, loosen))
+        # now the USDT floor is the binding constraint: free 2500 - floor 2000 = 500
+        assert gate.cap_stake("BTC/USDT", 9000.0, ps(free=2500, btc=1000, eth=1000)) == 500.0
 
 
 class TestMinNotional:

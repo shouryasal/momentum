@@ -111,3 +111,81 @@ def test_decide_passes_effort(monkeypatch, tmp_path):
     monkeypatch.setattr(decision_core, "_query", fake_query)
     res = decision_core.decide("p", model="m", cwd=tmp_path, effort="xhigh")
     assert res.ok and seen["options"].effort == "xhigh"
+
+
+# --------------------------------------------------------------------------- env, hooks
+
+
+class TestCredentialEnvAndGuards:
+    """P3: one process, two credentials, and a tier-2 hook that does not depend on
+    `.claude/settings.json` being present."""
+
+    def test_env_reaches_claude_agent_options(self, captured):
+        env = {"ANTHROPIC_API_KEY": "", "CLAUDE_CODE_OAUTH_TOKEN": "sub-token",
+               "ANTHROPIC_AUTH_TOKEN": ""}
+        decision_core.run_stage("hello", model="m", max_turns=1, max_usd=0.1, env=env)
+        assert captured["options"].env == env
+
+    def test_no_env_keeps_the_old_empty_default(self, captured):
+        decision_core.run_stage("hello", model="m", max_turns=1, max_usd=0.1)
+        assert captured["options"].env == {}
+
+    def test_an_explicit_empty_tool_list_means_no_tools(self, captured):
+        decision_core.run_stage("hello", model="m", max_turns=1, max_usd=0.1,
+                                allowed_tools=[])
+        assert captured["options"].allowed_tools == []
+        decision_core.run_stage("hello", model="m", max_turns=1, max_usd=0.1)
+        assert captured["options"].allowed_tools == decision_core.READ_ONLY_TOOLS
+
+    def test_cli_path_runs_the_wrapper(self, captured):
+        decision_core.run_stage("hello", model="m", max_turns=1, max_usd=0.1,
+                                cli_path="ops/agent_cli.sh")
+        assert captured["options"].cli_path == "ops/agent_cli.sh"
+
+    def test_hooks_are_armed_only_for_automated_runs(self, captured, monkeypatch):
+        monkeypatch.delenv("EARN_AUTOMATED_RUN", raising=False)
+        decision_core.run_stage("hello", model="m", max_turns=1, max_usd=0.1)
+        assert not captured["options"].hooks
+        monkeypatch.setenv("EARN_AUTOMATED_RUN", "1")
+        decision_core.run_stage("hello", model="m", max_turns=1, max_usd=0.1)
+        assert "PreToolUse" in (captured["options"].hooks or {})
+
+    def test_the_env_overlay_can_arm_the_hook_without_touching_os_environ(self, captured,
+                                                                         monkeypatch):
+        monkeypatch.delenv("EARN_AUTOMATED_RUN", raising=False)
+        decision_core.run_stage("hello", model="m", max_turns=1, max_usd=0.1,
+                                env={"EARN_AUTOMATED_RUN": "1"})
+        assert "PreToolUse" in (captured["options"].hooks or {})
+
+
+class TestTier2Denial:
+    """The same rule as .claude/hooks/protect_tier2.py, from the one pattern list."""
+
+    def test_a_tier2_write_is_denied(self):
+        reason = decision_core.tier2_denial(
+            "Write", {"file_path": "config/earn.yaml"}, decision_core.REPO_ROOT)
+        assert reason and "human-only" in reason
+
+    def test_a_tier1_carve_out_is_allowed(self):
+        assert decision_core.tier2_denial(
+            "Write", {"file_path": "config/params-sleeve-a.json"},
+            decision_core.REPO_ROOT) is None
+
+    def test_a_tier0_write_is_allowed(self):
+        assert decision_core.tier2_denial(
+            "Write", {"file_path": "knowledge/notes.md"},
+            decision_core.REPO_ROOT) is None
+
+    def test_a_write_outside_the_repo_is_denied(self):
+        reason = decision_core.tier2_denial("Write", {"file_path": "/etc/passwd"},
+                                            decision_core.REPO_ROOT)
+        assert reason and "outside the repository" in reason
+
+    def test_a_bash_write_to_a_tier2_path_is_denied(self):
+        reason = decision_core.tier2_denial(
+            "Bash", {"command": "echo x > ops/envwrap.sh"}, decision_core.REPO_ROOT)
+        assert reason and "ops/envwrap.sh" in reason
+
+    def test_a_read_only_bash_command_is_allowed(self):
+        assert decision_core.tier2_denial(
+            "Bash", {"command": "cat ops/envwrap.sh"}, decision_core.REPO_ROOT) is None

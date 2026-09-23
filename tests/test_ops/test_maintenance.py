@@ -61,6 +61,7 @@ def env(cfg, dbs):
         kw.setdefault("client_factory", lambda: None)
         kw.setdefault("runner", lambda cmd, timeout=900: 0)
         kw.setdefault("version_fn", lambda: "0.2.157")
+        kw.setdefault("state_root", root)   # the KILL file lives under the state root
         return Maintenance(cfg, jdb, kdb, root=root, now=NOW, **kw)
 
     return root, jdb, kdb, alerts, make
@@ -72,6 +73,34 @@ def test_tier_heuristic():
     assert model_tier("claude-opus-6") == 2
     assert model_tier("claude-fable-5-1") == 3
     assert model_tier("gpt-9") is None
+
+
+def test_the_config_tier_is_not_the_comparison_rank():
+    """Two scales that look alike and must not be confused.
+
+    ``model_tier`` ranks families for "same or higher than what we run now";
+    ``config_tier`` is the 1-5 capability tier ``models.yaml`` speaks in and the
+    ``min_tier`` floors compare against. Writing the rank into a declaration would call
+    a haiku-class model tier 0 and an opus-class model tier 2 — the second is merely
+    wrong, the first would also read as falsy.
+    """
+    from runs.maintenance import config_tier
+
+    assert model_tier("claude-haiku-4-5-20251001") == 0
+    assert config_tier("claude-haiku-4-5-20251001") == 2
+    assert config_tier("claude-sonnet-5") == 3
+    assert config_tier("claude-opus-6") == 4
+    assert config_tier("claude-fable-5-1") == 5
+    assert config_tier("gpt-9") is None
+
+    # and the declared tiers agree with the committed human file
+    from ops.models_config import load_models_cfg
+
+    mc = load_models_cfg(REPO_ROOT / "config" / "models.yaml", overlay=None)
+    for alias in ("haiku", "sonnet", "opus", "fable"):
+        ref = mc.models.get(alias)
+        if ref is not None:
+            assert config_tier(ref.id) == ref.tier, alias
 
 
 def test_catalog_refresh_writes_file(env):
@@ -141,7 +170,11 @@ def test_start_shadow_overlay_changelog_commit(env):
     ma = make()
     ma.start_shadow("claude-opus-6")
     ov = yaml.safe_load((root / "config" / "models-auto.yaml").read_text())
-    assert ov["models"]["auto_claude_opus_6"] == "claude-opus-6"
+    # The v2 ModelRef shape, not a bare pinned string: a bare string is outside what
+    # ops.models_config.apply_overlay accepts, so writing one made load_models_cfg()
+    # raise for the console and runs/llm/chain.py the moment a window opened.
+    assert ov["models"]["auto_claude_opus_6"] == {
+        "provider": "claude", "id": "claude-opus-6", "tier": 4}
     assert ov["shadow"] == {"enabled": True, "model": "auto_claude_opus_6",
                             "started": "2026-09-22", "days": 30}
     row = jdb.execute("SELECT * FROM change_log WHERE kind='model'").fetchone()
@@ -150,6 +183,18 @@ def test_start_shadow_overlay_changelog_commit(env):
                          capture_output=True, text=True).stdout
     assert "auto-shadow" in log
     assert any("shadow" in t for _, t in alerts)
+
+    # The overlay auto-shadow just wrote must still LOAD through the strict v2 reader —
+    # the one the console and runs/llm/chain.py go through. This is the regression that
+    # would otherwise have taken every LLM call down on the Monday after a new model
+    # appeared, with nothing pointing at maintenance as the cause.
+    from ops.models_config import load_models_cfg
+
+    merged = load_models_cfg(REPO_ROOT / "config" / "models.yaml",
+                             overlay=root / "config" / "models-auto.yaml")
+    assert merged.shadow.model == "auto_claude_opus_6"
+    assert merged.model_ref("auto_claude_opus_6").id == "claude-opus-6"
+
     # detection now sees an active shadow -> no second window
     assert ma.detect_new_models(
         catalog(("claude-opus-5", "2026-01-01T00:00:00Z"),

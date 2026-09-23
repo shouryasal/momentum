@@ -21,10 +21,12 @@ def env(tmp_path):
     journal, _ = db.init_all(cfg, root=tmp_path)
     jdb = db.connect(journal)
     # scaffold the template + minimal inputs in the tmp root
-    (tmp_path / "prompts").mkdir()
     from ops.config import REPO_ROOT
 
-    for v in ("research.v1.md", "research.v2.md"):
+    (tmp_path / "prompts" / "stages").mkdir(parents=True)
+    for p in (REPO_ROOT / "prompts" / "stages").iterdir():
+        (tmp_path / "prompts" / "stages" / p.name).write_text(p.read_text())
+    for v in ("research.v1.md", "research.v2.md", "research.v3.md"):
         (tmp_path / "prompts" / v).write_text(
             (REPO_ROOT / "prompts" / v).read_text())
     (tmp_path / "lessons.md").write_text("## L-1\nlesson text\n")
@@ -79,8 +81,8 @@ def test_truncation_keeps_newest(env):
 
 def test_hard_cap_raises(env):
     cfg, jdb, root = env
-    template = (root / "prompts" / "research.v2.md").read_text()
-    (root / "prompts" / "research.v2.md").write_text(template + "P" * 100000)
+    template = (root / "prompts" / "research.v3.md").read_text()
+    (root / "prompts" / "research.v3.md").write_text(template + "P" * 100000)
     with pytest.raises(build_prompt.PromptBudgetExceeded):
         _build(cfg, jdb, root)
 
@@ -104,7 +106,7 @@ def test_snapshot_roundtrip_byte_identical(env):
     cfg, jdb, root = env
     bp, inputs, limits, fewshot = _build(cfg, jdb, root)
     meta = snapshotlib.SnapshotMeta(
-        run_id=RUN_ID, created_at="2026-09-22T04:30:00Z", prompt_version="research.v2",
+        run_id=RUN_ID, created_at="2026-09-22T04:30:00Z", prompt_version="research.v3",
         model="claude-opus-5", git_commit="abc", token_budget=20000)
     d = snapshotlib.write_snapshot(RUN_ID, inputs=inputs, limits=limits,
                                    fewshot=fewshot, rendered_prompt=bp.text,
@@ -121,7 +123,7 @@ def test_snapshot_roundtrip_byte_identical(env):
         bpmod.REPO_ROOT = orig
     assert rebuilt.text == bp.text
     row = jdb.execute("SELECT * FROM snapshot_index WHERE run_id=?", (RUN_ID,)).fetchone()
-    assert row is not None and row["prompt_version"] == "research.v2"
+    assert row is not None and row["prompt_version"] == "research.v3"
 
 
 def test_snapshot_write_once_and_tamper_detected(env):
@@ -192,7 +194,7 @@ def test_v2_renders_dossier_summaries_and_event_stats(env):
     (root / "knowledge" / "state" / "event_stats.json").write_text(
         '{"events": {"hack": {"mean_1d_pct": -3.1}}}')
     bp, inputs, *_ = _build(cfg, jdb, root)
-    assert bp.prompt_version == "research.v2"
+    assert bp.prompt_version == "research.v3"
     assert "current vol rank 0.82" in bp.text     # the Summary section is in
     assert "long tail" not in bp.text             # History stays out
     assert '"mean_1d_pct": -3.1' in bp.text

@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -164,3 +165,117 @@ class TestHarness:
         assert res.passed, (res.reason, res.comparison)
         out = root / "evals" / "results" / f"{res.replay_id}.json"
         assert out.exists()
+
+
+class TestCounterfactual:
+    """The counterfactual gates a prompt/skill change, so it is recomputed from the replay
+    output rather than read out of the change file (spec §10)."""
+
+    BASE = [
+        {"run_id": "a", "attempts": [{"module": "trend", "abstain": False,
+                                      "targets": {"BTC": 0.4, "USDT": 0.6}}]},
+        {"run_id": "b", "attempts": [{"module": "cash", "abstain": True,
+                                      "targets": {"USDT": 1.0}}]},
+        {"run_id": "c", "attempts": [None]},
+    ]
+
+    def test_identical_arms_change_nothing(self):
+        assert metrics.decisions_changed(self.BASE, self.BASE, tolerance=0.02) == 0
+
+    def test_a_different_target_counts_as_a_changed_decision(self):
+        candidate = json.loads(json.dumps(self.BASE))
+        candidate[0]["attempts"][0]["targets"]["BTC"] = 0.55
+        assert metrics.decisions_changed(self.BASE, candidate, tolerance=0.02) == 1
+
+    def test_a_target_inside_the_tolerance_is_not_a_change(self):
+        candidate = json.loads(json.dumps(self.BASE))
+        candidate[0]["attempts"][0]["targets"]["BTC"] = 0.41
+        assert metrics.decisions_changed(self.BASE, candidate, tolerance=0.02) == 0
+
+    def test_one_arm_failing_where_the_other_succeeded_is_a_change(self):
+        candidate = json.loads(json.dumps(self.BASE))
+        candidate[2]["attempts"] = [{"module": "trend", "abstain": False,
+                                     "targets": {"BTC": 0.4, "USDT": 0.6}}]
+        assert metrics.decisions_changed(self.BASE, candidate, tolerance=0.02) == 1
+
+    def test_process_score_rewards_validity_determinism_and_no_violations(self):
+        perfect = metrics.Scores(constraint_violations=0, schema_validity_rate=1.0,
+                                 agreement_rate=1.0, calibration_error=None,
+                                 implied_turnover=10.0, determinism=1.0)
+        assert metrics.process_score(perfect) == 100.0
+        violating = metrics.Scores(constraint_violations=1, schema_validity_rate=1.0,
+                                   agreement_rate=1.0, calibration_error=None,
+                                   implied_turnover=10.0, determinism=1.0)
+        assert metrics.process_score(violating) < 100.0
+
+    def test_a_missing_agreement_rate_does_not_look_like_a_regression(self):
+        quiet = metrics.Scores(constraint_violations=0, schema_validity_rate=1.0,
+                               agreement_rate=None, calibration_error=None,
+                               implied_turnover=10.0, determinism=1.0)
+        assert metrics.process_score(quiet) == 100.0
+
+    def test_counterfactual_bundles_both_numbers(self):
+        candidate = json.loads(json.dumps(self.BASE))
+        candidate[0]["attempts"][0]["module"] = "dca"
+        better = metrics.Scores(constraint_violations=0, schema_validity_rate=1.0,
+                                agreement_rate=1.0, calibration_error=None,
+                                implied_turnover=10.0, determinism=1.0)
+        worse = metrics.Scores(constraint_violations=0, schema_validity_rate=0.5,
+                               agreement_rate=1.0, calibration_error=None,
+                               implied_turnover=10.0, determinism=1.0)
+        cf = metrics.counterfactual("2026-W39", self.BASE, candidate, worse, better,
+                                    tolerance=0.02)
+        assert cf["week"] == "2026-W39"
+        assert cf["decisions_changed"] == 1
+        assert cf["process_grade_delta"] > 0
+
+
+class TestCandidateArm:
+    """HIGH issue 18: the candidate arm has to run in the candidate worktree with the
+    stage's skills loaded, or a skill change cannot differ from its baseline at all."""
+
+    class _Snap:
+        run_id = "2026-09-21T08:30+04:00"
+        limits = LIMITS
+        inputs = {"state": "{}", "flags": "{}"}
+
+    def test_the_candidate_arm_runs_in_the_worktree_with_its_skills(self, monkeypatch,
+                                                                    tmp_path):
+        monkeypatch.setattr(snapshotlib, "read_snapshot", lambda d: self._Snap())
+        seen = []
+
+        def decide(prompt, model, cwd, schema, skills=None):
+            seen.append((str(cwd), tuple(skills or ())))
+            return "not json", 0.0
+
+        worktree = tmp_path / "wt"
+        replay._run_over_snapshots(["ignored"], lambda s: "", lambda s: "m", decide, 1, 1.0,
+                                   cwd=worktree, skills=["post-mortem"])
+        assert seen == [(str(worktree), ("post-mortem",))]
+
+    def test_the_baseline_arm_still_runs_in_a_throwaway_sandbox(self, monkeypatch):
+        monkeypatch.setattr(snapshotlib, "read_snapshot", lambda d: self._Snap())
+        seen = []
+
+        def decide(prompt, model, cwd, schema):
+            seen.append(str(cwd))
+            return "not json", 0.0
+
+        replay._run_over_snapshots(["ignored"], lambda s: "", lambda s: "m", decide, 1, 1.0)
+        assert len(seen) == 1
+        assert not Path(seen[0]).exists()      # the temp sandbox is gone again
+
+    def test_call_decide_passes_skills_only_when_the_fn_accepts_them(self):
+        with_skills = []
+
+        def five_arg(prompt, model, cwd, schema, skills):
+            with_skills.append(tuple(skills))
+            return "x", 0.0
+
+        def four_arg(prompt, model, cwd, schema):
+            with_skills.append("no-skills")
+            return "x", 0.0
+
+        replay._call_decide(five_arg, "p", "m", REPO_ROOT, {}, ["post-mortem"])
+        replay._call_decide(four_arg, "p", "m", REPO_ROOT, {}, ["post-mortem"])
+        assert with_skills == [("post-mortem",), "no-skills"]

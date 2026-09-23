@@ -1,5 +1,12 @@
 """Trigger engine: each condition true/false, every guard blocks and journals,
-the fired path spawns a detached research run on the actual Gulf slot."""
+the fired path spawns a detached research run on the actual Gulf slot.
+
+The five conditions are :mod:`runs.signals.detectors` now; ``TriggerEngine`` only
+delegates. This suite is unchanged apart from the fixture pinning
+``signals.integration = 'legacy'`` — ``evaluate()`` branches on that key, and these cases
+are about the LEGACY branch. The pipeline branch has its own suite in
+``tests/test_signals/``.
+"""
 
 import json
 from datetime import timedelta
@@ -16,7 +23,16 @@ def _iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _fresh_data(kdb, now=NOW):
+def _fresh_data(kdb, now=NOW, root=None):
+    if root is not None:
+        # guards() reads ingest freshness from knowledge/state/freshness.json (HIGH #12):
+        # the knowledge DB is mounted read-only into the containers while it is in WAL.
+        p = root / "knowledge" / "state" / "freshness.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({
+            "version": 1, "updated_at": _iso(now),
+            "sources": {"book_snapshots": _iso(now - timedelta(minutes=5)),
+                        "candles_1h": _iso(now - timedelta(minutes=30))}}))
     kdb.execute(
         "INSERT INTO book_snapshots(pair, captured_at, best_bid, best_ask, mid,"
         " spread_bps, bid_depth_05pct, ask_depth_05pct, levels_json)"
@@ -58,12 +74,21 @@ def _candle_4h(kdb, open_, close, closed=1):
     kdb.commit()
 
 
+@pytest.fixture(autouse=True)
+def legacy_integration(cfg):
+    cfg.signals.integration = "legacy"
+    return cfg
+
+
 @pytest.fixture
 def eng(cfg, dbs):
     root, jdb, kdb = dbs
-    _fresh_data(kdb)
+    _fresh_data(kdb, root=root)
     spawns = []
-    e = TriggerEngine(cfg, jdb, kdb, root=root, now=NOW,
+    # root is the checkout, state_root the data root. They are the same sandbox here, but
+    # the engine no longer derives one from the other: the KILL file is resolved through
+    # state_root, so an unset state_root would reach the REAL checkout.
+    e = TriggerEngine(cfg, jdb, kdb, root=root, state_root=root, now=NOW,
                       spawn=lambda cmd: spawns.append(cmd))
     return e, jdb, kdb, spawns, root
 
@@ -154,6 +179,24 @@ class TestGuardsAndFire:
         assert row["fired"] == 1 and row["run_id"] == out["run_id"]
         assert json.loads(row["reasons_json"]) == ["funding:BTCUSDT:+0.0050"]
 
+    def test_a_signal_run_is_triggered_by_the_signal_id_and_the_reason(self, eng):
+        """``docs/signals.md`` and spec §2.1 step 12 say ``--triggered-by signal:<id>``.
+
+        The reason string is what a human reads in the run row, so the flag carries both
+        — id first, reason after — rather than one at the cost of the other.
+        """
+        e, _, kdb, spawns, _ = eng
+        self._arm(kdb)
+        e.fire(["funding:BTCUSDT:+0.0050"], signal_id="sig-42")
+        cmd = spawns[0]
+        assert cmd[cmd.index("--triggered-by") + 1] == \
+            "signal:sig-42,funding:BTCUSDT:+0.0050"
+        assert cmd[cmd.index("--signal-id") + 1] == "sig-42"
+        # A reason the pipeline already spelled as the signal is not repeated.
+        assert e.triggered_by(["signal:sig-42"], "sig-42") == ["signal:sig-42"]
+        # ...and the scheduled/legacy path (no signal) is untouched.
+        assert e.triggered_by(["move_4h:BTC:-6.0"]) == ["move_4h:BTC:-6.0"]
+
     def test_kill_blocks(self, eng, cfg):
         e, _, kdb, spawns, root = eng
         self._arm(kdb)
@@ -164,6 +207,33 @@ class TestGuardsAndFire:
         assert not out["fired"] and "kill" in out["blocked"] and not spawns
         row = kdb.execute("SELECT * FROM trigger_events").fetchone()
         assert row["fired"] == 0 and "kill" in json.loads(row["blocked_json"])
+
+    def test_the_kill_file_is_read_under_the_state_root_not_the_checkout(
+            self, cfg, dbs, tmp_path, monkeypatch):
+        """The console writes the KILL file under ``paths.state_root()``. A job that
+        resolved it under its checkout root missed every switch the human pressed on a
+        host where the two differ — which is every host with ``$EARN_STATE_ROOT`` set.
+        """
+        checkout, jdb, kdb = dbs
+        state = tmp_path / "live-state"
+        monkeypatch.setenv("EARN_STATE_ROOT", str(state))
+        _fresh_data(kdb, root=checkout)
+        engine = TriggerEngine(cfg, jdb, kdb, root=checkout, now=NOW, spawn=lambda c: None)
+        assert engine.state_root == state.resolve()
+        assert engine.root == checkout
+        assert "kill" not in engine.guards()
+
+        kp = state / cfg.risk.kill_file
+        kp.parent.mkdir(parents=True, exist_ok=True)
+        kp.write_text("engaged by the human")
+        assert "kill" in engine.guards()
+
+        # A KILL file in the CHECKOUT is not the switch and never was.
+        kp.unlink()
+        stale = checkout / cfg.risk.kill_file
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text("left over in a worktree")
+        assert "kill" not in engine.guards()
 
     def test_cooldown_blocks(self, eng):
         e, jdb, kdb, spawns, _ = eng
@@ -185,7 +255,7 @@ class TestGuardsAndFire:
     def test_stale_data_blocks(self, cfg, dbs):
         root, jdb, kdb = dbs  # no fresh candles/books seeded
         spawns = []
-        e = TriggerEngine(cfg, jdb, kdb, root=root, now=NOW,
+        e = TriggerEngine(cfg, jdb, kdb, root=root, state_root=root, now=NOW,
                           spawn=lambda cmd: spawns.append(cmd))
         kdb.execute("INSERT INTO funding_current(symbol, last_rate, updated_at)"
                     " VALUES ('BTCUSDT', 0.0050, 'x')")
@@ -208,7 +278,7 @@ class TestGuardsAndFire:
 
     def test_evaluate_and_fire_opens_own_journal(self, cfg, dbs):
         root, _, kdb = dbs
-        _fresh_data(kdb)
+        _fresh_data(kdb, root=root)
         out = evaluate_and_fire(cfg, kdb, root=root, now=NOW,
                                 spawn=lambda cmd: None)
         assert out is not None and out["fired"] is False

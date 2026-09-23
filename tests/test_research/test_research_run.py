@@ -15,7 +15,7 @@ from runs.research_run import ResearchRun
 
 NOW = datetime(2026, 9, 22, 4, 30, tzinfo=UTC)  # 08:30 Gulf
 GOOD = {
-    "run_id": "2026-09-22T08:30+04:00", "prompt_version": "research.v2",
+    "run_id": "2026-09-22T08:30+04:00", "prompt_version": "research.v3",
     "module": "trend", "targets": {"BTC": 0.45, "ETH": 0.25, "USDT": 0.30},
     "exposure_scale": 0.8, "confidence": 0.6, "abstain": False, "horizon_days": 7,
     "rationale": ["BTC above 200d"], "invalidation": "BTC daily close below 200d MA",
@@ -61,8 +61,10 @@ def rr(tmp_path):
     journal, knowledge = db.init_all(cfg, root=tmp_path)
     jdb, kdb = db.connect(journal), db.connect(knowledge)
     # scaffold what the run needs in the tmp root
-    (tmp_path / "prompts").mkdir()
-    for v in ("research.v1.md", "research.v2.md"):
+    (tmp_path / "prompts" / "stages").mkdir(parents=True)
+    for p in (REPO_ROOT / "prompts" / "stages").iterdir():
+        (tmp_path / "prompts" / "stages" / p.name).write_text(p.read_text())
+    for v in ("research.v1.md", "research.v2.md", "research.v3.md"):
         (tmp_path / "prompts" / v).write_text(
             (REPO_ROOT / "prompts" / v).read_text())
     (tmp_path / "lessons.md").write_text("none\n")
@@ -80,7 +82,8 @@ def rr(tmp_path):
     flagslib.touch(ff, now=NOW)
     alerts = []
     runner = FakeRunner()
-    r = ResearchRun(cfg, jdb, kdb, root=tmp_path, now=NOW, stage_runner=runner,
+    r = ResearchRun(cfg, jdb, kdb, root=tmp_path, state_root=tmp_path, now=NOW,
+                    stage_runner=runner,
                     alert=lambda text, sev="warn": alerts.append((sev, text)))
     yield r, runner, alerts, jdb, tmp_path, cfg
     jdb.close()
@@ -228,10 +231,11 @@ def test_parse_args_slot_and_triggered_by():
     from runs.common import SLOTS
     from runs.research_run import parse_args
 
-    assert parse_args(["1200", "--triggered-by", "a,b"]) == ("1200", ["a", "b"])
-    assert parse_args(["--triggered-by", "x", "0830"]) == ("0830", ["x"])
-    slot, triggered = parse_args([])
-    assert slot in SLOTS and triggered == []
+    assert parse_args(["1200", "--triggered-by", "a,b"]) == ("1200", ["a", "b"], None)
+    assert parse_args(["--triggered-by", "x", "0830"]) == ("0830", ["x"], None)
+    assert parse_args(["0830", "--signal-id", "sig-1"]) == ("0830", [], "sig-1")
+    slot, triggered, signal_id = parse_args([])
+    assert slot in SLOTS and triggered == [] and signal_id is None
 
 
 def test_raw_response_captured_in_outputs(rr):
@@ -247,3 +251,122 @@ def test_raw_response_captured_in_outputs(rr):
     from evals import snapshot as snapshotlib
 
     snapshotlib.read_snapshot("2026-09-22T08:30+04:00", root=root)
+
+
+# ---------------------------------------------------------------- signal handoff (P4)
+
+
+def _screened_signal(jdb, signal_id="sig-1"):
+    """A validated signal, exactly as runs/signals leaves it before the planner fires."""
+    jdb.execute(
+        "INSERT INTO signals(signal_id, ts_utc, scan_id, source, detector, pair,"
+        " direction, detector_score, screen_score, strength, features_json,"
+        " dedupe_key, fast_path, status, updated_utc)"
+        " VALUES (?, '2026-09-22T04:20:00Z','scan-1','detector','breakout','BTC/USDT',"
+        " 'up',0.8,0.9,0.85,?,'k',0,'planned','2026-09-22T04:25:00Z')",
+        (signal_id, json.dumps({"detector": "breakout", "detail": {"level": 100.0},
+                                "cited": {"BTC/USDT.close": 105.0}})))
+    jdb.execute(
+        "INSERT INTO signal_validations(signal_id, ts_utc, provider, model, verdict,"
+        " confidence, suggested_json, horizon_hours, thesis, reasons_json,"
+        " counter_evidence_json, invalidation)"
+        " VALUES (?, '2026-09-22T04:25:00Z','claude','claude-sonnet-5','valid',0.82,?,"
+        " 24, 'Breakout confirmed by volume.', ?, ?, 'a daily close back inside the range')",
+        (signal_id, json.dumps({"direction": "up", "pair": "BTC/USDT"}),
+         json.dumps(["close above the 20d high"]),
+         json.dumps(["the move happened on a weekend"])))
+    jdb.commit()
+    return signal_id
+
+
+def test_signal_id_puts_the_validated_signal_in_the_prompt(rr):
+    r, runner, _, jdb, root, cfg = rr
+    _screened_signal(jdb)
+    runner.script["decide:claude-fable-5-1"] = [ok(GOOD)]
+    assert r.main_flow("0830", triggered_by=["signal:sig-1"], signal_id="sig-1") == 0
+    decide = next(c for c in runner.calls if c[0].startswith("decide"))
+    # the prompt is truncated to 80 chars in the call log, so read the snapshot instead
+    snap = root / "journal" / "snapshots" / "20260922-0830"
+    rendered = (snap / "rendered_prompt.md").read_text()
+    assert "VALIDATED SIGNAL" in rendered
+    assert "Breakout confirmed by volume." in rendered
+    assert "the move happened on a weekend" in rendered      # counter-evidence is shown
+    assert decide is not None
+
+
+def test_snapshot_records_the_signal_inputs(rr):
+    r, runner, _, jdb, root, cfg = rr
+    _screened_signal(jdb)
+    runner.script["decide:claude-fable-5-1"] = [ok(GOOD)]
+    r.main_flow("0830", triggered_by=["signal:sig-1"], signal_id="sig-1")
+    snap = root / "journal" / "snapshots" / "20260922-0830"
+    stored = json.loads((snap / "signal.json").read_text())
+    assert stored["signal_id"] == "sig-1"
+    assert stored["validation"]["verdict"] == "valid"
+    manifest = json.loads((snap / "manifest.json").read_text())
+    assert manifest["meta"]["signal_id"] == "sig-1"
+    assert "signal.json" in manifest["files"]
+
+
+def test_signal_reaches_acted_and_the_rows_carry_its_id(rr):
+    r, runner, _, jdb, root, cfg = rr
+    _screened_signal(jdb)
+    runner.script["decide:claude-fable-5-1"] = [ok(GOOD)]
+    assert r.main_flow("0830", triggered_by=["signal:sig-1"], signal_id="sig-1") == 0
+    sig = jdb.execute("SELECT * FROM signals WHERE signal_id='sig-1'").fetchone()
+    assert sig["status"] == "acted"
+    assert sig["proposal_run_id"] == "2026-09-22T08:30+04:00"
+    run = jdb.execute("SELECT * FROM runs WHERE stage='decide'").fetchone()
+    assert run["signal_id"] == "sig-1"
+    prop = jdb.execute("SELECT * FROM proposals WHERE shadow=0").fetchone()
+    assert prop["signal_id"] == "sig-1" and prop["approval_status"] == "n/a"
+    written = json.loads((root / prop["path"]).read_text())
+    assert written["signal_id"] == "sig-1" and written["schema_version"] == 3
+
+
+def test_a_scheduled_run_writes_no_signal_block(rr):
+    r, runner, _, jdb, root, cfg = rr
+    runner.script["decide:claude-opus-5"] = [ok(GOOD)]
+    r.main_flow("0830")
+    snap = root / "journal" / "snapshots" / "20260922-0830"
+    assert (snap / "signal.json").read_text() == ""
+    assert "null" in (snap / "rendered_prompt.md").read_text()
+    written = json.loads(
+        (root / cfg.paths.proposals_dir / "2026-09-22-0830.json").read_text())
+    assert "signal_id" not in written and "schema_version" not in written
+
+
+def test_propose_mode_writes_to_the_pending_directory(rr, monkeypatch):
+    r, runner, _, jdb, root, cfg = rr
+    runner.script["decide:claude-opus-5"] = [ok(GOOD)]
+
+    class _Sleeve:
+        requires_approval = True
+
+    class _State:
+        verified = True
+
+        def sleeve(self, _name):
+            return _Sleeve()
+
+    from ops.lib import mode_state
+
+    monkeypatch.setattr(mode_state, "load", lambda *a, **k: _State())
+    assert r.main_flow("0830") == 0
+    assert (root / cfg.paths.proposals_dir / "pending" / "2026-09-22-0830.json").exists()
+    assert not (root / cfg.paths.proposals_dir / "2026-09-22-0830.json").exists()
+    prop = jdb.execute("SELECT * FROM proposals WHERE shadow=0").fetchone()
+    assert prop["approval_status"] == "pending"
+
+
+def test_stage_prompts_come_from_files(rr):
+    r, runner, _, _, root, cfg = rr
+    runner.script["decide:claude-opus-5"] = [ok(GOOD)]
+    r.main_flow("0830")
+    flags_call = next(c for c in runner.calls if c[0] == "flags")
+    assert "reg-watch" in flags_call[2]
+    # the prompt body is the tier-1 file, with its comment header stripped
+    from runs.research_run import stage_text
+
+    assert stage_text(cfg, "flags", root).startswith("Run the reg-watch procedure")
+    assert not stage_text(cfg, "flags", root).startswith("<!--")
