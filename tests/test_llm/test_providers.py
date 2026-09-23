@@ -123,6 +123,32 @@ class TestClaudeProvider:
             p.run(req())
         assert excinfo.value.failure_class == "auth_error"
 
+    @pytest.mark.parametrize("reported, expected", [
+        (None, "subscription"),               # the CLI said nothing
+        ("none", "none"),                     # the CLI's own word for "no key"
+        ("", "subscription"),
+        ("ANTHROPIC_API_KEY", "api_key"),     # a key WAS used on a subscription attempt
+        ("apiKeyHelper", "api_key"),
+    ])
+    def test_a_subscription_attempt_billed_to_a_key_is_recorded_as_metered(
+        self, reported, expected
+    ):
+        """``auth_source`` is the only field that knows what the child really
+        authenticated with, and the hard monthly cap keys on it
+        (``chain.metered_month_spend``). A subscription attempt on a host where the plain
+        ANTHROPIC_API_KEY leaked into the environment spends real money; recording it as
+        'subscription' put that spend outside the only cap that bounds it."""
+        result = StageResult(True, "{}", StageMeta(subtype="success", cost_usd=1.0,
+                                                   auth_source=reported))
+        p = ClaudeSDKProvider(claude_auth.PROVIDER_SUBSCRIPTION,
+                              runner=lambda *a, **k: result)
+        assert p.run(req()).meta.auth_source == expected
+
+    def test_an_api_key_attempt_is_always_labelled_api_key(self):
+        result = StageResult(True, "{}", StageMeta(subtype="success", auth_source="none"))
+        p = ClaudeSDKProvider(claude_auth.PROVIDER_API_KEY, runner=lambda *a, **k: result)
+        assert p.run(req()).meta.auth_source == "api_key"
+
     def test_health_is_just_credential_presence(self, monkeypatch):
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         assert not ClaudeSDKProvider(claude_auth.PROVIDER_SUBSCRIPTION).health()

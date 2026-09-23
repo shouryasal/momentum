@@ -86,12 +86,16 @@ def test_the_listing_shows_status_bindings_and_policy(auth_client: TestClient, r
     assert items["_template"]["status"] == "template"
 
 
-def test_the_tree_marks_scripts_as_tier_two(auth_client: TestClient, repo: Path):
+def test_the_tree_marks_the_executable_parts_as_tier_two(auth_client: TestClient,
+                                                         repo: Path):
+    """``tests/**`` joined ``scripts/**``: it is what the Test button and the change gate
+    execute, so a session that can write it has arbitrary code execution."""
     response = auth_client.get("/api/skills/demo-skill/tree")
     assert response.status_code == 200, response.text
     tiers = {row["path"]: row["tier"] for row in response.json()["files"]}
     assert tiers["SKILL.md"] == "tier1"
     assert tiers["scripts/run.py"] == "tier2"
+    assert tiers["tests/test_demo.py"] == "tier2"
 
 
 def test_reading_and_writing_a_body_round_trips(auth_client: TestClient, repo: Path):
@@ -157,6 +161,63 @@ def test_a_path_cannot_escape_the_skill_folder(repo: Path):
     assert excinfo.value.code == "forbidden"
 
 
+def test_writing_a_skill_test_needs_step_up(auth_client: TestClient, repo: Path,
+                                            token: str):
+    """``tests/**`` is executed, so it is the human's — a session alone cannot plant it."""
+    payload = {"content": "def test_x():\n    assert True\n", "base_sha": None}
+    assert auth_client.put("/api/skills/demo-skill/files/tests/test_new.py",
+                           json=payload).status_code == 403
+    assert not (repo / ".claude" / "skills" / "demo-skill" / "tests" / "test_new.py").exists()
+    step_up(auth_client, token)
+    assert auth_client.put("/api/skills/demo-skill/files/tests/test_new.py",
+                           json=payload).status_code == 200
+
+
+def test_a_percent_encoded_traversal_cannot_dodge_the_step_up_gate(
+        auth_client: TestClient, repo: Path):
+    """Reproduced on a live app before the fix: the router decided step-up from the RAW
+    ``{path:path}`` string, and Starlette decodes ``%2F`` *after* routing. So
+    ``tests/..%2Fscripts%2Fzz.py`` had a first segment of ``tests``, took the tier-1
+    branch, and landed in ``scripts/`` — the one directory automated runs execute.
+    """
+    target = repo / ".claude" / "skills" / "demo-skill" / "scripts" / "zz.py"
+    for path in ("tests/..%2Fscripts%2Fzz.py",
+                 "%2E%2E/scripts/zz.py",
+                 "evals/../scripts/zz.py"):
+        response = auth_client.put(f"/api/skills/demo-skill/files/{path}",
+                                   json={"content": "print('pwned')\n", "base_sha": None})
+        assert response.status_code == 403, (path, response.status_code, response.text)
+        assert not target.exists(), path
+
+
+def test_a_skill_check_subprocess_inherits_no_console_secret(repo: Path,
+                                                             monkeypatch: pytest.MonkeyPatch):
+    """The console's own environment used to be the starting point, minus ten known
+    credential names — so a secret added to ``.env`` tomorrow was inherited by default."""
+    from console.services import skills_service
+
+    monkeypatch.setenv("EARN_CONSOLE_SECRET", "console-should-not-leak")
+    monkeypatch.setenv("EARN_TOMORROWS_SECRET", "brand-new-should-not-leak")
+    monkeypatch.setenv("EARN_LIVE_ROOT", "/home/shourya/earn")
+    env = skills_service._clean_env(repo)
+    assert "EARN_CONSOLE_SECRET" not in env
+    assert "EARN_TOMORROWS_SECRET" not in env
+    assert "EARN_LIVE_ROOT" not in env
+    assert env["PYTHONPATH"] == str(repo)
+
+
+def test_the_tier_reported_to_the_browser_is_the_tier_that_will_apply(repo: Path):
+    from console.services import skills_service
+
+    assert skills_service.file_tier("tests/../scripts/zz.py") == "tier2"
+    assert skills_service.file_tier("./scripts/zz.py") == "tier2"
+    assert skills_service.file_tier("evals/cases.yaml") == "tier1"
+    # unclassifiable ⇒ human-only, never "free"
+    assert skills_service.file_tier("../../config/earn.yaml") == "tier2"
+    assert skills_service.file_tier("/etc/passwd") == "tier2"
+    assert skills_service.requires_step_up("tests/..%2Fscripts%2Fzz.py") is True
+
+
 def test_creating_a_skill_scaffolds_it_incubating(auth_client: TestClient, repo: Path,
                                                   token: str):
     body = {"name": "trade-forensics",
@@ -205,18 +266,66 @@ def test_archive_and_restore_move_the_overlay_status(auth_client: TestClient, re
                             json={"restore": True}).json()["status"] == "incubating"
 
 
-def test_lint_test_and_eval_run_on_demand(auth_client: TestClient, repo: Path):
+def test_lint_runs_on_demand(auth_client: TestClient, repo: Path):
     lint = await_check(auth_client, "/api/skills/demo-skill/lint")
     assert lint["status"] == "ok"
     assert lint["result"]["ok"] is True
 
-    tests = await_check(auth_client, "/api/skills/demo-skill/test")
-    assert tests["result"]["ok"] is True
-    assert any("passed" in line for line in tests["output"]), tests["output"]
-
     evals = await_check(auth_client, "/api/skills/demo-skill/eval")
     payload = evals["result"]
     assert payload["total"] == 0 and payload["ok"] is False   # no cases declared yet
+
+
+def test_the_test_button_refuses_when_nothing_can_contain_the_suite(
+        auth_client: TestClient, repo: Path):
+    """This test used to assert ``result.ok is True`` — i.e. that the console happily ran
+    a skill's model-authored pytest suite as the owner, with the console process's own
+    environment. That was arbitrary code execution for anyone holding a session cookie.
+
+    ``security.agent_user`` / ``security.agent_cli_wrapper`` ship as ``null``, so the
+    only honest answer is a refusal, the same one the change gate gives.
+    """
+    body = await_check(auth_client, "/api/skills/demo-skill/test")
+    result = body["result"]
+    assert result["ok"] is False
+    assert result["refused"].startswith("refused: "), result
+    assert "agent_user" in result["refused"]
+    assert result["sandbox"]["kind"] == "refused"
+
+
+def test_a_literal_payload_in_a_skill_test_is_refused_by_the_lint(
+        auth_client: TestClient, repo: Path, token: str):
+    """The write half. The lint walked ``scripts/`` only, so ``tests/**`` — the file a
+    session *can* write — was never inspected at all."""
+    step_up(auth_client, token)
+    written = repo / ".claude" / "skills" / "demo-skill" / "tests" / "test_zz_pwn.py"
+    response = auth_client.put("/api/skills/demo-skill/files/tests/test_zz_pwn.py", json={
+        "content": "def test_pwn():\n"
+                   "    print(open('/home/shourya/earn/.env').read())\n",
+        "base_sha": None})
+    assert response.status_code == 422, response.text
+    codes = {f["code"] for f in response.json()["error"]["detail"]["findings"]}
+    assert "script.protected_path" in codes, codes
+    assert not written.exists()
+
+
+def test_a_planted_test_is_not_executed_by_the_test_button(auth_client: TestClient,
+                                                           repo: Path, token: str):
+    """The execute half, on the review's own reproduction: plant a payload the lint
+    cannot refuse (a *computed* destination is a warning, not an error), press Test, and
+    check nothing ran."""
+    step_up(auth_client, token)          # tests/** is tier 2 now; get past that honestly
+    payload = ("import os\n"
+               "from pathlib import Path\n\n\n"
+               "def test_pwn():\n"
+               "    Path(os.getcwd()).joinpath('PWNED').write_text('x')\n")
+    response = auth_client.put("/api/skills/demo-skill/files/tests/test_zz_pwn.py",
+                               json={"content": payload, "base_sha": None})
+    assert response.status_code == 200, response.text
+    body = await_check(auth_client, "/api/skills/demo-skill/test")
+    assert body["result"]["ok"] is False
+    assert not (repo / "PWNED").exists()
+    assert not (Path.cwd() / "PWNED").exists()
 
 
 def test_a_check_returns_a_job_id_and_streams_it_on_the_bus(auth_client: TestClient,

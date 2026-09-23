@@ -75,6 +75,155 @@ export const ROUTES: RouteDef[] = [
 
 export const NAV_GROUPS: NavGroup[] = ['Trading', 'Intelligence', 'Control', 'System'];
 
+/* ------------------------------------------- the operator view and the developer area */
+
+/**
+ * The four places an operator goes, plus Setup.
+ *
+ * Twenty-one entries in one flat list is the shape of the system, not the shape of the
+ * job.  An operator about to paper-trade on the testnet asks four questions, in this
+ * order: is it running and is anything wrong; what do I own and what did it do; why did it
+ * do that; and what does this thing actually know how to do.  Those are the four
+ * destinations.  Setup is the fifth entry because it is where you start, not where you
+ * live.
+ *
+ * Depth is deliberately not a sixth destination.  Every one of these screens is a list on
+ * the left and a detail pane on the right that opens on the row you clicked, so going
+ * deeper never means going somewhere else.
+ *
+ * Nothing is deleted to get here.  A destination points at a route that already exists;
+ * the other sixteen pages keep their URLs, stay in Ctrl-K in both views, and are listed
+ * under {@link developerNavGroups}, which the Developer switch in the corner opens.
+ */
+export interface PrimaryDestination {
+  /** The route this destination opens — always one of {@link ROUTES}. */
+  routeId: string;
+  /** What the navigation calls it, in the operator's words. */
+  label: string;
+  /** One line saying what the screen answers. */
+  blurb: string;
+  icon: ComponentType<{ size?: number | string }>;
+}
+
+export const PRIMARY_NAV: PrimaryDestination[] = [
+  {
+    routeId: 'overview',
+    label: 'Home',
+    blurb:
+      'What you put in, what it is worth now, what it holds and everything it has bought and sold. Double-click a row for the reasoning.',
+    icon: IconDashboard,
+  },
+  {
+    routeId: 'portfolio',
+    label: 'Trading',
+    blurb:
+      'Every position, order and fill, with the chart. Click any row for the whole story behind it.',
+    icon: IconWallet,
+  },
+  {
+    routeId: 'decisions',
+    label: 'Decisions',
+    blurb:
+      'One story per decision: what was noticed, what Claude concluded, and what the safety check did about it.',
+    icon: IconClipboardCheck,
+  },
+  {
+    routeId: 'skills',
+    label: 'Skills',
+    blurb: 'What the system knows how to do, led by what each procedure does in plain words.',
+    icon: IconSparkles,
+  },
+  {
+    routeId: 'settings',
+    label: 'Setup',
+    blurb:
+      'Sign in to Claude, choose play money or real money, and set the starting money, the limits and the schedule.',
+    icon: IconAdjustments,
+  },
+];
+
+/** Route ids that appear in the operator navigation. */
+export const PRIMARY_ROUTE_IDS: string[] = PRIMARY_NAV.map((entry) => entry.routeId);
+
+export function isPrimaryRoute(id: string): boolean {
+  return PRIMARY_ROUTE_IDS.includes(id);
+}
+
+export function primaryDestination(id: string): PrimaryDestination | undefined {
+  return PRIMARY_NAV.find((entry) => entry.routeId === id);
+}
+
+/** The {@link RouteDef}s behind {@link PRIMARY_NAV}, in navigation order. */
+export function primaryRoutes(): RouteDef[] {
+  return PRIMARY_NAV.flatMap((entry) => {
+    const route = routeById(entry.routeId);
+    return route ? [route] : [];
+  });
+}
+
+/**
+ * Everything builder-shaped, grouped as the system is built.
+ *
+ * These are not lesser screens and they are not hidden: they are the ones that only make
+ * sense once you know how the machine is put together — the labs, the internals, the
+ * generated settings form, the audit trail, the invariants.  They keep their URLs, they
+ * stay in Ctrl-K in both views, and the Developer switch in the corner lists them.
+ */
+export const DEVELOPER_ROUTE_IDS: string[] = ROUTES.filter(
+  (route) => !PRIMARY_ROUTE_IDS.includes(route.id),
+).map((route) => route.id);
+
+export function developerRoutes(): RouteDef[] {
+  return ROUTES.filter((route) => DEVELOPER_ROUTE_IDS.includes(route.id));
+}
+
+/** Developer routes grouped for the navigation, in {@link NAV_GROUPS} order. */
+export function developerNavGroups(): Array<{ group: NavGroup; routes: RouteDef[] }> {
+  return NAV_GROUPS.map((group) => ({
+    group,
+    routes: developerRoutes().filter((route) => route.group === group),
+  })).filter((entry) => entry.routes.length > 0);
+}
+
+/**
+ * One line per screen, in plain words, shown as the page's subtitle.
+ *
+ * `RouteDef.description` is the builder's summary and is pinned against the server's page
+ * index; this is what a person reads.  Every route has an entry — `src/test` fails when one
+ * is missing, because a screen with no explanation is the bug the owner reported.
+ */
+export const PAGE_BLURB: Record<string, string> = {
+  overview:
+    'What you put in, what it is worth now, what it holds and everything it has bought and sold. Double-click a row for the reasoning.',
+  portfolio:
+    'What each bot holds, every order and fill with its price, and the chart those trades sit on. Click a row for the whole story.',
+  performance: 'How the two bots have done against simply buying BTC and holding it.',
+  'test-lab': 'Paper-trading runs: start a fresh one, and compare runs against each other.',
+  'backtest-lab': 'Replay a strategy over past prices to see how it would have done.',
+  charts: 'Price candles with markers for what the system did and why.',
+  signals: 'Ideas the scanner spotted, and whether a second look held them up.',
+  decisions:
+    'One story per decision: what was noticed, what Claude concluded, and what the safety check allowed.',
+  risk: 'The limits every order is checked against, and every order the safety check turned down.',
+  'ai-models': 'Which models answer which questions, what they cost, and whether they are reachable.',
+  skills: 'What the system knows how to do, and what each of those procedures is for.',
+  prompts: 'The instructions Claude is given, their versions, and which one is active.',
+  'self-improvement': 'Changes the system proposed to itself, and the evidence for each.',
+  knowledge: 'Daily briefs, news, market history and the reports the system has written.',
+  operations: 'Scheduled jobs, the machine they run on, containers, backups and logs.',
+  settings:
+    'Sign in, choose play money or real money, and set the starting money, the limits and the schedule. Every other setting is one tab away.',
+  setup: 'First-run questions, in order, with the checks that say you are ready.',
+  'mode-live': 'Whether a bot is on paper money or real money, and how it moves between them.',
+  secrets: 'Sign in to Claude, add your exchange keys, and check each one works.',
+  audit: 'Every action anyone or anything took, in one timeline.',
+  invariants: 'Safety rules enforced by code, and the exact file that enforces each one.',
+};
+
+export function routeBlurb(id: string): string {
+  return PAGE_BLURB[id] ?? routeById(id)?.description ?? '';
+}
+
 /**
  * Feature packages drop `src/pages/<route id>/index.tsx` (default export) — or
  * `src/pages/<route id>.tsx` — and the route picks it up without any edit here.
@@ -125,13 +274,41 @@ export function pageModuleKey(id: string): string | null {
   return pageModuleCandidates(id).find((key) => key in pageModules) ?? null;
 }
 
+/**
+ * One `lazy()` per page, for the life of the tab.
+ *
+ * This cache is the fix for the bug the owner reported as "I click on secrets and nothing
+ * happens", and it is not an optimisation.  `React.lazy()` returns a *stateful* component:
+ * the first render calls the loader and the resolved module is remembered on that exact
+ * object.  A fresh `lazy()` is therefore a component that has never loaded anything.
+ *
+ * React Router v7 navigates inside `startTransition`.  When the incoming screen suspends,
+ * React throws the whole attempted render away and keeps the committed screen on show —
+ * so the operator still sees the page they were on.  It then retries from scratch when the
+ * promise settles, which re-runs `RouteElement` from a fresh fiber and re-runs its
+ * `useMemo`.  While this function minted a new `lazy()` on every call, that retry produced
+ * a brand-new, never-loaded lazy component, which suspended again on the (already cached)
+ * import, which retried, which minted another one: a navigation that never lands.  The URL
+ * changed, the chunk was fetched once, no error was thrown, and the screen never moved —
+ * every click looked dead.  The first paint escaped it because a mount outside a transition
+ * commits a real Suspense fallback and retries on the same fiber.
+ *
+ * Keeping the component identity stable per route id makes the retry find a lazy that is
+ * already resolved, so it commits.  `src/test/navigation.test.tsx` holds this to it.
+ */
+const lazyPages = new Map<string, LazyExoticComponent<ComponentType>>();
+
 /** `null` when no package has shipped the page yet -> the shell renders the placeholder. */
 export function resolvePageComponent(id: string): LazyExoticComponent<ComponentType> | null {
+  const cached = lazyPages.get(id);
+  if (cached) return cached;
   const key = pageModuleKey(id);
   if (!key) return null;
   const loader = pageModules[key];
   if (!loader) return null;
-  return lazy(loader);
+  const component = lazy(loader);
+  lazyPages.set(id, component);
+  return component;
 }
 
 export function routeById(id: string): RouteDef | undefined {

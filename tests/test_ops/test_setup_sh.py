@@ -90,6 +90,50 @@ def test_the_state_root_is_named_in_the_report(tmp_path: Path) -> None:
     assert "docker-compose.yml" in stdout, stdout
 
 
+class TestTimezone:
+    """``ops/crontab`` requires Asia/Dubai and nothing in the documented setup set or
+    checked it: the requirement lived in a comment inside the generated file and one
+    prose aside in CLAUDE.md, while ``Environment=TZ`` in the systemd units sets a
+    process environment and pins no schedule. cron evaluates its expressions in the
+    distro timezone while ops/healthcheck.py forces Gulf before croniter, so a UTC host
+    made the watchdog expect every daily job four hours early, rerun it detached with an
+    alert, and then run it a second time when cron really fired."""
+
+    def _run(self, tmp_path: Path, tz_output: str | None) -> subprocess.CompletedProcess:
+        """setup.sh --check with a fake ``timedatectl`` first on PATH."""
+        if shutil.which("bash") is None:  # pragma: no cover - POSIX hosts only
+            pytest.skip("no bash on this host")
+        binp = tmp_path / "bin"
+        binp.mkdir()
+        fake = binp / "timedatectl"
+        fake.write_text("#!/usr/bin/env bash\n"
+                        + (f"printf '%s\\n' {tz_output!r}\n" if tz_output else "exit 1\n"))
+        fake.chmod(0o755)
+        env = {**os.environ, "PATH": f"{binp}:{os.environ.get('PATH', '')}",
+               "EARN_STATE_ROOT": str(tmp_path / "state")}
+        (tmp_path / "state").mkdir()
+        return subprocess.run(["bash", str(SETUP), "--check"], cwd=REPO_ROOT, env=env,
+                              capture_output=True, text=True, timeout=180)
+
+    def test_the_configured_timezone_passes(self, tmp_path: Path) -> None:
+        out = self._run(tmp_path, "Asia/Dubai")
+        assert "ok    distro timezone is Asia/Dubai" in out.stdout, out.stdout
+
+    def test_a_wrong_timezone_is_a_blocking_failure(self, tmp_path: Path) -> None:
+        out = self._run(tmp_path, "Etc/UTC")
+        assert "FAIL  distro timezone is 'Etc/UTC'" in out.stdout, out.stdout
+        assert "set-timezone Asia/Dubai" in out.stdout
+        assert out.returncode != 0, "a wrong timezone must block, not warn"
+
+    def test_an_unreadable_timezone_warns_rather_than_passing_silently(
+        self, tmp_path: Path
+    ) -> None:
+        out = self._run(tmp_path, None)
+        assert "timezone" in out.stdout
+        assert "warn  could not read the distro timezone" in out.stdout or \
+            "distro timezone is" in out.stdout, out.stdout
+
+
 def test_the_pyproject_pytest_comment_points_at_a_script_that_exists() -> None:
     """``[tool.pytest.ini_options]`` tells the reader that ``ops/smoke.sh`` runs the
     deselected e2e suite. That is the only pointer an operator gets when ``-m 'not e2e'``

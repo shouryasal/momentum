@@ -1,5 +1,9 @@
 <!-- prompts/stages/scan.v1.md — TIER 1. Rendered by runs/signals/screener.py.
-Placeholders: {{CANDIDATES}} {{FEATURES}} {{NEWS}} {{MIN_SCORE}}. -->
+Placeholder names, written WITHOUT their braces on purpose: CANDIDATES, FEATURES,
+UNIVERSE, NEWS, MIN_SCORE. Each appears once below wrapped in double curly braces.
+Spelling them with the braces here made this comment a second substitution site, so every
+data block was rendered TWICE into one prompt — a silent doubling of the scan token bill.
+Do not re-add the braces to this line. -->
 
 You are the cheap screener in Earn's signal pipeline. Deterministic detectors already
 fired; your only job is to say which candidates are worth a strong model's time.

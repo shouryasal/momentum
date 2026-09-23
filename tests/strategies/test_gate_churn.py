@@ -8,12 +8,12 @@ import pytest
 
 from strategies.riskgate import CHECK_ORDER, RECONCILE_FLAG, MemoryStateStore
 
-from .conftest import NOW, benign_gate, gate_cfg_with, ps
+from .conftest import ENTRY, NOW, benign_gate, gate_cfg_with, ps
 
 
 class TestNavValid:
     def test_invalid_nav_blocks_every_entry(self, gate):
-        d = gate.check_entry("BTC/USDT", 100.0, ps(valid=False, reason="AttributeError"))
+        d = gate.check_entry("BTC/USDT", ENTRY, ps(valid=False, reason="AttributeError"))
         assert not d.allowed and d.reason == "nav_valid:AttributeError"
 
     def test_nav_valid_is_the_first_check(self, gate_cfg):
@@ -22,7 +22,7 @@ class TestNavValid:
         assert gate.check_entry("BTC/USDT", 5.0, ps(valid=False)).reason == "nav_valid"
 
     def test_zero_nav_is_not_valid(self, gate):
-        assert not gate.check_entry("BTC/USDT", 100.0, ps(nav=0.0)).allowed
+        assert not gate.check_entry("BTC/USDT", ENTRY, ps(nav=0.0)).allowed
 
     def test_cap_stake_is_zero_when_nav_is_invalid(self, gate):
         assert gate.cap_stake("BTC/USDT", 1000.0, ps(valid=False)) == 0.0
@@ -33,7 +33,10 @@ class TestNavValid:
         gate.loop_tick(ps(nav=10000))
         assert not gate.loop_tick(ps(nav=1.0, valid=False,
                                      now=NOW + timedelta(hours=1))).flatten
-        assert float(store.get("day_anchor_nav")) == 10000.0
+        # through gate.store: every key the gate writes lives under `run:<run_id>:`, and
+        # the run id is no longer empty even with no runtime file (it is the generator's
+        # own `test-<s>-000`), so the raw store is the wrong place to look.
+        assert float(gate.store.get("day_anchor_nav")) == 10000.0
 
 
 class TestReconcile:
@@ -41,12 +44,12 @@ class TestReconcile:
         return benign_gate(cfg, flags_provider=lambda pair, now: (True, flag))
 
     def test_reconcile_mismatch_blocks_entries_under_its_own_check(self, gate_cfg):
-        d = self._gate(gate_cfg, RECONCILE_FLAG).check_entry("BTC/USDT", 100.0, ps())
+        d = self._gate(gate_cfg, RECONCILE_FLAG).check_entry("BTC/USDT", ENTRY, ps())
         assert not d.allowed and d.reason == "reconcile"
         assert d.checks["blackout"] is True          # attributed to reconcile, not blackout
 
     def test_other_flags_stay_blackout(self, gate_cfg):
-        d = self._gate(gate_cfg, "macro_blackout").check_entry("BTC/USDT", 100.0, ps())
+        d = self._gate(gate_cfg, "macro_blackout").check_entry("BTC/USDT", ENTRY, ps())
         assert d.reason == "blackout:macro_blackout"
 
     def test_block_on_mismatch_false_lets_entries_through(self, tmp_path):
@@ -54,7 +57,7 @@ class TestReconcile:
             raw["risk"]["reconcile"]["block_on_mismatch"] = False
 
         cfg = gate_cfg_with(tmp_path, off)
-        assert self._gate(cfg, RECONCILE_FLAG).check_entry("BTC/USDT", 100.0, ps()).allowed
+        assert self._gate(cfg, RECONCILE_FLAG).check_entry("BTC/USDT", ENTRY, ps()).allowed
 
     def test_exits_are_never_blocked_by_reconcile(self, gate_cfg):
         gate = self._gate(gate_cfg, RECONCILE_FLAG)
@@ -83,43 +86,45 @@ class TestOrderNotional:
 
 class TestEntriesPerTrade:
     def test_fifth_entry_on_one_trade_rejected(self, gate):
-        d = gate.check_entry("BTC/USDT", 100.0, ps(entries_used={"BTC/USDT": 4}))
+        d = gate.check_entry("BTC/USDT", ENTRY, ps(entries_used={"BTC/USDT": 4}))
         assert not d.allowed and d.reason == "entries_per_trade:BTC/USDT"
 
     def test_other_pairs_are_unaffected(self, gate):
-        assert gate.check_entry("ETH/USDT", 100.0, ps(entries_used={"BTC/USDT": 4})).allowed
+        assert gate.check_entry("ETH/USDT", ENTRY, ps(entries_used={"BTC/USDT": 4})).allowed
 
     def test_fourth_entry_still_allowed(self, gate):
-        assert gate.check_entry("BTC/USDT", 100.0, ps(entries_used={"BTC/USDT": 3})).allowed
+        assert gate.check_entry("BTC/USDT", ENTRY, ps(entries_used={"BTC/USDT": 3})).allowed
 
 
 class TestOrdersPerDay:
-    def test_thirteenth_order_rejected_and_resets_next_gulf_day(self, gate_cfg):
+    def test_the_order_after_the_last_is_rejected_and_resets_next_gulf_day(self, gate_cfg):
+        # The limit rose 12 -> 16 with the wide universe: 8 positions on a weekly rotation
+        # need the headroom, and it is still a hard runaway stop (wide-universe.md §2.3).
         store = MemoryStateStore()
         gate = benign_gate(gate_cfg, store)
-        for _ in range(12):
+        for _ in range(gate_cfg.max_orders_per_day):
             gate.record_order_fill(NOW, notional=10.0)
-        d = gate.check_entry("BTC/USDT", 100.0, ps())
+        d = gate.check_entry("BTC/USDT", ENTRY, ps())
         assert not d.allowed and d.reason == "orders_per_day"
         tomorrow = NOW + timedelta(hours=13)          # Gulf midnight is 20:00 UTC
-        assert gate.check_entry("BTC/USDT", 100.0, ps(now=tomorrow)).allowed
+        assert gate.check_entry("BTC/USDT", ENTRY, ps(now=tomorrow)).allowed
 
     def test_risk_exits_do_not_consume_the_order_budget(self, gate_cfg):
         gate = benign_gate(gate_cfg, MemoryStateStore())
         for _ in range(20):
             gate.record_order_fill(NOW, notional=10.0, risk_exit=True)
         assert gate.orders_today(NOW) == 0
-        assert gate.check_entry("BTC/USDT", 100.0, ps()).allowed
+        assert gate.check_entry("BTC/USDT", ENTRY, ps()).allowed
 
 
 class TestTurnoverDay:
     def test_turnover_past_50pct_of_nav_rejected(self, gate_cfg):
         gate = benign_gate(gate_cfg, MemoryStateStore())
-        gate.record_order_fill(NOW, notional=4900.0)
-        assert gate.turnover_today(NOW) == pytest.approx(4900.0)
-        d = gate.check_entry("BTC/USDT", 200.0, ps())     # 5100 / 10000 > 0.50
+        gate.record_order_fill(NOW, notional=4700.0)
+        assert gate.turnover_today(NOW) == pytest.approx(4700.0)
+        d = gate.check_entry("BTC/USDT", 400.0, ps())     # 5100 / 10000 > 0.50
         assert not d.allowed and d.reason == "turnover_day"
-        assert gate.check_entry("BTC/USDT", 90.0, ps()).allowed
+        assert gate.check_entry("BTC/USDT", ENTRY, ps()).allowed   # 5000 / 10000 == 0.50
 
     def test_turnover_counts_risk_exits_as_real_cost(self, gate_cfg):
         gate = benign_gate(gate_cfg, MemoryStateStore())
@@ -141,13 +146,13 @@ class TestFeeBudget:
     def test_month_fee_budget_blocks_entries(self, gate_cfg):
         gate = benign_gate(gate_cfg, MemoryStateStore())
         gate.record_order_fill(NOW, notional=10.0, fee_usdt=101.0)   # >1% of 10k NAV
-        d = gate.check_entry("BTC/USDT", 100.0, ps())
+        d = gate.check_entry("BTC/USDT", ENTRY, ps())
         assert not d.allowed and d.reason == "fee_budget"
 
     def test_under_budget_passes_and_rolls_over_the_month(self, gate_cfg):
         gate = benign_gate(gate_cfg, MemoryStateStore())
         gate.record_order_fill(NOW, notional=10.0, fee_usdt=50.0)
-        assert gate.check_entry("BTC/USDT", 100.0, ps()).allowed
+        assert gate.check_entry("BTC/USDT", ENTRY, ps()).allowed
         next_month = NOW + timedelta(days=20)
         assert gate.fees_this_month(next_month) == 0.0
 
@@ -164,7 +169,7 @@ class TestDiscretionaryExit:
 
     def test_tp_rung_is_blocked_by_the_order_budget(self, gate_cfg):
         gate = benign_gate(gate_cfg, MemoryStateStore())
-        for _ in range(12):
+        for _ in range(gate_cfg.max_orders_per_day):
             gate.record_order_fill(NOW, notional=1.0)
         d = gate.check_discretionary_exit("BTC/USDT", 100.0, ps(), "tp1")
         assert not d.allowed and d.reason == "orders_per_day"
@@ -181,10 +186,18 @@ class TestDiscretionaryExit:
 
 
 def test_check_order_matches_the_spec():
+    # The order is the contract: the FIRST failing check is the journalled reason, so a
+    # reordering silently changes what every rejection says it was. The wide-universe
+    # controls sit where they do on purpose — membership (exit_only, tier) before any
+    # counting, because an asset we may not trade at all should never be reported as a
+    # turnover problem; and the measured caps (beta, corr) last among the exposure checks,
+    # because a cheap deterministic refusal should beat an expensive computed one.
     assert CHECK_ORDER == (
         "nav_valid", "kill", "monthly_lock", "daily_lock", "blackout", "staleness",
-        "reconcile", "trades_per_day", "orders_per_day", "turnover_day", "fee_budget",
-        "min_notional", "order_notional", "entries_per_trade", "weight_cap", "gross_cap",
+        "reconcile", "exit_only", "tier", "trades_per_day", "orders_per_day",
+        "turnover_day", "fee_budget", "min_notional", "step_size", "order_notional",
+        "entries_per_trade", "min_position", "max_positions", "satellite_count",
+        "satellite_gross", "weight_cap", "beta_cap", "corr_cap", "gross_cap",
         "usdt_floor",
     )
 

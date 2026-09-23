@@ -43,19 +43,33 @@ def load_proposals(jdb: sqlite3.Connection, start_iso: str) -> list[dict]:
 
 
 def load_grid(kdb: sqlite3.Connection, cfg: EarnConfig,
-              start_ms: int) -> list[tuple[int, dict[str, float]]]:
-    """[(close_time_ms, {asset: close})] on the shared closed-4h grid."""
+              start_ms: int) -> tuple[list[str], list[tuple[int, dict[str, float]]]]:
+    """``(assets, [(close_time_ms, {asset: close})])`` on the shared closed-4h grid.
+
+    The universe is dynamic now, so "every asset in the universe has a close at this
+    timestamp" stopped being a reasonable requirement: one satellite listed last month
+    has no 4h candles back at ``paper.start_date`` and under the old rule emptied the
+    whole grid, silently turning the what-if table into nothing. So the grid is built
+    over the assets that actually **have** data in the window, and a point is kept only
+    when every one of those has a close — which keeps the no-partial-drift property that
+    made the rule right in the first place. A proposal weighting an asset with no candles
+    here scores as cash, which is the conservative reading.
+    """
     series: dict[int, dict[str, float]] = {}
+    covered: list[str] = []
     for asset in cfg.universe.assets:
         pair = f"{asset}/{cfg.universe.quote}"
-        for r in kdb.execute(
-                "SELECT close_time, close FROM candles WHERE pair=? AND tf='4h'"
-                " AND is_closed=1 AND close_time >= ? ORDER BY open_time",
-                (pair, start_ms)):
+        rows = kdb.execute(
+            "SELECT close_time, close FROM candles WHERE pair=? AND tf='4h'"
+            " AND is_closed=1 AND close_time >= ? ORDER BY open_time",
+            (pair, start_ms)).fetchall()
+        if not rows:
+            continue
+        covered.append(asset)
+        for r in rows:
             series.setdefault(r["close_time"], {})[asset] = r["close"]
-    # keep only grid points where EVERY asset has a close (no partial drift)
-    return sorted((t, p) for t, p in series.items()
-                  if len(p) == len(cfg.universe.assets))
+    grid = sorted((t, p) for t, p in series.items() if len(p) == len(covered))
+    return covered, grid
 
 
 def effective(targets: dict, scale: float, assets: list[str]) -> dict[str, float]:
@@ -67,12 +81,11 @@ def effective(targets: dict, scale: float, assets: list[str]) -> dict[str, float
 def run_whatif(cfg: EarnConfig, jdb: sqlite3.Connection, kdb: sqlite3.Connection,
                root: Path | None = None) -> int:
     root = root or REPO_ROOT
-    assets = list(cfg.universe.assets)
     start = datetime.strptime(cfg.paper.start_date, "%Y-%m-%d").replace(tzinfo=UTC)
     start_iso = start.strftime("%Y-%m-%dT%H:%M:%SZ")
     bps = measured_cost_bps(root)
     props = load_proposals(jdb, start_iso)
-    grid = load_grid(kdb, cfg, int(start.timestamp() * 1000))
+    assets, grid = load_grid(kdb, cfg, int(start.timestamp() * 1000))
     jdb.execute("DELETE FROM whatif_nav")
     if not grid:
         jdb.commit()

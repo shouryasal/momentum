@@ -91,6 +91,7 @@ describe('console/contracts.py mirror', () => {
       'job',
       'reconcile',
       'backtest',
+      'claude_auth',
     ]);
   });
 

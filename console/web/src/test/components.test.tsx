@@ -2,6 +2,8 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
+import { ApiClient, ApiError } from '../api';
+import { SessionProvider } from '../app/SessionContext';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { DataTable } from '../components/DataTable';
 import { DiffView } from '../components/DiffView';
@@ -110,7 +112,9 @@ describe('ConfirmDialog', () => {
     await user.type(screen.getByTestId('confirm-phrase'), 'RESET');
     expect(screen.getByTestId('confirm-submit')).toBeEnabled();
     await user.click(screen.getByTestId('confirm-submit'));
-    expect(onConfirm).toHaveBeenCalledWith({});
+    // The typed phrase is handed back, not swallowed: Settings → History → Revert has to
+    // forward what the operator typed instead of the phrase the server told the page.
+    expect(onConfirm).toHaveBeenCalledWith({ phrase: 'RESET' });
   });
 
   it('asks for a step-up token when the session is not stepped up', async () => {
@@ -138,6 +142,107 @@ describe('ConfirmDialog', () => {
     );
     expect(screen.queryByTestId('confirm-stepup')).toBeNull();
     expect(screen.getByTestId('confirm-submit')).toBeEnabled();
+  });
+
+  /**
+   * The root cause of the five broken dialogs: the token was collected and handed to the
+   * caller, and five callers dropped it, so the guarded request went out with no step-up
+   * and came back 403. The dialog opens the window itself now — a caller cannot forget.
+   */
+  it('opens the step-up window itself before running the action', async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const client = new ApiClient({
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        calls.push({
+          url,
+          method: init?.method ?? 'GET',
+          body: init?.body ? JSON.parse(String(init.body)) : null,
+        });
+        if (url.includes('/auth/me')) {
+          return new Response(
+            JSON.stringify({ authenticated: true, actor: 'human:console:s', csrf: 'c',
+              step_up_until: null, expires: null }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return new Response(JSON.stringify({ step_up_until: '2099-01-01T00:00:00Z' }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }) as unknown as typeof fetch,
+    });
+    const order: string[] = [];
+    renderWithProviders(
+      <SessionProvider client={client}>
+        <ConfirmDialog
+          opened
+          onClose={() => undefined}
+          title="Install the crontab"
+          requireStepUp
+          onConfirm={() => {
+            order.push('action');
+          }}
+        />
+      </SessionProvider>,
+    );
+    await waitFor(() => expect(calls.some((c) => c.url.includes('/auth/me'))).toBe(true));
+    await user.type(screen.getByTestId('confirm-stepup'), 'console-token');
+    await user.click(screen.getByTestId('confirm-submit'));
+    await waitFor(() => expect(order).toEqual(['action']));
+    const stepUp = calls.find((c) => c.url.includes('/auth/step-up'));
+    expect(stepUp, 'the dialog must POST /auth/step-up before the guarded action').toBeTruthy();
+    expect(stepUp?.method).toBe('POST');
+    expect(stepUp?.body).toEqual({ token: 'console-token' });
+  });
+
+  it('takes the step-up window from the session when the caller does not say', async () => {
+    const client = new ApiClient({
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({ authenticated: true, actor: 'a', csrf: 'c',
+            step_up_until: '2099-01-01T00:00:00Z', expires: null }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )) as unknown as typeof fetch,
+    });
+    renderWithProviders(
+      <SessionProvider client={client}>
+        <ConfirmDialog
+          opened
+          onClose={() => undefined}
+          title="Restart"
+          requireStepUp
+          onConfirm={() => undefined}
+        />
+      </SessionProvider>,
+    );
+    // SchedulePanel and ChangeDetail passed no `stepUpSatisfied` at all, so the token box
+    // was shown — and discarded — even while the session was stepped up.
+    await waitFor(() => expect(screen.queryByTestId('confirm-stepup')).toBeNull());
+  });
+
+  it('names the field a 422 rejected instead of one opaque sentence', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <ConfirmDialog
+        opened
+        onClose={() => undefined}
+        title="Engage KILL"
+        onConfirm={() => {
+          throw new ApiError(422, {
+            code: 'invalid',
+            message: 'request body failed validation',
+            detail: { errors: [{ loc: ['body', 'reason'], msg: 'String should have at least 3 characters' }] },
+          });
+        }}
+      />,
+    );
+    await user.click(screen.getByTestId('confirm-submit'));
+    await waitFor(() =>
+      expect(screen.getByTestId('confirm-error-fields')).toHaveTextContent(
+        'reason: String should have at least 3 characters',
+      ),
+    );
   });
 
   it('surfaces a failed confirmation', async () => {
@@ -170,6 +275,36 @@ describe('KillButton', () => {
     await user.click(screen.getByTestId('kill-flatten'));
     await user.click(screen.getByTestId('confirm-submit'));
     expect(onKill).toHaveBeenCalledWith({ reason: 'exchange outage', flatten: true });
+  });
+
+  /**
+   * `console.contracts.KillRequest.reason` is `min_length=3`. The button used to enable on
+   * one character, so during an incident the operator typed "x", clicked Engage KILL, and
+   * got "request body failed validation" back with trading still running.
+   */
+  it('will not send a reason the server rejects', async () => {
+    const user = userEvent.setup();
+    const onKill = vi.fn();
+    renderWithProviders(
+      <KillButton engaged={false} onKill={onKill} onResume={() => undefined} />,
+    );
+    await user.click(screen.getByTestId('kill-button'));
+    await user.type(screen.getByTestId('kill-reason'), 'x');
+    expect(screen.getByTestId('confirm-submit')).toBeDisabled();
+    expect(screen.getByText(/at least 3 characters/)).toBeInTheDocument();
+    await user.type(screen.getByTestId('kill-reason'), 'yz');
+    expect(screen.getByTestId('confirm-submit')).toBeEnabled();
+    await user.click(screen.getByTestId('confirm-submit'));
+    expect(onKill).toHaveBeenCalledWith({ reason: 'xyz', flatten: false });
+  });
+
+  it('caps the reason at what the server accepts', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <KillButton engaged={false} onKill={vi.fn()} onResume={() => undefined} />,
+    );
+    await user.click(screen.getByTestId('kill-button'));
+    expect(screen.getByTestId('kill-reason')).toHaveAttribute('maxlength', '500');
   });
 
   it('asks for the typed phrase and step-up before resuming', async () => {

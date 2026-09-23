@@ -27,6 +27,7 @@ from ops import db
 from ops import preflight as pf
 from ops.config import EarnConfig
 from ops.lib import binance_check, paths
+from ops.lib import exchange_endpoints as ee
 from ops.lib import mode_state as ms
 
 CACHE_LIMIT = 20
@@ -109,37 +110,95 @@ def bot_status_probe(cfg: EarnConfig, factory: Any) -> Any:
     return probe
 
 
-def _client(sleeve: str, env: Mapping[str, str] | None = None) -> Any:
-    keys = binance_check.keys_for(sleeve, env)
+def keypair_for(sleeve: str, venue: ee.Venue, env: Mapping[str, str] | None = None):
+    """One sleeve's credential at one venue, in the shape ``BinanceClient`` takes.
+
+    The env names come from ``ops.preflight.credential_env_names`` — the single table that
+    knows demo's names are ``BINANCE_DEMO_*`` and live's are ``BINANCE_{KEY,SECRET}_<S>``.
+    """
+    cred = pf.credential_for(sleeve, venue, env)
+    key_env, secret_env = pf.credential_env_names(sleeve, venue)
+    return binance_check.KeyPair(
+        sleeve=sleeve.lower(),
+        key_env=cred.label or key_env,
+        secret_env=secret_env,
+        key=cred.key,
+        secret=cred.secret,
+    )
+
+
+def _client(sleeve: str, venue: ee.Venue, env: Mapping[str, str] | None = None) -> Any:
+    """A signed client **pinned to one venue's host**, built from that venue's own key.
+
+    The base URL used to be ``binance_check.BASE_URL`` — a module constant pointed at
+    ``api.binance.com``. Every probe below therefore went to production no matter which
+    mode was being armed. It comes from the venue table now, and the credential comes from
+    that venue's env names, so a demo preflight physically cannot reach the live host.
+    """
+    keys = keypair_for(sleeve, venue, env)
     if not keys.present:
         raise binance_check.BinanceCheckError(f"{keys.key_env} is not set")
-    return binance_check.BinanceClient(keys)
+    return binance_check.BinanceClient(keys, base_url=ee.endpoints_for(venue).rest_base)
 
 
-def exchange_probes(env: Mapping[str, str] | None = None) -> dict[str, Any]:
-    """The three Binance probes, each built lazily so a missing key fails one item only."""
+def exchange_probes(
+    env: Mapping[str, str] | None = None, *, venue: ee.Venue = ee.Venue.LIVE
+) -> dict[str, Any]:
+    """The Binance probes for ONE venue, each built lazily so a missing key fails one item."""
 
     def restrictions(sleeve: str) -> dict[str, Any]:
-        return _client(sleeve, env).api_restrictions()
+        return _client(sleeve, venue, env).api_restrictions()
 
     def account(sleeve: str) -> dict[str, Any]:
-        return _client(sleeve, env).account()
+        return _client(sleeve, venue, env).account()
 
     def info(pairs: Sequence[str]) -> dict[str, Any]:
+        symbols = [binance_check.symbol_of(p) for p in pairs]
         for sleeve in paths.SLEEVES:
             try:
-                return _client(sleeve, env).exchange_info(
-                    [binance_check.symbol_of(p) for p in pairs]
-                )
+                return _client(sleeve, venue, env).exchange_info(symbols)
             except binance_check.BinanceCheckError:
                 continue
-        raise binance_check.BinanceCheckError("no usable exchange credentials for a public probe")
+        # ``exchangeInfo`` is a *public* endpoint on every venue; a missing key is no
+        # reason to give up on it, and on demo it is how "filters loaded" is proven.
+        return _public_exchange_info(venue, symbols)
 
     return {
         "exchange_restrictions": restrictions,
         "exchange_account": account,
         "exchange_info": info,
     }
+
+
+def _public_exchange_info(  # pragma: no cover - the network edge
+    venue: ee.Venue, symbols: Sequence[str]
+) -> dict[str, Any]:
+    import httpx
+
+    url = f"{ee.endpoints_for(venue).rest_base}{binance_check.EXCHANGE_INFO_PATH}"
+    wanted = ",".join(f'"{s}"' for s in symbols)
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.get(url, params={"symbols": f"[{wanted}]"})
+    if resp.status_code != 200:
+        raise binance_check.BinanceCheckError(
+            f"GET {binance_check.EXCHANGE_INFO_PATH} on {venue.value} -> HTTP {resp.status_code}"
+        )
+    return dict(resp.json())
+
+
+def venue_probe(env: Mapping[str, str] | None = None) -> ee.Prober:
+    """``(venue, credential) -> authenticated | rejected | unreachable``.
+
+    The prober the ``venue_binding`` check uses to prove a key belongs to one venue and is
+    refused by the others. It is a read-only ``GET /api/v3/account`` against each venue's
+    own host; the *negative* results are the point, so it must be allowed to reach venues
+    the key does not belong to.
+    """
+
+    def probe(venue: ee.Venue, credential: ee.Credential) -> ee.ProbeVerdict:
+        return ee.httpx_account_probe(venue, credential)
+
+    return probe
 
 
 def host_facts_probe(cfg: EarnConfig | None = None) -> pf.HostFacts:
@@ -259,8 +318,17 @@ def build_deps(
     now: datetime | None = None,
     jdb: Any = None,
     kdb: Any = None,
+    venue: ee.Venue | None = None,
 ) -> pf.PreflightDeps:
-    """Assemble the real :class:`ops.preflight.PreflightDeps` for this console process."""
+    """Assemble the real :class:`ops.preflight.PreflightDeps` for this console process.
+
+    ``venue`` pins every exchange probe to one Binance. It is derived from the *request's*
+    target by :func:`run`, never guessed: probes carry a host and a key, and a set of
+    live-shaped probes run for a demo arming is the exact mistake this design exists to
+    make impossible. ``ops.preflight``'s ``venue_binding`` check re-asserts the match and
+    fails the whole preflight if the two ever disagree.
+    """
+    probe_venue = venue or ee.Venue.LIVE
     deps = pf.PreflightDeps(
         jdb=jdb,
         kdb=kdb,
@@ -268,6 +336,11 @@ def build_deps(
         env=env,
         state=state if state is not None else ms.load(env=env),
         now=now,
+        venue=venue,
+        # No ``credential`` here on purpose: it is per *sleeve*, and the checks read it
+        # from ``req.sleeve`` through ``pf.credential_for``. Pinning one here would hand
+        # sleeve B's checks sleeve A's key.
+        venue_probe=venue_probe(env),
         bot_status=bot_status_probe(cfg, bot_factory),
         host_facts=lambda: host_facts_probe(cfg),
         git_status=lambda: pf.default_git_status(root),
@@ -278,7 +351,7 @@ def build_deps(
         envwrap_allowlist=lambda: _envwrap_text(root),
         agent_user_ok=lambda: _agent_user_ok(cfg),
     )
-    for name, probe in exchange_probes(env).items():
+    for name, probe in exchange_probes(env, venue=probe_venue).items():
         setattr(deps, name, probe)
     return deps
 
@@ -324,6 +397,14 @@ def run(
         (store or cache).put(result, now=now)
         return result
 
+    # The venue comes from the target the operator asked for, through the one binding
+    # table (``exchange_endpoints.MODE_VENUE``). An unbound target raises there rather
+    # than defaulting, and the refusal becomes the ``venue_binding`` item below.
+    try:
+        venue = request.venue
+    except ee.VenueBindingError:
+        venue = None
+
     jdb = kdb = None
     try:
         if journal.exists():
@@ -331,7 +412,8 @@ def run(
         if knowledge.exists():
             kdb = db.connect(knowledge, readonly=True)
         built = build_deps(
-            cfg, root=root, bot_factory=bot_factory, env=env, now=now, jdb=jdb, kdb=kdb
+            cfg, root=root, bot_factory=bot_factory, env=env, now=now, jdb=jdb, kdb=kdb,
+            venue=venue,
         )
         result = pf.run_preflight(cfg, request, deps=built)
     finally:
@@ -353,4 +435,5 @@ __all__ = [
     "run",
     "strategy_tests_probe",
     "telegram_probe",
+    "venue_probe",
 ]

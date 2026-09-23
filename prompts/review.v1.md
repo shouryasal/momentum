@@ -21,10 +21,13 @@ Work through, in order, using the named skills:
 3. **Risk report** (risk-gate skill): `risk_report.py`, plus your paragraph.
 4. **TCA report** (tca skill): `report.py`, plus your paragraph.
 5. **Change candidates** (strategy-lab skill): at most a couple, each fully through
-   the protocol — edit on the branch, pytest, backtest, walk-forward, replay,
-   counterfactual, `make_change.py`, ONE commit per change touching only its
-   files. A candidate that fails any step is dropped, not softened. Lessons whose
-   `falsified-if` has triggered: note them for archiving.
+   the protocol — edit on the branch, backtest, walk-forward, replay
+   (`python3 -m evals.replay`), counterfactual, `make_change.py`, ONE commit per
+   change touching only its files. A candidate that fails any step is dropped, not
+   softened. Lessons whose `falsified-if` has triggered: note them for archiving.
+   Do **not** run pytest: it is on no allowlist this session has, the tier-2 hook
+   denies it, and `evals/verify_change.py` recomputes every number you quote — the
+   suite, a skill's lint and its eval pass rate included — under containment.
 6. **Lessons** (post-mortem): append qualifying lessons via `lessons_tool.py
    append` — falsifiable, cause-eligible, never from market noise.
 7. **Weekly report**: write `reports/review-{{WEEK}}.md` — the graded table

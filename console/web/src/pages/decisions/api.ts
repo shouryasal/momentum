@@ -91,6 +91,19 @@ export interface PendingApproval {
   seconds_left: number | null;
 }
 
+/** `console/routers/approvals.py::DecisionResponse`. */
+export interface ApprovalDecision {
+  run_id: string;
+  decision: 'approve' | 'reject';
+  actor: string;
+  channel: string;
+  decided_utc: string;
+  expires_utc: string;
+  path: string | null;
+  note: string | null;
+  proposal_sha256: string | null;
+}
+
 export function decisionsApi(client: ApiClient) {
   return {
     runs: (sinceDays?: number) =>
@@ -104,6 +117,23 @@ export function decisionsApi(client: ApiClient) {
         limit: 120,
       }),
     pending: () => client.get<{ pending: PendingApproval[] }>('/proposals/pending'),
+    /**
+     * The two writes the approvals queue exists for.
+     *
+     * Both endpoints have existed since P5 and nothing in the SPA called them, so in
+     * LIVE·PROPOSE the operator watched the 6h TTL run out on the page the header points
+     * them at and had to fall back to Telegram. They are session-tier, not step-up, by
+     * design (`console/routers/approvals.py`): making approval costly pushes the decision
+     * to Telegram, where there is no step-up at all.
+     */
+    approve: (runId: string, note?: string) =>
+      client.post<ApprovalDecision>(`/proposals/${encodeURIComponent(runId)}/approve`, {
+        note: note?.trim() ? note.trim() : null,
+      }),
+    reject: (runId: string, note?: string) =>
+      client.post<ApprovalDecision>(`/proposals/${encodeURIComponent(runId)}/reject`, {
+        note: note?.trim() ? note.trim() : null,
+      }),
     runResearch: (body: { slot?: string; signal_id?: string } = {}) =>
       client.post<{ spawned: boolean; pid: number | null; slot: string }>(
         '/jobs/research/run',

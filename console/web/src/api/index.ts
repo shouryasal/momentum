@@ -1,6 +1,6 @@
 /** Public API surface for feature packages. */
 export { ApiClient, api, API_BASE, CSRF_HEADER, type RequestOptions } from './client';
-export { ApiError, errorMessage, isNetworkError, normaliseErrorDetail } from './errors';
+export { ApiError, errorFields, errorMessage, isNetworkError, normaliseErrorDetail } from './errors';
 export { createQueryClient, shellKeys } from './queryClient';
 export { endpoints, type Endpoints } from './endpoints';
 /**

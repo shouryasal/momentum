@@ -59,9 +59,16 @@ function render(routes: Parameters<typeof fakeFetch>[0] = { '/api/secrets': { bo
   );
 }
 
+/** The credential table moved under Advanced; open it the way an operator would. */
+async function openAdvanced(): Promise<void> {
+  await userEvent.click(await screen.findByTestId('secrets-advanced-toggle'));
+  await screen.findByTestId('secrets-advanced');
+}
+
 describe('SecretsPage', () => {
   it('shows presence and last4, grouped, with the jobs that receive each secret', async () => {
     render();
+    await openAdvanced();
     await waitFor(() => expect(screen.getByTestId('secrets-claude')).toBeInTheDocument());
     const claude = screen.getByTestId('secrets-claude');
     expect(claude).toHaveTextContent('CLAUDE_CODE_OAUTH_TOKEN');
@@ -72,12 +79,14 @@ describe('SecretsPage', () => {
 
   it('marks a missing required secret and an absent optional one differently', async () => {
     render();
+    await openAdvanced();
     await waitFor(() => expect(screen.getByTestId('secrets-claude')).toBeInTheDocument());
     expect(screen.getByTestId('secrets-claude')).toHaveTextContent('empty');
   });
 
   it('opens a write-only input that is never pre-filled', async () => {
     render();
+    await openAdvanced();
     await waitFor(() => expect(screen.getByTestId('secrets-claude')).toBeInTheDocument());
     const rows = screen.getAllByRole('button', { name: 'Set' });
     await userEvent.click(rows[0] as HTMLElement);
@@ -97,6 +106,7 @@ describe('SecretsPage', () => {
 
   it('warns about billing before switching away from the subscription', async () => {
     render();
+    await openAdvanced();
     await waitFor(() => expect(screen.getByTestId('secrets-claude')).toBeInTheDocument());
     await userEvent.click(screen.getByRole('radio', { name: /api_key/ }));
     expect(await screen.findByText(/can spend money/)).toBeInTheDocument();
@@ -104,6 +114,7 @@ describe('SecretsPage', () => {
 
   it('never renders a secret value anywhere on the page', async () => {
     const { container } = render();
+    await openAdvanced();
     await waitFor(() => expect(screen.getByTestId('secrets-claude')).toBeInTheDocument());
     expect(container.textContent).not.toMatch(/sk-ant-/);
     expect(container.textContent).not.toMatch(/value"?\s*:/);

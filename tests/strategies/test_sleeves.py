@@ -13,6 +13,8 @@ from ops.lib import signing
 
 pytest.importorskip("freqtrade")
 
+from strategies import SleeveB as sleeve_b  # noqa: E402
+
 from .conftest import container_paths  # noqa: E402
 from .test_ledger_nav import (  # noqa: E402
     PRICE,
@@ -75,12 +77,15 @@ class TestSleeveA:
         trade = FakeTrade(amount=0.02, stake_amount=1_000.0)
         with_trades(monkeypatch, s, [trade])
         s.wallets = FakeWallets(start=10_000.0, free=9_000.0)
-        stake = s._mechanics_adjust(trade, NOW, PRICE, 0.01, 25.0, 9_999.0)
-        assert stake is not None and stake > 0
+        plan = s._mechanics_plan(trade, NOW, PRICE, 0.01, 25.0, 9_999.0)
+        assert plan is not None and plan.stake > 0
+        assert plan.tag == "scheduled_dca"
         assert s.gate.store.get("last_dca_fill_BTC/USDT") is None   # not yet filled
 
+        # freqtrade puts the plan's tag on the order it creates (see tests/contract),
+        # and that is what order_filled reads back.
         order = FakeOrder(ft_order_side="buy", status="closed", safe_amount=0.01,
-                          safe_filled=0.01, safe_price=PRICE)
+                          safe_filled=0.01, safe_price=PRICE, ft_order_tag=plan.tag)
         s.order_filled("BTC/USDT", trade, order, NOW)
         assert s.gate.store.get("last_dca_fill_BTC/USDT") == "2026-09-22T08:00:00Z"
         # ... and the next chunk is not due for another interval
@@ -213,6 +218,11 @@ class TestSleeveBSizing:
     def _sleeve(self, monkeypatch, tmp_path, targets):
         s = _make(monkeypatch, tmp_path, "b")
         s._targets = targets
+        # These tests are about sizing, not about the mandate: pretend a proposal
+        # produced the targets (the no-proposal state is tests/test_sleeve_b_mandate.py)
+        # and NAMED every one of them, which a dense pre-v4 proposal did by construction.
+        s._target_source = sleeve_b.SOURCE_PROPOSAL
+        s._named = frozenset(targets)
         return s
 
     def test_desired_stake_respects_the_dead_band(self, monkeypatch, tmp_path):

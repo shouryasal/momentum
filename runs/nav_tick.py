@@ -26,11 +26,13 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from ops import db
 from ops.config import REPO_ROOT, EarnConfig, load_config, seed_for
 from ops.lib import mode_state as ms
+from ops.lib import mode_view
 
 BENCHMARK = "benchmark"
 
@@ -181,22 +183,32 @@ def run(
     *,
     now: datetime | None = None,
     state: ms.ModeState | None = None,
+    root: Path | None = None,
 ) -> dict[str, Any]:
     """Sample every sleeve plus the benchmark. Returns a small summary for the caller."""
     ts = _iso(now or datetime.now(UTC))
     st = state if state is not None else ms.load()
+    view = mode_view.load(jdb=jdb, state=st, root=root)
     bench_pair = cfg.sleeves.benchmark.pair
     btc_price = latest_price(kdb, bench_pair)
 
     written: list[str] = []
     missing: list[str] = []
+    unproven: list[str] = []
     bench_source: tuple[sqlite3.Row, float] | None = None
 
     for sleeve in ("a", "b"):
         api = apis.get(sleeve)
         run_row = active_run(jdb, sleeve)
-        sl = st.sleeve(sleeve)
-        mode = "live" if sl.is_live else "test"
+        # This job's allowlist (ops/envwrap.sh nav_tick) has no EARN_CONSOLE_SECRET, so
+        # ``st`` was always unverified all-TEST here and a live sleeve's NAV history was
+        # stamped mode='test' — a permanent, silent mislabelling of the real-money record.
+        # ``nav_points.mode`` only admits test|live, so an unprovable sleeve is labelled
+        # 'live': never claim real money was paper.
+        mv = view.sleeve(sleeve)
+        mode = "live" if mv.assume_live else "test"
+        if mv.unknown:
+            unproven.append(sleeve)
         seed = seed_for(cfg, sleeve, state=st)
         if run_row is not None:
             seed = float(run_row["seed_usdt"])
@@ -240,6 +252,8 @@ def run(
         "ts_utc": ts,
         "written": written,
         "missing": missing,
+        #: sleeves whose mode this job could not prove — the rows were labelled 'live'
+        "mode_unproven": unproven,
         "benchmark": benchmark_written,
         "btc_price": btc_price,
     }

@@ -3,7 +3,6 @@
     "CORS_origins": [],
     "enable_openapi": false,
     "enabled": true,
-    "jwt_secret_key": "",
     "listen_ip_address": "0.0.0.0",
     "listen_port": 8080,
     "password": "",
@@ -30,7 +29,36 @@
     "name": "binance",
     "pair_whitelist": [
       "BTC/USDT",
-      "ETH/USDT"
+      "ETH/USDT",
+      "ZEC/USDT",
+      "NEAR/USDT",
+      "XRP/USDT",
+      "SOL/USDT",
+      "DOGE/USDT",
+      "TRX/USDT",
+      "UNI/USDT",
+      "TAO/USDT",
+      "PUMP/USDT",
+      "LINK/USDT",
+      "AAVE/USDT",
+      "LTC/USDT",
+      "XLM/USDT",
+      "PEPE/USDT",
+      "BCH/USDT",
+      "INJ/USDT",
+      "ONDO/USDT",
+      "ENA/USDT",
+      "WLD/USDT",
+      "ADA/USDT",
+      "SUI/USDT",
+      "HBAR/USDT",
+      "FIL/USDT",
+      "AVAX/USDT",
+      "FET/USDT",
+      "PENGU/USDT",
+      "TRUMP/USDT",
+      "DOT/USDT",
+      "XPL/USDT"
     ],
     "secret": ""
   },
@@ -44,7 +72,7 @@
     "heartbeat_interval": 60,
     "process_throttle_secs": 5
   },
-  "max_open_trades": 2,
+  "max_open_trades": 8,
   "pairlists": [
     {
       "method": "StaticPairList"
@@ -53,9 +81,6 @@
   "stake_amount": "unlimited",
   "stake_currency": "USDT",
   "strategy": "SleeveA",
-  "telegram": {
-    "enabled": false
-  },
   "timeframe": "4h",
   "tradable_balance_ratio": 0.99,
   "unfilledtimeout": {

@@ -332,6 +332,34 @@ class TestTelegram:
         out = tb.cmd_mode(cfg)
         assert "LIVE_PROPOSE" in out and "live-a-1" in out and "verified" in out
 
+    def test_mode_command_reports_a_live_sleeve_without_the_secret(
+            self, cfg, state_root, jdb, monkeypatch):
+        """Verified: ``ops/envwrap.sh telegram``'s allowlist has no
+        ``EARN_CONSOLE_SECRET``, so ``/mode`` cheerfully reported ``a=TEST b=TEST`` to the
+        operator while sleeve b traded real money."""
+        from ops import modes
+        from ops import telegram_bot as tb
+        from ops.lib import signing
+
+        modes.open_run(jdb, cfg, run_id="live-b-1", sleeve="b", mode="live",
+                       submode="execute", seed_usdt=500.0,
+                       started_utc="2026-10-27T00:00:00Z")
+        monkeypatch.delenv(signing.SECRET_ENV, raising=False)
+        out = tb.cmd_mode(cfg, jdb)
+        assert "b=live" in out and "live-b-1" in out
+        assert "signed state unverified here:" in out
+        assert "b: TEST" not in out
+
+    def test_mode_command_says_unknown_rather_than_guessing_test(
+            self, cfg, state_root, monkeypatch):
+        from ops import telegram_bot as tb
+        from ops.lib import signing
+
+        monkeypatch.delenv(signing.SECRET_ENV, raising=False)
+        out = tb.cmd_mode(cfg)
+        assert "unknown" in out and "no_evidence" in out
+        assert "a: TEST" not in out and "b: TEST" not in out
+
     def test_an_unauthorised_decision_is_impossible_through_the_handler(self, cfg):
         """Authorisation is the bot's guard, not the handler's — assert it still holds."""
         from ops.telegram_bot import authorized

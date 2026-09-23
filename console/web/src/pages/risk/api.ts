@@ -30,6 +30,24 @@ export interface Meter {
   limit: number;
   headroom: number;
   pct: number;
+  /**
+   * False when the meter divides by a NAV the console could not read. The bar must then
+   * say "unknown" — 0% and a red USDT-floor breach are both lies, and this is the
+   * operator's only view of proximity to a stop.
+   */
+  valid?: boolean;
+}
+
+export interface UtilisationPayload {
+  sleeve: string;
+  nav: number;
+  nav_valid: boolean;
+  /** `bot` | `ledger` | `caller` | `unavailable` — where NAV and the book came from. */
+  nav_source: string;
+  free_usdt: number;
+  positions: Record<string, number>;
+  nav_derived: string[];
+  meters: Record<string, Meter>;
 }
 
 export interface Anchors {
@@ -127,11 +145,17 @@ export function riskApi(client: ApiClient) {
     limits: (sleeve: Sleeve) => client.get<LimitsPayload>(`/risk/${sleeve}/limits`),
     anchors: (sleeve: Sleeve) => client.get<Anchors>(`/risk/${sleeve}/anchors`),
     mechanics: (sleeve: Sleeve) => client.get<Mechanics>(`/risk/${sleeve}/mechanics`),
-    utilisation: (sleeve: Sleeve, nav: number, freeUsdt: number) =>
-      client.get<{ sleeve: string; nav: number; meters: Record<string, Meter> }>(
-        `/risk/${sleeve}/utilisation`,
-        { nav, free_usdt: freeUsdt },
-      ),
+    /**
+     * NAV, the book and free USDT are read **server-side** from the bot (falling back to
+     * the journal's last `nav_points` row). The page used to send `nav=0, free_usdt=0`
+     * because it had no way to know them, which made every NAV-derived meter read 0% and
+     * the USDT floor read as a permanent breach. `nav` stays available as a what-if.
+     */
+    utilisation: (sleeve: Sleeve, nav?: number, freeUsdt?: number) =>
+      client.get<UtilisationPayload>(`/risk/${sleeve}/utilisation`, {
+        ...(nav === undefined ? {} : { nav }),
+        ...(freeUsdt === undefined ? {} : { free_usdt: freeUsdt }),
+      }),
     gateDecisions: (params: {
       sleeve?: Sleeve;
       severity?: Severity;

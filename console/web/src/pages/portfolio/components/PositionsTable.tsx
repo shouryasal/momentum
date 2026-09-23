@@ -22,14 +22,16 @@ function WeightCell({ position }: { position: Position }) {
   );
 }
 
-export function PositionsTable({ positions, loading }: {
+export function PositionsTable({ positions, loading, onSelect }: {
   positions: Position[];
   loading?: boolean;
+  /** Opens this coin's story in the detail pane. */
+  onSelect?: (row: Position) => void;
 }) {
   const columns: Array<DataTableColumn<Position>> = [
     {
       key: 'pair',
-      header: 'Pair',
+      header: 'Coin',
       sortValue: (row) => row.pair,
       render: (row) => (
         <Group gap={6}>
@@ -50,7 +52,7 @@ export function PositionsTable({ positions, loading }: {
       render: (row) => <Text size="sm" ff="monospace">{usdt(row.mark)}</Text> },
     {
       key: 'upnl',
-      header: 'uPnL',
+      header: 'Up or down',
       align: 'right',
       sortValue: (row) => row.upnl_usdt,
       render: (row) => (
@@ -59,11 +61,11 @@ export function PositionsTable({ positions, loading }: {
         </Text>
       ),
     },
-    { key: 'weight', header: 'Weight vs cap', sortValue: (row) => row.weight,
+    { key: 'weight', header: 'Share of the pot vs the most allowed', sortValue: (row) => row.weight,
       render: (row) => <WeightCell position={row} /> },
     {
       key: 'entries',
-      header: 'Entries',
+      header: 'Buys used',
       align: 'center',
       sortValue: (row) => row.entries_used,
       render: (row) => (
@@ -92,7 +94,7 @@ export function PositionsTable({ positions, loading }: {
     },
     {
       key: 'tp',
-      header: 'Next TP',
+      header: 'Next profit-taking step',
       render: (row) =>
         row.next_tp_rung ? (
           <Text size="xs">
@@ -112,8 +114,9 @@ export function PositionsTable({ positions, loading }: {
       rows={positions}
       rowKey={(row) => row.pair}
       loading={loading}
+      {...(onSelect ? { onRowClick: onSelect } : {})}
       emptyTitle="No open positions"
-      emptyDescription="The sleeve is flat, or the bot is not running."
+      emptyDescription="This bot holds nothing right now, or it is not running."
     />
   );
 }

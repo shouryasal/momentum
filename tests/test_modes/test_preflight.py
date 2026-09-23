@@ -17,6 +17,7 @@ from ops import db
 from ops import preflight as pf
 from ops.lib import config_guard
 from ops.lib import mode_state as ms
+from ops.lib.exchange_endpoints import Venue
 from tests.test_modes.conftest import seed_run, write_mode
 
 NOW = datetime(2026, 10, 27, 5, 0, tzinfo=UTC)
@@ -47,6 +48,20 @@ def _exchange_info(pairs):
             for p in pairs
         ]
     }
+
+
+def venue_prober(home):
+    """A prober that authenticates the key at ``home`` and is refused everywhere else.
+
+    That is what ``verify_credential_venue`` demands for ``confirmed``: the positive AND
+    every negative. A prober that simply said "authenticated" everywhere would be a key
+    that works on production too, which is a ``mismatch``, not a pass.
+    """
+
+    def probe(venue, _credential):
+        return "authenticated" if venue is home else "rejected"
+
+    return probe
 
 
 def _host_ok() -> pf.HostFacts:
@@ -123,6 +138,8 @@ def ready(cfg, state_root, jdb, kdb, monkeypatch):
         root=state_root,
         now=NOW,
         state=ms.load(),
+        venue=Venue.LIVE,
+        venue_probe=venue_prober(Venue.LIVE),
         bot_status=lambda s: {"up": True, "strategy": getattr(cfg.sleeves, s).strategy},
         exchange_restrictions=lambda s: dict(GOOD_RESTRICTIONS),
         exchange_account=lambda s: json.loads(json.dumps(GOOD_ACCOUNT)),
@@ -216,6 +233,74 @@ class TestEachBlockingItem:
             (),
         )
         assert "monthly loss lock" in _item(_run(cfg, ready), "kill_clear").detail
+
+    def test_a_run_scoped_monthly_lock_still_blocks(self, cfg, ready, jdb):
+        """Verified HIGH: the blocking ``kill_clear`` monthly-lock check was INERT.
+
+        ``RiskGate`` wraps its store in ``NamespacedStateStore`` whenever the runtime file
+        names a run id — which it always does for a real run — so the gate writes
+        ``run:<run_id>:monthly_locked``. The bare query found nothing, the evidence read
+        ``monthly_locked: false``, the check passed, and a human was cleared to arm a
+        sleeve sitting under its own monthly loss lock. ``ops.lib.risk_resume`` read the
+        same value correctly, so the Risk page and the preflight disagreed about one fact.
+        """
+        db.write(
+            jdb,
+            "INSERT INTO risk_state(sleeve, key, value, updated_utc)"
+            " VALUES ('a','run:test-a-1:monthly_locked','1','2026-10-01T00:00:00Z')",
+            (),
+        )
+        item = _item(_run(cfg, ready), "kill_clear")
+        assert item.status == pf.FAIL
+        assert "monthly loss lock" in item.detail
+        assert item.evidence["monthly_locked"] is True
+        assert item.evidence["risk_state_run_id"] == "test-a-1"
+
+    def test_a_lock_from_a_different_run_does_not_block(self, cfg, ready, jdb):
+        """Scoped, not just prefix-blind: a lock the live gate itself cannot see (it
+        belongs to another run's namespace) is not this run's lock."""
+        db.write(
+            jdb,
+            "INSERT INTO risk_state(sleeve, key, value, updated_utc)"
+            " VALUES ('a','run:test-a-OLD:monthly_locked','1','2026-01-01T00:00:00Z')",
+            (),
+        )
+        item = _item(_run(cfg, ready), "kill_clear")
+        assert item.evidence["monthly_locked"] is False
+        assert item.status == pf.PASS
+
+    def test_an_unprovable_current_mode_refuses_to_arm(self, cfg, ready):
+        """``mode_view``'s table has always said ``ops.preflight``: "refuse to arm".
+
+        No such check existed, so a sleeve whose *present* mode could not be established
+        at all — no verified mode file, nothing rendered in ``var/runtime``, nothing in
+        the journal — could still be walked into LIVE. Arming is a transition *from* a
+        state; a state the machine cannot name is not one to leave blind.
+        """
+        from ops.lib import mode_state as ms_
+
+        ready.state = ms_.default_state(ms_.REASON_NO_SECRET)
+        ready.jdb = None
+        item = _item(_run(cfg, ready), "kill_clear")
+        assert item.status == pf.FAIL
+        assert "refusing to arm from an unprovable state" in item.detail
+        assert item.evidence["mode_liveness"] == "unknown"
+
+    def test_a_provable_mode_arms_normally(self, cfg, ready):
+        """The console holds the secret, so the signed authority answers and this never
+        fires in the normal case — the baseline fixture is that case."""
+        item = _item(_run(cfg, ready), "kill_clear")
+        assert item.status == pf.PASS
+        assert item.evidence["mode_liveness"] == "test"
+
+    def test_disarming_is_never_blocked_by_not_knowing(self, cfg, ready):
+        """The way back to TEST must not depend on proving where we are."""
+        from ops.lib import mode_state as ms_
+
+        ready.state = ms_.default_state(ms_.REASON_NO_SECRET)
+        ready.jdb = None
+        item = _item(_run(cfg, ready, target="TEST", submode=None), "kill_clear")
+        assert item.status == pf.PASS
 
     def test_bot_down(self, cfg, ready):
         ready.bot_status = lambda s: {"up": s != "a"}

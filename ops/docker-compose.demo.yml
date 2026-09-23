@@ -1,0 +1,35 @@
+# Demo-mode override for a MANUAL round trip against Binance Spot Demo Mode.
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d freqtrade-a
+#
+# The automated path does NOT use this file: `ops.modes` renders
+# var/runtime/compose.override.yml from the signed mode state, which picks the credential
+# names from the sleeve's mode and stamps EARN_VENUE. This file exists for the operator
+# rehearsal in docs/design/demo-mode.md §7, where there is no signed mode file yet.
+#
+# Requires DEMO credentials in .env, under the demo-only names:
+#   BINANCE_DEMO_KEY / BINANCE_DEMO_SECRET
+# minted at Binance account UI -> Demo Trading -> API Key Management, spot trading
+# ENABLED and withdrawals DISABLED. They are deliberately not the live names
+# (BINANCE_KEY_A/BINANCE_SECRET_A), so a demo container cannot be handed a live key by a
+# one-word .env edit, and ops/gen_freqtrade_config.py refuses to render a layer that
+# mentions the wrong venue's name at all.
+#
+# THIS FILE REPLACES ops/docker-compose.testnet.yml, which was deleted rather than fixed.
+# That file set an exchange URL override env var, which freqtrade 2026.8 reads from
+# NOWHERE (measured — docs/design/demo-mode.md §3a): the config key is accepted, never
+# looked up, and the Week-3 rehearsal therefore sent testnet credentials to the
+# PRODUCTION host. There is no URL line here, in any form, on purpose:
+# `ops.lib.exchange_endpoints.assert_no_exchange_url_override` refuses one, and demo
+# routing comes from exchange.demo_trading in var/runtime/freqtrade-<s>.mode.json, which
+# makes ccxt ASSIGN its whole demo URL map (sapi/papi/fapi included) instead of merging
+# over the production one.
+#
+# dry_run, demo_trading and _ft_has_params all arrive through that mode overlay, so this
+# file never decides live-ness — the invariant that only a verified mode state can take a
+# bot out of dry-run is preserved exactly.
+services:
+  freqtrade-a:
+    environment:
+      EARN_VENUE: "demo"
+      FREQTRADE__EXCHANGE__KEY: "${BINANCE_DEMO_KEY}"
+      FREQTRADE__EXCHANGE__SECRET: "${BINANCE_DEMO_SECRET}"

@@ -264,7 +264,7 @@ def startup_recovery(app: FastAPI) -> dict[str, Any]:
 
     1. ``mode_service.recover_on_start`` — a transition interrupted mid-flight leaves a
        sleeve in ``ARMING``/``DISARMING``. Without this it sits there until somebody
-       notices and clicks ``GET /api/mode/recover``.
+       notices and clicks ``POST /api/mode/recover``.
     2. ``backtest_service.mark_interrupted`` and ``jobs.mark_interrupted`` — both the
        backtest queue and the job runner are in-process, so nothing that was ``queued``
        or ``running`` when the console died is running now. Those rows are lies, and an
@@ -495,12 +495,34 @@ def _bad_topics(message: str) -> StarletteHTTPException:
     )
 
 
+class _SpaStaticFiles(StaticFiles):
+    """StaticFiles that falls back to ``index.html`` for client-side routes.
+
+    The console is a single-page app: ``/decisions`` is a route React Router owns, not a
+    file on disk. Plain ``StaticFiles`` 404s it, so a deep link, a bookmark or a browser
+    reload anywhere but ``/`` lands on "Not Found". Anything under ``/api`` is mounted
+    before this and never reaches here, so an unknown API path still 404s as JSON.
+    """
+
+    async def get_response(self, path: str, scope: Any) -> Any:
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            # Starlette RAISES 404 for a missing file rather than returning one.
+            if exc.status_code != 404 or path.startswith("api/"):
+                raise
+            return await super().get_response("index.html", scope)
+        if response.status_code == 404 and not path.startswith("api/"):
+            return await super().get_response("index.html", scope)
+        return response
+
+
 def _mount_static(app: FastAPI, settings: ConsoleSettings) -> None:
     """Serve the built frontend when it exists; the API keeps priority over ``/``."""
     if not settings.static_dir.is_dir():  # pragma: no cover - always present in the repo
         return
     app.router.routes.append(
-        Mount("/", app=StaticFiles(directory=str(settings.static_dir), html=True), name="static")
+        Mount("/", app=_SpaStaticFiles(directory=str(settings.static_dir), html=True), name="static")
     )
 
 

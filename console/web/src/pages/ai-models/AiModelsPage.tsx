@@ -207,15 +207,15 @@ export function AiModelsPage() {
       <Group grow>
         <StatCard
           label="spent this month"
-          value={`$${(providers.data?.month.total_usd ?? 0).toFixed(2)}`}
+          value={`$${(providers.data?.month?.total_usd ?? 0).toFixed(2)}`}
           hint="metered calls only; local inference is free"
         />
         <StatCard
           label="rate limit"
           value={
-            providers.data?.rate_limit.utilization != null
+            providers.data?.rate_limit?.utilization != null
               ? `${(providers.data.rate_limit.utilization * 100).toFixed(0)}%`
-              : (providers.data?.rate_limit.status ?? 'clear')
+              : (providers.data?.rate_limit?.status ?? 'clear')
           }
           hint="subscription window utilisation"
         />

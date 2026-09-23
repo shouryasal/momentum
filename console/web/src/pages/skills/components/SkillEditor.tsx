@@ -32,11 +32,23 @@ function FindingList({ findings }: { findings: LintFinding[] }) {
 }
 
 /**
+ * The tier-2 part of a skill folder a server-normalised path belongs to.
+ *
+ * `console.services.skills_service.file_tier` is the one authority for *whether* a file is
+ * tier 2 (`TIER2_PARTS`); this only names the folder it sits in, from the path the server
+ * echoed back, so the sentence cannot claim a rule the server did not apply.
+ */
+function tier2Part(path: string | undefined): string {
+  const head = (path ?? '').split('/')[0] ?? '';
+  return head && head !== path ? `${head}/**` : (path ?? 'this file');
+}
+
+/**
  * File tree plus editor for one skill.
  *
- * A `scripts/**` file is tier 2: the editor still opens it, and the save asks the server,
- * which refuses without a fresh step-up. Every save is linted server side; errors roll the
- * file back and come back here as the reason.
+ * A tier-2 file is one the server marked `tier: 'tier2'`: the editor still opens it, and
+ * the save asks the server, which refuses without a fresh step-up. Every save is linted
+ * server side; errors roll the file back and come back here as the reason.
  */
 export function SkillEditor({ name }: { name: string }) {
   const tree = useSkillTree(name);
@@ -83,10 +95,14 @@ export function SkillEditor({ name }: { name: string }) {
       </Paper>
 
       <Stack gap="sm" style={{ flex: 1, minWidth: 0 }}>
-        {file.data?.requires_step_up ? (
-          <Alert color="orange" title="This file is tier 2">
-            <Code>scripts/**</Code> is human-only: an automated run cannot write it at all,
-            and saving it here needs a fresh step-up.
+        {/* The tier, and so the sentence, come from the server. Hardcoding `scripts/**`
+            here told the operator `tests/**` was freely editable long after it became
+            tier 2 as well. */}
+        {file.data?.tier === 'tier2' ? (
+          <Alert color="orange" title="This file is tier 2" data-testid="tier2-notice">
+            <Code>{tier2Part(file.data.path)}</Code> is human-only: an automated run cannot
+            write it at all
+            {file.data.requires_step_up ? ', and saving it here needs a fresh step-up' : ''}.
           </Alert>
         ) : null}
 

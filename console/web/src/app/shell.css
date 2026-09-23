@@ -28,3 +28,96 @@ body,
 #root {
   height: 100%;
 }
+
+/* ------------------------------------------------------------------ master + detail
+ *
+ * Every screen is a readable list on the left and, when a row is open, the whole story
+ * behind that row on the right.  The two panes are ONE dom tree at every window size —
+ * the narrow layout is a media query, not a second component — so a test, a screen
+ * reader and a deep link all see the same thing however wide the window happens to be.
+ */
+
+.earn-md {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--mantine-spacing-md);
+  width: 100%;
+}
+
+.earn-md__master {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.earn-md__detail {
+  flex: 0 0 auto;
+  width: var(--earn-detail-width, 460px);
+  max-width: 100%;
+  position: sticky;
+  /* Under the fixed header, not behind it. */
+  top: calc(var(--app-shell-header-height, 76px) + var(--mantine-spacing-xs));
+  max-height: calc(100vh - var(--app-shell-header-height, 76px) - var(--mantine-spacing-xl));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* The drag handle that resizes the pane.  Pointer-only: keyboard users get the width
+ * buttons in the pane's header, because a drag is not a keyboard gesture. */
+.earn-md__grip {
+  flex: 0 0 auto;
+  width: 8px;
+  align-self: stretch;
+  margin-inline: -4px;
+  cursor: col-resize;
+  border-radius: 4px;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  touch-action: none;
+}
+
+.earn-md__grip:hover,
+.earn-md__grip:focus-visible {
+  background: var(--mantine-color-default-border);
+}
+
+.earn-md__body {
+  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Narrow window: the detail pane becomes a sheet over the list.  Nothing is removed —
+ * the same markup is simply laid over the master pane, which is what a phone-width
+ * window can actually show. */
+@media (max-width: 1080px) {
+  .earn-md {
+    display: block;
+  }
+
+  .earn-md__grip {
+    display: none;
+  }
+
+  .earn-md__detail {
+    position: fixed;
+    inset: var(--app-shell-header-height, 76px) 0 0 0;
+    width: auto;
+    max-height: none;
+    z-index: 190;
+    border-radius: 0;
+  }
+}
+
+/* The safety strip never wraps out of the fixed header and swallows the clicks below it;
+ * it scrolls sideways instead. */
+.earn-safety-strip {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.earn-safety-strip::-webkit-scrollbar {
+  display: none;
+}

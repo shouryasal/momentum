@@ -4,8 +4,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { shellKeys } from '../api/queryClient';
-import { ROUTES } from '../routes';
+import { DEVELOPER_ROUTE_IDS, ROUTES, isPrimaryRoute, routeBlurb } from '../routes';
 import { useEndpoints } from './ApiContext';
+import { useViewMode } from './ViewModeContext';
 import {
   searchCommands,
   useCommands,
@@ -13,22 +14,42 @@ import {
   type Command,
 } from './commandRegistry';
 
-/** Navigation commands for every page; feature pages add their own actions. */
+/**
+ * Navigation commands for every page; feature pages add their own actions.
+ *
+ * Every route is here in both views, which is what makes the operator navigation safe to
+ * shorten: a screen that is not one of the five destinations is still one Ctrl-K away, and
+ * the subtitle is the plain-words line rather than the builder's summary, so searching for
+ * what you want to do finds the screen that does it.
+ */
 export function useShellCommands(): void {
+  const view = useViewMode();
   const commands = useMemo<Command[]>(
-    () =>
-      ROUTES.map((route) => ({
+    () => [
+      ...ROUTES.map((route) => ({
         id: `nav:${route.id}`,
-        title: route.title,
-        subtitle: route.description,
+        title: isPrimaryRoute(route.id) ? route.title : `${route.title} (developer)`,
+        subtitle: routeBlurb(route.id),
         group: 'Pages',
-        keywords: [route.path, route.id, route.group],
-        run: (ctx) => {
+        keywords: [route.path, route.id, route.group, route.description],
+        run: (ctx: { navigate: (to: string) => void; close: () => void }) => {
           ctx.navigate(route.path);
           ctx.close();
         },
       })),
-    [],
+      {
+        id: 'view:developer',
+        title: view.developer ? 'Hide the developer screens' : 'Show the developer screens',
+        subtitle: `The other ${DEVELOPER_ROUTE_IDS.length} screens: labs, internals, audit`,
+        group: 'Console',
+        keywords: ['advanced', 'builder', 'nav', 'navigation'],
+        run: (ctx) => {
+          view.toggle();
+          ctx.close();
+        },
+      },
+    ],
+    [view],
   );
   useRegisterCommands(commands);
 }

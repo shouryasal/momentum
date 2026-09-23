@@ -27,7 +27,14 @@ def render(jdb, cfg, now: datetime) -> str:
     r = cfg.risk
     lines = [f"# Risk weekly — {now.strftime('%Y-%m-%d')}", "",
              "| control | limit |", "|---|---|",
-             f"| max weight | BTC {r.max_weight['BTC']}, others {r.max_weight['default']} |",
+             f"| max weight | BTC {r.max_weight['BTC']}, ETH {r.max_weight.get('ETH')},"
+             f" major {r.tier_caps.major}, satellite {r.tier_caps.satellite},"
+             f" untiered **0** |",
+             f"| book width | {r.max_open_positions} positions,"
+             f" {r.max_satellite_positions} satellites,"
+             f" satellite gross {r.max_satellite_gross:.0%} of NAV |",
+             f"| beta / correlation | beta to BTC <= {r.max_beta_to_btc},"
+             f" avg pairwise corr <= {r.max_avg_pairwise_corr} (60d, on entry) |",
              f"| gross exposure / USDT floor | {r.max_gross_exposure} / {r.usdt_floor} |",
              f"| daily / monthly stop | -{r.daily_loss_stop:.0%} (lock {r.daily_stop_lock_hours}h)"
              f" / -{r.monthly_loss_stop:.0%} (human resume) |",

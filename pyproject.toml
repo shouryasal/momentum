@@ -54,9 +54,11 @@ packages = [
     "ops",
     "ops.lib",
     "runs",
+    "runs.features",
     "runs.llm",
     "runs.llm.providers",
     "runs.signals",
+    "runs.watch",
     "schemas",
     "strategies",
 ]

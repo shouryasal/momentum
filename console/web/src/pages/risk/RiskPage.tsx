@@ -8,7 +8,7 @@ import { usePageCommands } from '@/app/commandRegistry';
 import { EmptyState } from '@/components';
 
 import { riskApi, type Anchors, type FlagsPayload, type GateDecision, type Meter,
-  type RiskOverview, type Severity, type Sleeve } from './api';
+  type RiskOverview, type Severity, type Sleeve, type UtilisationPayload } from './api';
 import { GateLog } from './components/GateLog';
 import { LimitsTable } from './components/LimitsTable';
 import { MechanicsPanel } from './components/MechanicsPanel';
@@ -33,10 +33,19 @@ const METER_HELP: Record<string, string> = {
   usdt_floor: 'USDT held. This one is a FLOOR: healthy means staying above it.',
 };
 
-/** How much of each allowed drawdown has been used, from the gate's own anchors. */
-function StopProximity({ anchors, nav }: { anchors: Anchors; nav: number }) {
+/**
+ * How much of each allowed drawdown has been used, from the gate's own anchors.
+ *
+ * With no NAV both bars used to short-circuit to 0%, i.e. "nothing used", however far NAV
+ * had actually fallen. They are marked invalid instead, so the bar reads "unknown".
+ */
+function StopProximity({ anchors, nav, navValid }: {
+  anchors: Anchors;
+  nav: number;
+  navValid: boolean;
+}) {
   const used = (anchor: number | null, stop: number) =>
-    anchor && anchor > 0 && nav > 0 ? Math.max(0, (1 - nav / anchor) / stop) : 0;
+    anchor && anchor > 0 && nav > 0 && stop > 0 ? Math.max(0, (1 - nav / anchor) / stop) : 0;
   const rows: Array<[string, number, number | null, number]> = [
     ['daily stop', used(anchors.day_anchor_nav, anchors.daily_loss_stop),
       anchors.day_anchor_nav, anchors.daily_loss_stop],
@@ -45,16 +54,22 @@ function StopProximity({ anchors, nav }: { anchors: Anchors; nav: number }) {
   ];
   return (
     <Stack gap="sm">
-      {rows.map(([label, pct, anchor, stop]) => (
-        <MeterBar
-          key={label}
-          label={label}
-          unit="fraction"
-          meter={{ used: pct * stop, limit: stop, headroom: stop - pct * stop, pct }}
-          help={`anchor ${anchor ? anchor.toFixed(2) : '—'} USDT · stop at ${
-            (stop * 100).toFixed(0)}%`}
-        />
-      ))}
+      {rows.map(([label, pct, anchor, stop]) => {
+        const valid = navValid && nav > 0 && Boolean(anchor) && (anchor ?? 0) > 0;
+        return (
+          <MeterBar
+            key={label}
+            label={label}
+            unit="fraction"
+            meter={{ used: pct * stop, limit: stop, headroom: stop - pct * stop, pct, valid }}
+            unknownReason={
+              navValid ? 'unknown — no anchor stamped yet' : 'unknown — NAV could not be read'
+            }
+            help={`anchor ${anchor ? anchor.toFixed(2) : '—'} USDT · stop at ${
+              (stop * 100).toFixed(0)}%`}
+          />
+        );
+      })}
     </Stack>
   );
 }
@@ -144,6 +159,7 @@ export default function RiskPage() {
   const [overview, setOverview] = useState<RiskOverview | null>(null);
   const [sleeve, setSleeve] = useState<Sleeve>('a');
   const [meters, setMeters] = useState<Record<string, Meter>>({});
+  const [util, setUtil] = useState<UtilisationPayload | null>(null);
   const [decisions, setDecisions] = useState<GateDecision[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [severity, setSeverity] = useState('all');
@@ -156,9 +172,11 @@ export default function RiskPage() {
     try {
       const data = await risk.overview();
       setOverview(data);
-      const nav = data.navs?.[sleeve] ?? 0;
-      const util = await risk.utilisation(sleeve, nav, 0);
-      setMeters(util.meters);
+      // No nav/free_usdt arguments: the server reads the real portfolio. Passing 0 here
+      // is what used to make every NAV-derived meter read 0% with a false floor breach.
+      const result = await risk.utilisation(sleeve);
+      setUtil(result);
+      setMeters(result.meters ?? {});
       setError(null);
     } catch (e) {
       setError(errorMessage(e));
@@ -189,8 +207,13 @@ export default function RiskPage() {
   }, [loadDecisions]);
 
   const current = overview?.sleeves?.[sleeve];
-  const nav = overview?.navs?.[sleeve] ?? 0;
-  const meterRows = useMemo(() => Object.entries(meters), [meters]);
+  // The utilisation read is authoritative (it saw the bot); the overview's journal NAV is
+  // the fallback for the header when the utilisation call has not landed yet.
+  const nav = util?.nav || overview?.navs?.[sleeve] || 0;
+  const navValid = util ? util.nav_valid : nav > 0;
+  const navSource = util?.nav_source ?? 'unknown';
+  // A payload without `meters` is an install that has not run yet, not a broken page.
+  const meterRows = useMemo(() => Object.entries(meters ?? {}), [meters]);
 
   usePageCommands('risk', [
     {
@@ -242,7 +265,9 @@ export default function RiskPage() {
         <Title order={2}>Risk</Title>
         <Group gap="xs">
           {overview.kill ? <Badge color="red" size="lg">KILL ENGAGED</Badge> : null}
-          <Text size="sm" c="dimmed">NAV {nav ? fmt(nav, 'usdt') : '—'}</Text>
+          <Text size="sm" c={navValid ? 'dimmed' : 'orange'} data-testid="risk-nav">
+            NAV {navValid ? `${fmt(nav, 'usdt')} (${navSource})` : 'unknown'}
+          </Text>
           {loading ? <Loader size="xs" /> : null}
         </Group>
       </Group>
@@ -263,7 +288,7 @@ export default function RiskPage() {
               <AnchorsCard anchors={current.anchors} onResume={() => setResumeOpen(true)} />
               <Card withBorder padding="md">
                 <Text fw={600} mb="sm">Progress to stop</Text>
-                <StopProximity anchors={current.anchors} nav={nav} />
+                <StopProximity anchors={current.anchors} nav={nav} navValid={navValid} />
               </Card>
               <FlagsCard flags={overview.flags} />
             </Stack>
@@ -271,7 +296,14 @@ export default function RiskPage() {
           <Grid.Col span={{ base: 12, md: 8 }}>
             <Stack>
               <Card withBorder padding="md">
-                <Text fw={600} mb="sm">Churn, turnover and fee budget</Text>
+                <Group justify="space-between" mb="sm">
+                  <Text fw={600}>Churn, turnover and fee budget</Text>
+                  {!navValid ? (
+                    <Badge color="orange" variant="light" data-testid="nav-unknown">
+                      NAV unavailable — exposure meters unknown
+                    </Badge>
+                  ) : null}
+                </Group>
                 <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
                   {meterRows.map(([name, meter]) => (
                     <MeterBar

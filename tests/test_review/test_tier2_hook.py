@@ -20,6 +20,7 @@ HOOK = REPO_ROOT / ".claude" / "hooks" / "protect_tier2.py"
 sys.path.insert(0, str(REPO_ROOT / ".claude" / "hooks"))
 from tier2_paths import (  # noqa: E402
     TIER2_PATTERNS,
+    bash_denial,
     bash_reaches_network,
     bash_reads_denied,
     bash_touches_tier2,
@@ -264,12 +265,60 @@ def test_bash_reaching_the_console_or_the_network_is_denied(cmd):
 @pytest.mark.parametrize("cmd", [
     "python3 .claude/skills/post-mortem/scripts/grade_inputs.py --out x.json",
     "git add -A",
-    "pytest .claude/skills/post-mortem/tests",
+    "cat reports/weekly.md",
+    "python3 -m evals.skill_lint .claude/skills/post-mortem",
 ])
 def test_ordinary_bash_is_allowed(cmd):
     assert bash_reaches_network(cmd) is None, cmd
     assert run_hook({"tool_name": "Bash", "tool_input": {"command": cmd},
                      "cwd": str(REPO_ROOT)}) is None, cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    # ``pytest`` over a skill's tests/** was ALLOWED, and that was the hole: tests/** is
+    # tier 1, so the session wrote the file and then had the runner import it — as the
+    # owner, in the job environment, with no hook anywhere near the subprocess.
+    "pytest .claude/skills/post-mortem/tests",
+    "pytest .claude/skills/post-mortem/tests/test_zz.py",
+    "python3 -m pytest .claude/skills/post-mortem/tests",
+    # every other way of running code this hook cannot read
+    "python -c \"open('config/earn.yaml','w').write('x')\"",
+    "/home/shourya/earn-dev/.venv/bin/python -c 'import os'",
+    "sh -c 'rm ops/killdir/KILL'",
+    "perl -pi -e 's/a/b/' strategies/riskgate.py",
+    "gawk -i inplace '{print}' config/earn.yaml",
+    "cat <<'EOF' > notes.md\nhello\nEOF",
+    # writers whose destinations live inside the payload, not on the command line
+    "tar -xf payload.tar -C .",
+    "unzip payload.zip",
+    "git apply /tmp/x.patch",
+    "patch -p1 < /tmp/x.patch",
+    "echo x | xargs -I{} cp {} config/",
+    "find . -name '*.py' -exec sed -i s/a/b/ {} +",
+    "base64 -d payload.b64 > run.py",
+])
+def test_every_way_of_running_unread_code_is_denied(cmd):
+    """The WRITE_TOKENS list could only deny verbs it had heard of; this is the inversion.
+
+    Naming a tier-2 path, or running an interpreter whose payload the hook cannot read, is
+    the trigger — not a recognised write verb.
+    """
+    assert bash_denial(cmd), cmd
+    out = run_hook({"tool_name": "Bash", "tool_input": {"command": cmd},
+                    "cwd": str(REPO_ROOT)})
+    assert denied(out), cmd
+
+
+def test_an_absolute_path_into_the_live_checkout_is_still_tier_two():
+    """``is_tier2`` matched the raw string, so ``/home/me/earn/config/earn.yaml``
+    normalised to a path starting ``home/`` that no pattern matched."""
+    live = str(REPO_ROOT)
+    assert bash_denial(f"cp /tmp/x {live}/config/earn.yaml")
+    assert bash_denial(f"rm {live}/ops/killdir/KILL")
+    # somewhere the session has no business at all: unclassifiable ⇒ human-only
+    assert bash_denial("cp /tmp/x /etc/passwd")
+    # ordinary scratch space stays scratch space
+    assert bash_denial("cp reports/a.md /tmp/a.md") is None
 
 
 @pytest.mark.parametrize("cmd", ["cat .env", "source .env", "grep KEY .env.local",

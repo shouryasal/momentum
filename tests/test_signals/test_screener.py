@@ -144,6 +144,32 @@ class TestScreen:
         assert out.score("sig-1") == 0.95
         assert provider.calls == 2
 
+    def test_the_escalated_call_does_not_lose_the_first_calls_cost(self, env, provider):
+        """``outcome = second if second.ok else outcome`` replaced the whole outcome, so
+        the reported ``cost_usd`` became the SECOND call's alone: the gray-zone re-run
+        silently dropped the first call's spend from the scan report and from everything
+        that reads it. Only ``attempts`` was ever accumulated."""
+        cfg, features, root = env
+        lo, hi = cfg.signals.scanner.screen.gray_zone
+        provider.script([
+            scripted(text=json.dumps(_answer(score=(lo + hi) / 2)), cost_usd=0.004),
+            scripted(text=json.dumps(_answer(score=0.95)), cost_usd=0.011),
+        ])
+        out = screenerlib.screen(cfg, CANDIDATES, features, root=root)
+        assert out.escalated is True
+        assert out.cost_usd == pytest.approx(0.015)
+
+    def test_an_escalated_call_that_fails_still_costs_money(self, env, provider):
+        cfg, features, root = env
+        lo, hi = cfg.signals.scanner.screen.gray_zone
+        provider.script([
+            scripted(text=json.dumps(_answer(score=(lo + hi) / 2)), cost_usd=0.004),
+            scripted(text="not json at all", cost_usd=0.011),
+        ])
+        out = screenerlib.screen(cfg, CANDIDATES, features, root=root)
+        assert out.ok and out.escalated is False       # the re-run gave nothing usable
+        assert out.cost_usd == pytest.approx(0.015)
+
     def test_a_confident_score_does_not_escalate(self, env, provider):
         cfg, features, root = env
         provider.script([scripted(text=json.dumps(_answer(score=0.95)))])
@@ -164,6 +190,64 @@ class TestScreen:
         assert "BTC/USDT.close" in prompt
         assert "real-hash" in prompt
         assert provider.requests[0].output_schema == screen_schema()
+
+    def test_each_block_is_substituted_exactly_once(self, env, provider):
+        """v1's header listed the placeholders WITH their braces, so the renderer
+        substituted the header too and every scan prompt carried the features and the
+        news twice — 15k wasted tokens at a 107-pair watchlist."""
+        cfg, features, root = env
+        provider.script([scripted(text=json.dumps(_answer()))])
+        screenerlib.screen(cfg, CANDIDATES, features, root=root)
+        prompt = provider.requests[0].prompt
+        assert prompt.count(features.render()) == 1
+        assert prompt.count('"news_hash": "real-hash"') == 1
+        assert "{{" not in prompt          # nothing left unfilled either
+
+    def test_the_prompt_says_which_pairs_carry_which_features(self, env, provider):
+        """A missing rich key on a watchlist-only pair is an absent measurement, not a
+        weak signal — the model can only know that if the prompt tells it."""
+        cfg, features, root = env
+        provider.script([scripted(text=json.dumps(_answer()))])
+        screenerlib.screen(cfg, CANDIDATES, features, root=root)
+        prompt = provider.requests[0].prompt
+        assert '"rich"' in prompt and '"cheap_keys"' in prompt
+        assert "ret_24h" in prompt
+
+    def test_the_call_is_journaled_against_the_scan(self, env, dbs, provider):
+        """The screener runs through the router of record, so every attempt is a row.
+
+        The whole scan path used to die on a bad ``chain.run_task`` signature and report
+        ``provider_down``, with nothing in ``llm_calls`` to say so — which is why the
+        scan_id/jdb wiring is pinned here rather than left implicit.
+        """
+        cfg, features, root = env
+        _, jdb, kdb = dbs
+        provider.script([scripted(text=json.dumps(_answer()), cost_usd=0.003)])
+        out = screenerlib.screen(cfg, CANDIDATES, features, root=root, jdb=jdb, kdb=kdb,
+                                 scan_id="scan-42")
+        assert out.ok, out.error
+        rows = jdb.execute("SELECT task, run_ref, stage, provider, status, cost_usd"
+                           " FROM llm_calls").fetchall()
+        assert [tuple(r) for r in rows] == [
+            ("scan", "scan-42", "scan", "claude:subscription", "ok", 0.003)]
+
+    def test_the_gray_zone_rerun_shares_the_scans_deadline_budget(self, env, provider):
+        """Both calls come off ONE ``RunCtx``: the scan's own wall-clock budget."""
+        cfg, features, root = env
+        lo, hi = cfg.signals.scanner.screen.gray_zone
+        seen: list[object] = []
+
+        def runner(task, prompt, **kwargs):
+            seen.append(kwargs["run_ctx"])
+            score = (lo + hi) / 2 if len(seen) == 1 else 0.95
+            from runs.signals import run_task
+            provider.script([scripted(text=json.dumps(_answer(score=score)))])
+            return run_task(task, prompt, **kwargs)
+
+        out = screenerlib.screen(cfg, CANDIDATES, features, root=root, runner=runner)
+        assert out.escalated is True and out.score("sig-1") == 0.95
+        assert len(seen) == 2 and seen[0] is seen[1]
+        assert seen[0].stage == "scan" and seen[0].deadline_at is not None
 
 
 class TestChainFloors:

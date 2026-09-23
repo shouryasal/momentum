@@ -25,6 +25,7 @@ import json
 import re
 import sqlite3
 import sys
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -87,13 +88,18 @@ def now_iso(now: datetime) -> str:
 class Ingest:
     def __init__(self, cfg: EarnConfig, kdb: sqlite3.Connection,
                  http: httpx.Client | None = None, now: datetime | None = None,
-                 root: Path | None = None, stage_runner=None):
+                 root: Path | None = None, stage_runner=None,
+                 jdb: sqlite3.Connection | None = None):
         self.cfg = cfg
         self.kdb = kdb
         self.http = http or httpx.Client(timeout=10)
         self.now = now or datetime.now(UTC)
         self.root = root or REPO_ROOT
         self.stage_runner = stage_runner  # set -> legacy single-model call (tests, P3 shim)
+        #: The journal the classifier's router attempts are written to. Optional only
+        #: because most phases never touch a model; :meth:`_journal` opens the live
+        #: journal for the duration of the classify call when one was not handed in.
+        self.jdb = jdb
 
     # ------------------------------------------------------------------ vocabularies
 
@@ -334,6 +340,33 @@ class Ingest:
                 .replace("{{ASSETS}}", json.dumps(sorted(self.asset_keywords)))
                 .replace("{{ITEMS}}", json.dumps(pending, indent=2, sort_keys=True)))
 
+    @contextmanager
+    def _journal(self):
+        """The journal connection the router needs, opened for this call if need be.
+
+        ``run_task`` without a ``jdb`` writes no ``llm_calls`` row, gets no circuit
+        breaker and no ``tasks.classify`` monthly budget: the classifier could then hammer
+        a dead credential every 15 minutes for ever, spend outside every cap, and show the
+        console an idle system. The journal is the ledger those three read, so this phase
+        opens it exactly the way :meth:`_maybe_trigger` opens it for the scanner.
+
+        A journal that cannot be opened yields ``None`` rather than failing the phase —
+        the classifier never escalates, and losing the ledger must not lose the labels.
+        """
+        if self.jdb is not None:
+            yield self.jdb
+            return
+        try:
+            conn = db.connect(self.root / self.cfg.paths.journal_db)
+        except Exception as e:  # noqa: BLE001 — see the docstring
+            print(f"classify: journal unavailable ({e})", file=sys.stderr)
+            yield None
+            return
+        try:
+            yield conn
+        finally:
+            conn.close()
+
     def _classify_call(self, prompt: str, schema: dict) -> tuple[bool, str | None, str | None]:
         """One classify call. ``stage_runner`` set = the legacy single-model path;
         otherwise the chain router, so classify falls over to a local model like every
@@ -356,8 +389,11 @@ class Ingest:
             models_cfg = load_models_cfg(self.root / "config" / "models.yaml")
         except Exception:  # noqa: BLE001 — an unreadable models file is not fatal here
             models_cfg = None
-        outcome = run_task("classify", prompt, models_cfg=models_cfg,
-                           output_schema=schema, tools_profile="none", deadline_s=120)
+        with self._journal() as jdb:
+            outcome = run_task("classify", prompt, models_cfg=models_cfg,
+                               output_schema=schema, tools_profile="none",
+                               deadline_s=120, jdb=jdb, kdb=self.kdb, cfg=self.cfg,
+                               root=self.root, now=self.now)
         return outcome.ok, outcome.text, outcome.error or outcome.failure
 
     def classify_news(self) -> None:

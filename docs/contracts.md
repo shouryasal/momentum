@@ -36,7 +36,7 @@ stdlib HMAC) and `sse-starlette` (the SSE body is hand-written).
 | `EARN_RISKGATE` | compose | `strategies/riskgate.py` | Path of `riskgate.json` inside the container (default `config/riskgate.json`). |
 | `EARN_SLEEVE` | compose | `strategies/riskgate.py` | `a` or `b`. |
 | `EARN_CLAUDE_AUTH_MODE` | `.env`, written by the console when `auth.claude_mode` is saved | `ops/envwrap.sh` (P1) | `subscription` \| `api_key` \| `auto`; unknown ⇒ `subscription`. |
-| `EARN_FALLBACK_ANTHROPIC_API_KEY` | `ops/envwrap.sh` in `auto` mode | `runs/llm/providers/claude_sdk.py` (P3) | The API key under a name the CLI can never pick up implicitly. |
+| `EARN_FALLBACK_ANTHROPIC_API_KEY` | `ops/envwrap.sh` in `subscription` **and** `auto` mode | `runs/llm/providers/claude_sdk.py` (P3) | The API key under a name the CLI can never pick up implicitly. |
 
 Constants that are **code, not config**: the console bind address `127.0.0.1`,
 `EFFORT_FLOOR = "high"`, `ALWAYS_DISALLOWED`, market-only stop exits, the tier-2 path list.
@@ -49,6 +49,7 @@ Everything here is produced by `ops.lib.paths` helpers; nothing builds these pat
 
 ```
 var/state/mode.json              signed per-sleeve mode      ops.lib.mode_state
+                                 read-only tri-state view    ops.lib.mode_view
 var/state/config.bless.json      signed config digest        ops.lib.config_guard
 var/runtime/freqtrade-<s>.mode.json   freqtrade overlay, 2nd --config   ops.gen_freqtrade_config
 var/runtime/runtime-<s>.json          what the strategy reads ($EARN_RUNTIME)
@@ -82,8 +83,16 @@ SLEEVES = ("a", "b")
  "nonce": "...", "sig": "hmac-sha256:..."}
 ```
 
-States: `TEST`, `ARMING`, `LIVE_PROPOSE`, `LIVE_EXECUTE`, `DISARMING`. `KILL` is an
-orthogonal overlay, not a state.
+States: `TEST`, `ARMING`, `DEMO_PROPOSE`, `DEMO_EXECUTE`, `LIVE_PROPOSE`, `LIVE_EXECUTE`,
+`DISARMING`. `KILL` is an orthogonal overlay, not a state.
+
+Three sets, and the distinction between them is load-bearing:
+
+| set | members | what keys on it |
+|---|---|---|
+| `LIVE_MODES` | `LIVE_PROPOSE`, `LIVE_EXECUTE` | **real money** — `any_live`, the healthcheck's KILL branch, `autonomy.live_forces_human`, `_validate_strategies`. It must never grow. |
+| `DEMO_MODES` | `DEMO_PROPOSE`, `DEMO_EXECUTE` | Binance Spot Demo Mode: real orders on `demo-api.binance.com`, fake money. Not TEST (nothing is simulated) and not LIVE (nothing is real). |
+| `VENUE_MODES` | the union | "reaches an exchange": needs a credential, a venue binding, `dry_run: false` and a reconcile. |
 
 `ops.lib.mode_state` API:
 
@@ -92,10 +101,17 @@ load(path=None, *, secret=None, env=None) -> ModeState    # NEVER raises
 build(sleeves, *, set_by, transition_id=None) -> ModeState
 write(state, *, secret=None, path=None)                   # refuses under EARN_AUTOMATED_RUN=1
 describe(state) -> str
-ModeState.sleeve(s) -> SleeveState   .is_live(s)   .any_live()   .live_sleeves()
+ModeState.sleeve(s) -> SleeveState
+ModeState.is_live(s) .is_demo(s) .needs_exchange(s)
+ModeState.any_live() .any_demo() .live_sleeves() .demo_sleeves()
 ModeState.verified: bool   .reason: str   .phase: 'paper'|'live_propose'|'live_execute'
-SleeveState.state .submode .run_id .seed_usdt .is_live .executes .requires_approval
+SleeveState.state .submode .run_id .seed_usdt
+SleeveState.is_live .is_demo .is_test .needs_exchange .executes .requires_approval
 ```
+
+`phase` stays three-valued and a demo sleeve is `paper`: everything that reads `phase` is
+asking how much **real capital** is at stake, and on demo the answer is none. Demo is
+surfaced through `any_demo()` and the state word, never by widening `phase` or `is_live`.
 
 **Fail closed.** Missing file, unreadable file, bad JSON, unknown shape, wrong version,
 bad signature or absent secret ⇒ every sleeve is `TEST`, `verified=False`, and `reason` is
@@ -114,6 +130,129 @@ only `console/deps.py` can build, and the only downward escape hatch is
 
 `GateConfig.load()` (P2) merges the committed `riskgate.json` with this file, and the
 risk-state store namespaces every key with `run:<run_id>:`.
+
+With **no** runtime file, `GateConfig.load()` falls back to
+`strategies.riskgate.default_run_id(s)` = `test-<s>-000` — deliberately the same string
+`ops.gen_freqtrade_config.default_run_id(s)` renders, so a gate running from the committed
+baseline writes the rows a host-side reader expects. The two implementations are pinned
+against each other by test; `strategies/` may not import `ops`, so the mirror is manual.
+Rows written under the older `""` namespace still exist, which is why
+`mode_view.risk_state` reads the bare key as a fallback — nothing creates that shape now.
+
+### `ops.lib.mode_view` — liveness for jobs that hold no key
+
+`EARN_CONSOLE_SECRET` is in **no** `envwrap.sh` allowlist, so in every unattended job
+`mode_state.load()` returns `verified=False, reason='no_secret'`, which by the fail-closed
+rule above reads back as *every sleeve TEST*. That is correct for a **writer** — nothing
+unsigned may put a sleeve live — and wrong for a **reader that then acts on it**, because
+"I could not read the authority" is not "the authority says TEST".
+
+No job may treat unverified state as proof of TEST. `ops.lib.mode_view` is the **one**
+helper they use instead, and it answers a tri-state:
+
+```python
+load(*, jdb=None, state=None, root=None, runtime_dir=None, env=None, sleeves=None,
+     config_path=None) -> ModeView
+ModeView.sleeve(s) -> SleeveView   .liveness(s)  .is_live(s) .is_demo(s) .is_test(s) .unknown(s)
+ModeView.any_live()          # some sleeve is PROVABLY live (real money; demo never counts)
+ModeView.any_demo()          # some sleeve is PROVABLY on Binance Spot Demo Mode
+ModeView.any_assume_live()   # some sleeve is not provably TEST  <- restrictive predicate
+SleeveView.liveness in ('live','demo','test','unknown')
+SleeveView.is_live .is_demo .is_test .unknown .needs_exchange
+SleeveView.assume_live .requires_approval .label() .describe()
+SleeveView.corroborated      # provable ENOUGH to act destructively on — see §1.2
+SleeveView.state .submode .run_id .seed_usdt .source .reason .state_reason .overlay
+```
+
+`demo` is a value of its own, not a flavour of either neighbour, and both halves matter.
+It is **not TEST**, so no permissive "it's only paper" branch fires for a sleeve that is
+placing real orders — in particular `ops.healthcheck` would otherwise have read a correctly
+armed demo sleeve as "provably TEST reporting `dry_run=false`" and engaged KILL on it every
+five minutes. It is **not LIVE**, so no real-money guard, report, NAV row or TCA
+calibration counts it. `assume_live` is `!= TEST`, so every restrictive branch in the table
+below already covers demo without being told about it.
+
+`requires_approval` fails closed **in this order**: `UNKNOWN` ⇒ `True` first, before
+anything else (an unprovable sleeve that merely kept a state word is not an approval-free
+one, and no `require_approval` flag can buy it off, because that flag is on the file we
+could not prove); then the overlay's own `require_approval`, which is literally what the
+container enforces; then a *proven live* sleeve ⇒ `True` unless it is provably
+`LIVE_EXECUTE` — liveness can be proven by the `dry_run` overlay alone, which carries no
+state word, and `LIVE_PROPOSE` is a live submode; only a proven TEST answers `False`.
+
+Evidence, in precedence order. Only (1) is authority; (2) and (3) are corroboration:
+
+1. **`var/state/mode.json`**, when the signature verifies — the console, the CLI and tests
+   still get the signed authority unchanged, and it outranks everything below.
+2. **`var/runtime/runtime-<s>.json` + `var/runtime/freqtrade-<s>.mode.json`** — rendered by
+   the *human's* transition from verified state (step 8), 0600 inside 0700 `var/`, already
+   the strategy's and the container's own source of truth. `mode`/`state` must agree with
+   `dry_run`, or the answer is UNKNOWN.
+3. **`sleeve_runs` (the active run) + `mode_transitions` (the last `status='completed'`
+   row)** — the journal's append-only record of what a human did.
+
+(2) and (3) must agree with each other. Conflicting evidence, no evidence, or a transient
+`ARMING`/`DISARMING` state all give `UNKNOWN`. `UNKNOWN` is never TEST.
+
+**Every caller takes the restrictive branch on UNKNOWN, and restrictive means "assume real
+money", not "assume TEST":**
+
+| caller | on UNKNOWN |
+|---|---|
+| `ops/healthcheck.py:check_mode_consistency` | alert critical; **never** engage KILL. KILL needs a proof — a provably-TEST sleeve reporting `dry_run=false`, or a bot provably trading real money on `Scaffold` |
+| `runs/reconcile_job.py:run` | reconcile against the **exchange**, with that sleeve's preflight baseline |
+| `runs/apply_changes.py:effective_mode` | the **`live`** autonomy column, so `live_forces_human` engages |
+| `runs/research_run.py:proposal_destination` | `approval_status='pending'` — a human must sign |
+| `runs/nav_tick.py:run` | label the row `live` (`nav_points.mode` admits only `test\|live`); the sleeve is listed in the summary's `mode_unproven` |
+| `ops/telegram_bot.py:cmd_mode` | print `unknown` and the reason |
+| `ops/preflight.py` `kill_clear` | a lock it cannot rule out is a lock, **and** any venue-bound target (demo *or* live) fails the check outright: `refusing to arm from an unprovable state`. Disarming (target `TEST`) is exempt — the way back must never be blocked by not knowing |
+
+### 1.2 The overlay's trust boundary — what `var/runtime` may license
+
+The two `var/runtime` overlays are **unsigned**, and signing them would buy nothing: the
+reader that needs them is precisely the reader with no `EARN_CONSOLE_SECRET`, so it could
+never verify a signature it was handed. Making them authority would also be circular — the
+container was *started from* that overlay, so "the overlay says TEST" and "the bot should
+be dry-run" are the same claim, not two. The decision is therefore:
+
+**The overlay is evidence with a provenance check, and it may never alone license a
+destructive action.**
+
+`mode_view` checks `runtime-<s>.json`'s provenance and reports it as `SleeveView.overlay`:
+
+| `overlay` | when | effect |
+|---|---|---|
+| `current` | known `version`, `config_sha` equals the sha256 of `config/earn.yaml` on disk, and `generated_at` is **not older** than the newest completed `mode_transitions.started_utc` for the sleeve | may corroborate |
+| `stale` | `generated_at` predates that transition — the file the container was started from, which the human has since superseded | **discarded outright**; the journal alone speaks, `reason='stale_overlay'` when nothing else does |
+| `unverified` | no `generated_at`, unknown `version`, missing or mismatched `config_sha`, or only `freqtrade-<s>.mode.json` survives | still read for liveness, never corroborates |
+| `absent` | nothing rendered | — |
+
+A `runtime-<s>.json` naming a **different** `sleeve` is refused as evidence
+(`reason='runtime_conflict'`).
+
+`SleeveView.corroborated` is true only for the signed authority, or for two independent
+sources that agree with a `current` overlay (`source='runtime+journal'`). Callers:
+
+* `ops/healthcheck.py:check_mode_consistency` engages KILL for an unauthorised live bot
+  only when the sleeve is `is_test` **and** `corroborated`. Provably-TEST from one
+  unsigned file is an alert, not a flatten: a stale or hand-edited overlay would otherwise
+  be enough to have an authorised live sleeve's book closed by a cron job. The other KILL
+  case — a bot reporting `dry_run=false` while running `Scaffold` — rests on the bot's own
+  report rather than on any overlay, so it is unaffected.
+* Everything else already takes the restrictive branch on anything but a proven TEST, so
+  `corroborated` changes nothing for them.
+
+The same module owns the **run-scoped `risk_state` read**, because the namespace
+`run:<run_id>:` is derived from the very overlay above:
+
+```python
+risk_state(jdb, sleeve, keys, *, run_id) -> {key: value}   # run-scoped row wins, bare is fallback
+risk_flag(jdb, sleeve, key, *, run_id) -> bool             # EITHER row set (locks fail closed)
+active_run_id(jdb, sleeve, *, view=None) -> str            # the overlay's, else the active run
+```
+
+Two blocking checks were silently inert without it: `ops/preflight.py`'s `kill_clear`
+monthly-lock test and `runs/router.py`'s `near_stop` escalation flag.
 
 ### `ops.lib.signing`
 
@@ -305,6 +444,14 @@ Console reads use `opened(path, readonly=True)`, one per request, closed in a `f
 `provider_switches`, `provider_health`, `proposal_approvals`, `change_events`,
 `reconciliations`, `backtest_runs`, `console_jobs`.
 
+**`nav_points.positions_json` / `nav_daily.positions_json` hold base-unit AMOUNTS**, keyed
+by base asset — `{"BTC": 0.04, "ETH": 0.5}`, coins and not money. Both writers
+(`runs/nav_tick.py:ledger_nav`, `runs/nav_job.py`) agree on that shape. A consumer that
+needs a weight or a gross number must mark the amounts itself (candle closes, via
+`console.services.overview_service.marks`) or derive the total from money the ledger
+already reconciled (`nav_usdt - cash_usdt` is the marked value of the book by
+construction). An amount that cannot be marked is reported as unknown, never as zero.
+
 **Additive columns** (`MIGRATIONS[3]`): `runs.provider`, `runs.chain_index`,
 `runs.switched_from`, `runs.signal_id`; `proposals.signal_id`, `proposals.approval_status`;
 `orders.mode`, `orders.run_id`; `fills.mode`, `fills.run_id`; `nav_daily.run_id`;
@@ -345,9 +492,10 @@ build_riskgate_json(cfg, config_path)  -> dict    # committed, phase = COMMITTED
 build_params(cfg, sleeve)              -> dict    # seeded once, then owned by apply_changes
 build_mode_overlay(cfg, sleeve, state) -> dict    # var/runtime/freqtrade-<s>.mode.json
 build_sleeve_runtime(cfg, sleeve, state, config_path) -> dict   # var/runtime/runtime-<s>.json
-build_compose_override(cfg, state)     -> str     # var/runtime/compose.override.yml
-render_runtime(cfg, *, state=None, runtime_dir=None) -> {path: content}
-write_runtime(cfg, *, state=None, runtime_dir=None) -> [path]
+build_compose_override(cfg, state, *, env=None) -> str  # var/runtime/compose.override.yml
+venue_of(sleeve_state)                 -> Venue | None   # the mode's venue; None = no exchange
+render_runtime(cfg, *, state=None, runtime_dir=None, env=None) -> {path: content}
+write_runtime(cfg, *, state=None, runtime_dir=None, env=None) -> [path]
 main(argv)     # --check (drift, committed files only), --no-runtime
 ```
 
@@ -355,12 +503,138 @@ Rules other packages depend on:
 
 * the committed `config/freqtrade-*.json` always says `dry_run: true`, so no config save can
   flip a bot live;
-* a live overlay renders **only** from a verified mode state; anything else renders TEST;
+* an overlay that reaches an **exchange** — live *or* demo — renders only from a verified
+  mode state; anything else renders TEST;
+* the venue is bound to the mode in code (`ops.lib.exchange_endpoints.MODE_VENUE`), never in
+  `earn.yaml`. `DEMO_*` renders `dry_run: false` plus
+  `exchange: {demo_trading: true, _ft_has_params: {supports_demo_trading: true}}` — both
+  halves always together, because freqtrade ships `binance.supports_demo_trading = False`
+  and refuses the key on its own. `LIVE_*` renders `dry_run: false` and no exchange block;
+* no generated or committed compose layer may spell an exchange URL. `exchange.urls` and
+  `FREQTRADE__EXCHANGE__URLS__*` are read by nothing in freqtrade 2026.8, so such a line is
+  a silent no-op that reads like routing; `ops.lib.compose.audit_committed_layers` and
+  `assert_no_exchange_url_override` refuse one;
 * `riskgate.json` carries `risk`, `universe`, `proposal`, `execution`, `sleeve_b`, plus
   `trading` (timeframe, resolved `startup_candles`, `plan_bounds`, per-sleeve merged
   mechanics) and `bounds`, stamped with `source_sha256` of `earn.yaml`;
 * no exchange key or secret is ever written into any generated file — the compose override
-  carries `${BINANCE_KEY_A}` / `${BINANCE_SECRET_A}` references only.
+  carries env references only, and the NAMES are chosen from the sleeve's venue:
+  `${BINANCE_KEY_<S>}` / `${BINANCE_SECRET_<S>}` for live, `${BINANCE_DEMO_KEY}` /
+  `${BINANCE_DEMO_SECRET}` for demo, `""` for TEST. The two name sets are disjoint and a
+  service block that mentions another venue's name is a render-time refusal, so a demo
+  container cannot be handed a live key by a one-word `.env` edit. Each service also carries
+  `EARN_VENUE`, so `docker inspect` answers "which Binance is this?" without reading JSON.
+
+### 5.1 The universe snapshot the gate enforces (package U2)
+
+`build_bot_config` and `build_riskgate_json` both take an optional `snapshot=` (the
+resolver's `knowledge/universe/<date>.json`; omitted means `latest_snapshot()`), so the
+**bot whitelist and the gate's tier table come from one artefact**. `max_open_trades` is
+`risk.max_open_positions`, never `len(pairs)`, and `pairlists` is always `StaticPairList`.
+
+`gate_universe_block(snap)` reduces the resolver's full snapshot to the five maps the
+deterministic gate needs, keyed by **base asset**, and that is what lands in
+`riskgate.json` under `universe.snapshot`:
+
+```jsonc
+"universe": {
+  "pairs": ["BTC/USDT", "..."],          // the tradeable tier, incl. exit_only names
+  "snapshot": {
+    "date": "2026-09-23", "sha256": "…", // the identity a proposal cites (U3, v4)
+    "tiers":   {"BTC": "core", "SOL": "major", "TIA": "satellite", "X": "watchlist"},
+    "caps":    {"SOL": 0.15},            // the resolver's cap; may only TIGHTEN the ceiling
+    "scores":  {"TIA": 0.87},            // satellite score, higher is better (§3.2)
+    "exit_only": ["OLD"],                // resolver flag OR a delisting_at in the snapshot
+    "filters": {"TIA": {"min_notional": 5.0, "step_notional": 0.03}}
+  }
+}
+```
+
+What the gate does with it (`strategies/riskgate.py`, `UniverseView`):
+
+* **cap resolution, tightest wins** — `exit_only` ⇒ 0; else the tightest of
+  `risk.max_weight[asset]`, `risk.tier_caps[tier]` and the snapshot's `caps[asset]`;
+  **no tier and no explicit entry ⇒ 0.0**, and the `tier:<asset>` check refuses the order.
+  There is no `risk.max_weight.default` any more, and nothing may reintroduce one.
+* **new refusal reasons**, in `CHECK_ORDER`: `exit_only:<asset>`, `tier:<asset>`,
+  `step_size:<pair>`, `min_position`, `max_positions`, `satellite_count`,
+  `satellite_gross`, `beta_cap`, `corr_cap`.
+* **beta and correlation** are computed by the gate from a `returns_provider(pair)`
+  injected by the adapter (`EarnBaseStrategy._daily_returns`, 60 daily observations from
+  the 1d informative frame). Unmeasurable — no history, one name, a constant series —
+  passes; the tier cap and `max_satellite_gross` bound that window.
+* an absent or unparseable `snapshot` block degrades to the two-asset world: every asset
+  with an explicit `risk.max_weight` entry is `core` and nothing else is tradeable.
+
+Callers of `ops.config.max_weight_for(cfg, asset, tier=None)` must pass the tier when they
+have one; without it only an explicit `max_weight` entry yields a non-zero cap.
+
+### 5.2 The snapshot file itself (package U1)
+
+`knowledge/universe/<YYYY-MM-DD>.json`, written by `ops.universe_refresh` and **committed**:
+it is simultaneously the whitelist the bots run and the whitelist the backtests replay.
+`ops/universe.py` owns the format and is the only reader anything else should use.
+
+```python
+# ops.universe — pure except fetch_inputs()
+resolve(symbols, bars, now, *, rules, tiers, score,
+        delistings, listed_at, retain) -> Snapshot
+fetch_inputs(*, quote, history_days, max_workers) -> FetchResult   # Binance public, no key
+load_current(dir) -> Snapshot | None        # newest file; cached on (name, mtime, size)
+load_snapshot(path) / write_snapshot(snap, dir) / snapshot_paths(dir) / latest_snapshot_path(dir)
+diff(old, new) -> Diff                      # added / removed / tier_changes / exit_only
+Snapshot.tradeable_pairs / .watchlist_pairs / .tradeable_assets / .watchlist_assets
+Snapshot.tier_of(asset) / .cap_of(asset) / .satellites(limit) / .sha256
+ops.config.resolver_args(cfg) -> (Rules, Tiers, ScoreRules)   # membership from universe.*,
+                                                              # caps from risk.*
+```
+
+```jsonc
+{ "schema_version": 1, "date": "2026-09-23", "generated_at": "…Z", "quote": "USDT",
+  "rules": {…every threshold…}, "tiers": {…}, "score_rules": {…},
+  "counts": {"watchlist": 107, "tradeable": 31, …}, "funnel": [{"step":1,"filter":…}],
+  "pairs":    { "BTC/USDT": { "symbol","base","tier","cap","score","rank",
+                              "tick_size","step_size","min_notional",
+                              "delisting_at","exit_only","exit_reason","exit_only_since",
+                              "metrics": {…} } },
+  "excluded": { "BTTCUSDT": "tick_size:tick=270.0bps" },   // why every name is OUT
+  "sha256": "…" }
+```
+
+Rules other packages depend on:
+
+* `sha256` is over the canonical payload with the `sha256` key removed. A proposal cites
+  `{date, sha256}` (`ops.config.universe.snapshot_ref`) so it stays replayable after the
+  universe moves. `load_snapshot` **refuses** a file whose digest does not match.
+* `universe.assets` / `universe.pairs` / `universe.watchlist_pairs` /
+  `universe.watchlist_assets` on `EarnConfig` are **computed** from the newest snapshot,
+  core first; with no snapshot they fall back to `universe.core`. They are not YAML keys
+  any more (a legacy `assets:`/`pairs:` pair warns and maps `assets` → `core`).
+* **tradeable tier** = `core | major | satellite`; **watchlist** adds `watchlist`.
+  `data_only_symbols` are excluded from every tier by the resolver, so they can never be
+  traded, and are added back only by `ops.universe_refresh.pair_list(cfg, "download")`,
+  which is what the candle scripts use.
+* an `exit_only` pair stays on the whitelist with `cap: 0.0`; the refresh also raises a
+  per-pair `universe_exit_only:<pair>` flag (`severity block_entries`, `scope <pair>`)
+  through `ops.lib.flags`, which `flags.entries_blocked(path, pair)` already honours.
+* **falling out of the universe is never a disappearance.** Every pair the previous
+  snapshot could trade is offered back to the resolver (`retain`); one that no longer
+  qualifies returns at its old tier as `exit_only`, cap 0, with the filter it now fails in
+  `exit_reason` and the date in `exit_only_since`. It drops for good after
+  `universe.refresh.exit_only_weeks` (4). That is what makes a depeg, a halt or a slow
+  slide below the satellite floor a wind-down instead of an orphaned position — and it is
+  why the shrink guard counts pairs that can still be **entered**, not the whitelist.
+* `metrics.listing_age_days` is exact: the fetcher asks for each symbol's first ever candle
+  (`startTime=0, limit=1`) as well as the recent page, because `/klines` caps a page at
+  1,000. `metrics.age_is_lower_bound` is true only when that answer was unavailable, and
+  `ops.check_gaps` refuses to relax its history floor on an age that is only a bound.
+* delisting notices are **input**, in `knowledge/universe/delistings.json`
+  (`{"<SYMBOL or PAIR>": "<ISO 8601>"}`), written by `reg-watch` or a key-holding job.
+  Binance's schedule is a `sapi` endpoint needing an API key, which `ops/envwrap.sh` gives
+  to `reconcile` and `preflight` only — and demo has no `sapi` tier at all, so freqtrade's
+  `DelistFilter` is deliberately **not** wired in.
+* `ops/refresh_backtest_data.sh` runs the refresh and then tops up candles, in that order;
+  `universe.refresh.cron` must equal `ops.schedules.backtest_data.cron` (cross-validated).
 
 ---
 
@@ -424,16 +698,63 @@ migrating each one is its owning package's call.
 ```python
 runs.signals.pipeline.{scan, plan, funnel, mark_acted, record_manual}
 runs.signals.outcomes.{resolve_due, stats}
+runs.signals.features.{build, watchlist_pairs, core_pairs, held_pairs, rank_watchlist,
+                       CHEAP_KEYS}
+runs.signals.detectors.{run_all, max_per_detector, Ctx.pairs, Ctx.priority}
 schemas.signals.{validate_screen, validate_validation}
-schemas.proposal.{build_models, parse_any, to_file}
+schemas.proposal.{build_models, validate_proposal, parse_any, to_file,
+                  tradeable_from_snapshot, universe_ref_from_snapshot}
 ```
 
 `schemas.proposal` is the ONE place the proposal shape is defined, and
 `strategies/proposal_loader.py` (stdlib-only, in-container) re-checks it structurally.
-The two must agree: `OPTIONAL_FIELDS` there covers `plan`, `signal_id` and
-`schema_version`, and `PLAN_FIELDS` covers `schemas.proposal.Plan`'s
+The two must agree: `OPTIONAL_FIELDS` there covers `plan`, `signal_id`, `schema_version`
+and `universe_snapshot`; `ASSET_PATTERN` and `DEFAULT_MAX_ASSETS` are byte-equal on both
+sides (a test asserts it); and `PLAN_FIELDS` covers `schemas.proposal.Plan`'s
 `entry_style, stop_pct, take_profit_pct, dca_allowed, valid_for_hours` (plus `urgency`,
 which Earn never writes and `clamp_plan` drops unless `trading.plan_bounds.allow_model_urgency`).
+
+#### Proposal `schema_version: 4` — sparse targets over a dynamic universe
+
+```jsonc
+{ "schema_version": 4,
+  "targets": { "BTC": 0.40, "SOL": 0.05, "USDT": 0.55 },   // SPARSE: absent == zero
+  "universe_snapshot": { "date": "2026-09-23", "sha256": "…64 hex…" },
+  … every v3 field unchanged … }
+```
+
+* `targets` keys match `^[A-Z0-9]{2,12}$`. The quote (`USDT`) is **always required** —
+  cash is never implicit. Every other key must be in the **tradeable tier** of the cited
+  snapshot; a key outside it rejects the **whole** proposal rather than being clamped, so
+  the journal records a model that tried. At most `risk.max_open_positions` non-quote keys.
+* `universe_snapshot` is required exactly when `schema_version >= 4`, and forbidden below
+  it. `runs/research_run.py` passes the snapshot it resolved its tradeable set from
+  (`cfg.universe.snapshot_ref`) into `validate_proposal(..., snapshot=…)`, so an answer
+  citing a different snapshot is refused as `universe_snapshot … is not the snapshot this
+  run used`.
+* `to_file` stamps the LOWEST version a payload needs: 4 with a snapshot, 3 with a `plan`
+  or `signal_id`, nothing otherwise. `parse_any` still replays v2 and v3 files, including
+  ones holding an asset that has since left the tradeable tier.
+* `schemas/proposal.json` is the rendered artefact (SDK `output_format`) and is generic:
+  JSON Schema pins the shape and the cap, membership of the tradeable tier is pydantic's
+  job because it depends on a snapshot JSON Schema cannot see.
+
+#### Scanner breadth and the token budget
+
+The scanner reads its universe from the features, not from config: `features.build`
+computes `CHEAP_KEYS` (6 keys, daily candles + one batched news query) for the whole
+`universe.watchlist_pairs`, and the full 24-key set only for core + held + the highest
+ranked names (`signals.scanner.rich_pairs`, default 20). `Features.rich` says which.
+Detectors iterate `Ctx.pairs`; a rich-only key on a cheap pair reads `None` and the
+detector does not fire. `run_all` caps each detector at
+`signals.scanner.max_candidates_per_detector` (default 3) ordered by `Ctx.priority`
+(fast path → core → tradeable → strength) and reports the drops in `Ctx.capped` /
+`ScanReport.capped` — a cap is not an error. `pipeline.scan` spends
+`max_candidates_per_cycle` in that same priority order.
+
+Measured on the real 2026-09-23 snapshot (107 watchlist pairs): features block 8.4k
+tokens, whole scan prompt 15.3k against a 20k budget; research prompt 2.5k with an
+840-token UNIVERSE block naming all 31 tradeable assets, their tiers and their caps.
 
 ### Approval files — `proposals/approved/<run_id>.json`
 
@@ -481,13 +802,15 @@ committed file equals `render_crontab(cfg, template_ctx())`. It renders one line
 
 | mode | what the job gets |
 |---|---|
-| `subscription` | `CLAUDE_CODE_OAUTH_TOKEN` only (a present API key is dropped, since it would preempt subscription auth in a headless run) |
-| `api_key` | `ANTHROPIC_API_KEY` only |
+| `subscription` | `CLAUDE_CODE_OAUTH_TOKEN` only under that name; a present API key is **renamed** to `EARN_FALLBACK_ANTHROPIC_API_KEY`, never exported as `ANTHROPIC_API_KEY` (which would preempt subscription auth in a headless run) |
+| `api_key` | `ANTHROPIC_API_KEY` only; the OAuth token is dropped. The one mode that exports the plain name |
 | `auto` | the token (if any) **plus** the key renamed to `EARN_FALLBACK_ANTHROPIC_API_KEY` |
 
-The rename in `auto` is **unconditional** — a host with no subscription token still gets
-the protected name, because `auto` promises that metered spend is a deliberate fallback
-and the CLI must never pick a key up implicitly. Nothing is lost:
+The rename is **unconditional in both `subscription` and `auto`** — a host with no
+subscription token still gets the protected name, because neither mode may let the CLI
+pick a key up implicitly: metered spend is only ever a deliberate, journalled, capped
+`claude:api_key` attempt. The key is not *discarded*, only made un-preemptable; `api_key`
+mode is the only one that exports the plain name. Nothing is lost:
 `claude_auth.api_key_from()` reads the protected name first, `env_for('claude:api_key')`
 materialises it under `ANTHROPIC_API_KEY` for one explicit attempt, and
 `claude_auth.resolve_any()` (which `require()` and the ingest classifier use) counts it as
@@ -508,6 +831,7 @@ deliberately does not see it.
 | No local model writes a proposal | `runs/llm/types.py:chain_for` |
 | Committed bot configs are always `dry_run` | `ops/gen_freqtrade_config.py:build_bot_config` |
 | Unverified mode state ⇒ TEST | `ops/lib/mode_state.py:load` |
+| No job treats unverified state as proof of TEST | `ops/lib/mode_view.py:load` (tri-state) |
 | Mode writes refuse under `EARN_AUTOMATED_RUN=1` | `ops/lib/mode_state.py:write` |
 | The kill switch never waits for the ops lock | `ops/lib/kill.py:engage_and_enforce` |
 | Tier-2 paths | `.claude/hooks/tier2_paths.py` |
@@ -707,6 +1031,12 @@ POST   /api/config/{file_id}/defaults
 GET    /api/config/{file_id}/history
 POST   /api/config/{file_id}/preview
 POST   /api/config/{file_id}/revert
+GET    /api/control
+POST   /api/control/flatten
+PUT    /api/control/level
+POST   /api/control/pause
+POST   /api/control/resume
+POST   /api/control/stop
 GET    /api/health
 GET    /api/invariants
 GET    /api/invariants/strip
@@ -724,6 +1054,11 @@ GET    /api/knowledge/incidents
 GET    /api/knowledge/news
 GET    /api/knowledge/sources
 GET    /api/knowledge/state
+DELETE /api/llm/claude/signin
+GET    /api/llm/claude/signin
+POST   /api/llm/claude/signin
+POST   /api/llm/claude/signin/code
+GET    /api/llm/local-model
 GET    /api/llm/ollama/detect
 GET    /api/llm/ollama/models
 POST   /api/llm/ollama/pull
@@ -743,7 +1078,7 @@ GET    /api/meta
 GET    /api/meta/schema
 GET    /api/mode
 POST   /api/mode/preflight
-GET    /api/mode/recover
+POST   /api/mode/recover
 GET    /api/mode/runs
 POST   /api/mode/transition
 GET    /api/mode/transitions
@@ -765,6 +1100,7 @@ GET    /api/ops/schedules/crontab
 POST   /api/ops/schedules/install
 GET    /api/ops/systemd
 GET    /api/overview
+GET    /api/overview/demo
 GET    /api/overview/nav
 GET    /api/perf/attribution
 GET    /api/perf/nav
@@ -776,6 +1112,8 @@ GET    /api/portfolio/{sleeve}/fills
 GET    /api/portfolio/{sleeve}/nav
 GET    /api/portfolio/{sleeve}/orders
 POST   /api/portfolio/{sleeve}/orders/{trade_id}/cancel
+GET    /api/preview
+POST   /api/preview
 GET    /api/prompts
 PUT    /api/prompts/active
 GET    /api/prompts/diff

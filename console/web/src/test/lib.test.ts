@@ -151,7 +151,7 @@ describe('mode badges', () => {
   };
 
   it('labels every mode state', () => {
-    expect(modeSummary(mode)).toBe('A: TEST · seed 10,000');
+    expect(modeSummary(mode)).toBe('Rules bot: TEST · seed 10,000');
     expect(modeLabel({ ...mode, state: 'LIVE_PROPOSE' })).toBe('LIVE·PROPOSE');
     expect(modeLabel({ ...mode, state: 'LIVE_EXECUTE' })).toBe('LIVE·EXECUTE');
     expect(modeLabel({ ...mode, state: 'ARMING' })).toBe('TRANSITIONING');
@@ -160,7 +160,7 @@ describe('mode badges', () => {
   });
 
   it('omits the seed when the mode state carries none', () => {
-    expect(modeSummary({ ...mode, sleeve: 'b', seed_usdt: null })).toBe('B: TEST');
+    expect(modeSummary({ ...mode, sleeve: 'b', seed_usdt: null })).toBe('AI bot: TEST');
   });
 
   it('counts the run day from the date inside the run id', () => {
@@ -168,7 +168,7 @@ describe('mode badges', () => {
     expect(runDay('test-a-20261027-01', now)).toBe(12);
     expect(runDay('test-a-20261107-01', now)).toBe(1);
     expect(modeSummary({ ...mode, run_id: 'test-a-20261027-01' }, now)).toBe(
-      'A: TEST · seed 10,000 · day 12',
+      'Rules bot: TEST · seed 10,000 · day 12',
     );
   });
 

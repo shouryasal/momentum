@@ -1,10 +1,27 @@
+/**
+ * Skills — what the system knows how to do, led by what each one actually does.
+ *
+ * The list answers the only question an operator has about a procedure they did not
+ * write: what is this for?  So the first column is the skill's own sentence, taken from
+ * its `SKILL.md`, and the machinery — bindings, policy, tests, origin, the file editor and
+ * the four check buttons — lives in the detail pane that opens on the row you clicked.
+ */
 import {
-  Alert, Badge, Button, Card, Code, Group, Progress, ScrollArea, Stack, Text, Textarea, Title,
+  Alert, Badge, Button, Card, Code, Group, Progress, ScrollArea, Stack, Text, Textarea,
+  Tooltip,
 } from '@mantine/core';
 import { useState } from 'react';
 
 import { usePageCommands } from '@/app/commandRegistry';
-import { DataTable } from '@/components';
+import { useDetailSelection } from '@/app/detailParam';
+import {
+  ConfirmDialog,
+  DataTable,
+  DetailPane,
+  MasterDetail,
+  PageIntro,
+} from '@/components';
+import { routeBlurb } from '@/routes';
 
 import {
   STATUS_COLOURS,
@@ -149,11 +166,48 @@ function CheckProgress({ check }: { check: ReturnType<typeof useCheckRun> }) {
   );
 }
 
+/**
+ * The line that leads a procedure's row.
+ *
+ * Most skills have no `title:` in their frontmatter, only the `description:` their own
+ * lint insists on — and that description opens with what the procedure does before it
+ * says when it fires. So the headline is the title when there is one, the first sentence
+ * of the description when there is not, and only the file name when the procedure has
+ * written nothing down about itself.
+ */
+export function skillHeadline(row: { title?: string; description?: string; name: string }): string {
+  const title = row.title?.trim();
+  if (title) return title;
+  const sentence = row.description?.trim().split(/(?<=\.)\s/)[0]?.trim();
+  return sentence || row.name;
+}
+
+/** What is left of the description once the headline has taken its first sentence. */
+export function skillSubline(row: { title?: string; description?: string }): string {
+  const description = row.description?.trim() ?? '';
+  if (!description) return 'No description written down yet.';
+  if (row.title?.trim()) return description;
+  const rest = description.split(/(?<=\.)\s/).slice(1).join(' ').trim();
+  return rest || description;
+}
+
+/** What each status means, so a badge is never a word you have to already know. */
+const STATUS_MEANING: Record<string, string> = {
+  bound: 'In use: this procedure is loaded whenever the tasks listed run.',
+  unbound: 'On disk but loaded by nothing. It does not run.',
+  incubating: 'Being worked on. Nothing loads it yet.',
+  archived: 'Retired. Nothing loads it, and nothing was deleted.',
+  template: 'The blank a new procedure is copied from. It never runs.',
+};
+
 /** The Skills page: what exists, what loads it, and whether it still passes its own bar. */
 export default function SkillsPage() {
   const skills = useSkills();
-  const [selected, setSelected] = useState<string | null>(null);
+  const selection = useDetailSelection('skill');
+  const selected = selection.id;
+  const setSelected = selection.open;
   const [creating, setCreating] = useState(false);
+  const [archiving, setArchiving] = useState(false);
   const [trialPrompt, setTrialPrompt] = useState('');
   const [lastKind, setLastKind] = useState<CheckKind>('lint');
   const create = useCreateSkill();
@@ -197,12 +251,48 @@ export default function SkillsPage() {
     },
   ]);
 
+  const detailPane =
+    selected && current ? (
+      <DetailPane
+        title={skillHeadline(current)}
+        subtitle={
+          current.description?.trim() ||
+          'This procedure has not written down what it does. Open SKILL.md below and say so in one sentence.'
+        }
+        rawId={selected}
+        onClose={selection.close}
+        actions={
+          <Badge color={STATUS_COLOURS[current.status] ?? 'gray'}>{current.status}</Badge>
+        }
+      >
+        <SkillDetail
+          current={current}
+          selected={selected}
+          check={check}
+          lastKind={lastKind}
+          run={run}
+          archive={archive}
+          archiving={archiving}
+          setArchiving={setArchiving}
+          trialPrompt={trialPrompt}
+          setTrialPrompt={setTrialPrompt}
+        />
+      </DetailPane>
+    ) : null;
+
   return (
+    <MasterDetail detail={detailPane}>
     <Stack gap="lg">
-      <Group justify="space-between">
-        <Title order={2}>Skills</Title>
-        <Button onClick={() => setCreating(true)}>New skill</Button>
-      </Group>
+      <PageIntro
+        title="Skills"
+        blurb={routeBlurb('skills')}
+        actions={<Button onClick={() => setCreating(true)}>Add a procedure</Button>}
+      >
+        <Text size="xs" c="dimmed">
+          Each one is a written procedure the system follows. Click a row to see what loads
+          it, who may change it, and the files themselves.
+        </Text>
+      </PageIntro>
 
       {skills.error ? (
         <Alert color="red" title="Could not load the skills">
@@ -216,29 +306,38 @@ export default function SkillsPage() {
           rowKey={(row) => row.name}
           loading={skills.isLoading}
           onRowClick={(row) => setSelected(row.name)}
-          emptyTitle="No skills on disk"
+          emptyTitle="No procedures on disk"
+          emptyDescription="Nothing has been written down for the system to follow yet."
           columns={[
             {
               key: 'name',
-              header: 'Skill',
+              header: 'What it does',
               render: (row) => (
-                <Text size="sm" fw={row.name === selected ? 700 : 400}>
-                  {row.name}
-                </Text>
+                <Stack gap={0}>
+                  <Text size="sm" fw={row.name === selected ? 700 : 500}>
+                    {skillHeadline(row)}
+                  </Text>
+                  <Text size="xs" c="dimmed" lineClamp={2}>
+                    {skillSubline(row)}
+                  </Text>
+                </Stack>
               ),
-              sortValue: (row) => row.name,
+              sortValue: (row) => skillHeadline(row),
             },
             {
               key: 'status',
-              header: 'Status',
+              header: 'In use?',
+              width: 130,
               render: (row) => (
-                <Badge color={STATUS_COLOURS[row.status] ?? 'gray'}>{row.status}</Badge>
+                <Tooltip label={STATUS_MEANING[row.status] ?? row.status} multiline w={280}>
+                  <Badge color={STATUS_COLOURS[row.status] ?? 'gray'}>{row.status}</Badge>
+                </Tooltip>
               ),
               sortValue: (row) => row.status,
             },
             {
               key: 'bindings',
-              header: 'Loaded by',
+              header: 'Used when running',
               render: (row) =>
                 row.bindings.length ? (
                   <Group gap={4}>
@@ -255,43 +354,66 @@ export default function SkillsPage() {
                 ),
             },
             {
-              key: 'policy',
-              header: 'Policy (body/scripts/tests)',
+              key: 'name-raw',
+              header: 'Known as',
+              width: 170,
               render: (row) => (
-                <Text size="xs" ff="monospace">
-                  {row.policy.body}/{row.policy.scripts}/{row.policy.tests}
+                <Text size="xs" ff="monospace" c="dimmed">
+                  {row.name}
                 </Text>
               ),
-            },
-            {
-              key: 'tests',
-              header: 'Tests',
-              render: (row) =>
-                row.has_tests ? (
-                  <Text size="xs">{row.test_files} file(s)</Text>
-                ) : (
-                  <Badge color="red" variant="light" size="sm">
-                    none
-                  </Badge>
-                ),
-              sortValue: (row) => row.test_files,
-            },
-            {
-              key: 'origin',
-              header: 'Origin',
-              render: (row) => <Text size="xs">{row.origin}</Text>,
+              sortValue: (row) => row.name,
             },
           ]}
         />
       </Card>
 
-      {selected && current ? (
-        <Card withBorder padding="md">
+      <NewSkillModal
+        opened={creating}
+        onClose={() => setCreating(false)}
+        busy={create.isPending}
+        error={create.error ? String(create.error) : null}
+        onCreate={async (body) => {
+          await create.mutateAsync(body);
+          setCreating(false);
+          setSelected(body.name);
+        }}
+      />
+    </Stack>
+    </MasterDetail>
+  );
+}
+
+/** Everything behind one procedure: who may change it, the checks, and the files. */
+function SkillDetail({
+  current,
+  selected,
+  check,
+  lastKind,
+  run,
+  archive,
+  archiving,
+  setArchiving,
+  trialPrompt,
+  setTrialPrompt,
+}: {
+  current: SkillRow;
+  selected: string;
+  check: ReturnType<typeof useCheckRun>;
+  lastKind: CheckKind;
+  run: (kind: CheckKind) => void;
+  archive: ReturnType<typeof useArchiveSkill>;
+  archiving: boolean;
+  setArchiving: (value: boolean) => void;
+  trialPrompt: string;
+  setTrialPrompt: (value: string) => void;
+}) {
+  return (
+        <Stack gap="sm">
           <Group justify="space-between" mb="sm">
-            <Group gap="xs">
-              <Title order={4}>{selected}</Title>
-              <Badge color={STATUS_COLOURS[current.status] ?? 'gray'}>{current.status}</Badge>
-            </Group>
+            <Text size="xs" c="dimmed">
+              {STATUS_MEANING[current.status] ?? ''}
+            </Text>
             <Group gap="xs">
               <Button
                 size="xs"
@@ -341,17 +463,40 @@ export default function SkillsPage() {
                 color="orange"
                 variant="subtle"
                 loading={archive.isPending}
-                onClick={() =>
-                  archive.mutate({
-                    name: selected,
-                    restore: current.status === 'archived',
-                  })
-                }
+                onClick={() => setArchiving(true)}
+                data-testid="archive-skill"
               >
                 {current.status === 'archived' ? 'Restore' : 'Archive'}
               </Button>
             </Group>
           </Group>
+
+          {/* `POST /api/skills/{name}/archive` is step-up guarded: archiving unbinds a
+              skill from every task that loads it. It used to be a bare onClick. */}
+          <ConfirmDialog
+            opened={archiving}
+            onClose={() => setArchiving(false)}
+            title={
+              current.status === 'archived'
+                ? `Restore ${selected}?`
+                : `Archive ${selected}?`
+            }
+            confirmLabel={current.status === 'archived' ? 'Restore' : 'Archive'}
+            requireStepUp
+            danger={current.status !== 'archived'}
+            description={
+              current.status === 'archived'
+                ? 'The skill comes back as incubating; it is loaded by nothing until it is bound again.'
+                : 'The skill stops being loaded by every task it is bound to. Nothing is deleted.'
+            }
+            onConfirm={async () => {
+              await archive.mutateAsync({
+                name: selected,
+                restore: current.status === 'archived',
+              });
+              setArchiving(false);
+            }}
+          />
 
           <Textarea
             label="Trial prompt"
@@ -369,26 +514,33 @@ export default function SkillsPage() {
             <CheckOutput kind={lastKind} data={check.result} />
           ) : null}
 
+          <Group gap="xs">
+            <Text size="xs" c="dimmed">
+              Who may change which part (body / scripts / tests):
+            </Text>
+            <Text size="xs" ff="monospace">
+              {current.policy.body}/{current.policy.scripts}/{current.policy.tests}
+            </Text>
+            <Tooltip
+              multiline
+              w={300}
+              label="'human' means only you may change that part. 'gated' means Claude may propose a change, which is reviewed and merged before it takes effect."
+            >
+              <Badge size="xs" variant="light">
+                what does this mean?
+              </Badge>
+            </Tooltip>
+          </Group>
+          <Text size="xs" c="dimmed">
+            {current.has_tests
+              ? `${current.test_files} test file(s) check this procedure still does what it says.`
+              : 'No tests check this procedure. Nothing proves it still does what it says.'}
+            {' '}Written by {current.origin}.
+          </Text>
+
           <Stack gap="sm" mt="md">
             <SkillEditor name={selected} />
           </Stack>
-        </Card>
-      ) : null}
-
-      <NewSkillModal
-        opened={creating}
-        onClose={() => setCreating(false)}
-        busy={create.isPending}
-        error={create.error ? String(create.error) : null}
-        onCreate={(body) =>
-          create.mutate(body, {
-            onSuccess: () => {
-              setCreating(false);
-              setSelected(body.name);
-            },
-          })
-        }
-      />
-    </Stack>
+        </Stack>
   );
 }

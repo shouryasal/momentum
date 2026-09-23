@@ -31,6 +31,13 @@ from runs import backtest_job
 TOPIC = "backtest"
 QUEUE_LIMIT = 20
 
+#: A verdict is final: once a row says one of these, the worker must not start it.
+TERMINAL_STATUSES = (
+    backtest_job.STATUS_CANCELLED,
+    backtest_job.STATUS_OK,
+    backtest_job.STATUS_FAILED,
+)
+
 
 class BacktestServiceError(RuntimeError):
     pass
@@ -123,8 +130,20 @@ class BacktestQueue:
         return cancelled
 
     def run_now(self, item: _Item) -> dict[str, Any]:
-        """Run one item synchronously — what the worker calls, and what tests call."""
+        """Run one item synchronously — what the worker calls, and what tests call.
+
+        A row that already reached a terminal status is **not** executed. Cancelling only
+        writes the row (the ``_Item`` stays in the in-process queue and nothing removes
+        it), and ``backtest_job.execute`` sets ``running`` before its first per-window
+        cancellation check — so a backtest cancelled while queued used to have its cancel
+        silently overwritten and ran to completion, minutes of docker per window, with a
+        ``finished_utc`` earlier than its start.
+        """
         with db.opened(self.journal_path) as conn:
+            row = backtest_job.get(conn, item.bt_id)
+            if row is not None and row["status"] in TERMINAL_STATUSES:
+                self._emit(str(row["status"]), {"id": item.bt_id, "skipped": True})
+                return {"status": str(row["status"]), "windows": []}
             return backtest_job.execute(
                 conn, self.cfg, item.bt_id, item.request, runner=self.runner, root=self.root,
                 now=self.now, progress=lambda event, payload: self._emit(event, payload),
@@ -199,6 +218,7 @@ def mark_interrupted(conn: sqlite3.Connection, *, now: datetime | None = None) -
 
 __all__ = [
     "QUEUE_LIMIT",
+    "TERMINAL_STATUSES",
     "TOPIC",
     "BacktestQueue",
     "BacktestServiceError",

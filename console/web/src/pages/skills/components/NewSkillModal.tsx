@@ -1,13 +1,15 @@
 import { Alert, Button, Group, Modal, Stack, Text, TextInput, Textarea } from '@mantine/core';
 import { useState } from 'react';
 
+import { ConfirmDialog } from '@/components';
+
 const NAME_RE = /^[a-z][a-z0-9-]{1,47}$/;
 const MIN_DESCRIPTION = 40;
 
 export interface NewSkillModalProps {
   opened: boolean;
   onClose: () => void;
-  onCreate: (body: { name: string; description: string; title?: string }) => void;
+  onCreate: (body: { name: string; description: string; title?: string }) => Promise<unknown> | void;
   busy?: boolean;
   error?: string | null;
 }
@@ -23,6 +25,7 @@ export function NewSkillModal({ opened, onClose, onCreate, busy, error }: NewSki
   const [name, setName] = useState('');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [confirming, setConfirming] = useState(false);
 
   const nameOk = NAME_RE.test(name);
   const descriptionOk = description.trim().length >= MIN_DESCRIPTION;
@@ -85,13 +88,28 @@ export function NewSkillModal({ opened, onClose, onCreate, busy, error }: NewSki
           <Button
             disabled={!nameOk || !descriptionOk}
             loading={busy}
-            onClick={() =>
-              onCreate({ name, description, ...(title ? { title } : {}) })
-            }
+            onClick={() => setConfirming(true)}
+            data-testid="create-skill"
           >
             Create (incubating)
           </Button>
         </Group>
+
+        {/* `POST /api/skills` is step-up guarded: it writes a new folder under
+            `.claude/skills/`, which is what future runs load. The button used to post
+            straight from its onClick, so outside the step-up window it only ever 403'd. */}
+        <ConfirmDialog
+          opened={confirming}
+          onClose={() => setConfirming(false)}
+          title={`Create the skill "${name}"?`}
+          confirmLabel="Create"
+          requireStepUp
+          description="It scaffolds .claude/skills/ from the template and lands incubating — linted, tested and loaded by nothing until it is bound."
+          onConfirm={async () => {
+            await onCreate({ name, description, ...(title ? { title } : {}) });
+            setConfirming(false);
+          }}
+        />
       </Stack>
     </Modal>
   );

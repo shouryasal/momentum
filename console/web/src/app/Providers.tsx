@@ -10,6 +10,7 @@ import { theme } from '../theme';
 import { ApiProvider } from './ApiContext';
 import { EventStreamProvider } from './EventStreamContext';
 import { SessionProvider, useSession } from './SessionContext';
+import { ViewModeProvider, type ViewMode } from './ViewModeContext';
 
 export interface AppProvidersProps {
   children: ReactNode;
@@ -19,6 +20,8 @@ export interface AppProvidersProps {
   sseFactory?: EventSourceFactory;
   /** Force the stream on/off; by default it follows the session. */
   sseEnabled?: boolean;
+  /** Start in a known view; by default the operator's stored preference, else Simple. */
+  viewMode?: ViewMode;
 }
 
 function AuthedEventStream({
@@ -48,6 +51,7 @@ export function AppProviders({
   queryClient,
   sseFactory,
   sseEnabled,
+  viewMode,
 }: AppProvidersProps) {
   const qc = useMemo(() => queryClient ?? createQueryClient(), [queryClient]);
   return (
@@ -56,12 +60,14 @@ export function AppProviders({
       <QueryClientProvider client={qc}>
         <ApiProvider client={client}>
           <SessionProvider client={client}>
-            <AuthedEventStream
-              {...(sseFactory ? { factory: sseFactory } : {})}
-              {...(sseEnabled === undefined ? {} : { enabled: sseEnabled })}
-            >
-              {children}
-            </AuthedEventStream>
+            <ViewModeProvider {...(viewMode ? { initial: viewMode } : {})}>
+              <AuthedEventStream
+                {...(sseFactory ? { factory: sseFactory } : {})}
+                {...(sseEnabled === undefined ? {} : { enabled: sseEnabled })}
+              >
+                {children}
+              </AuthedEventStream>
+            </ViewModeProvider>
           </SessionProvider>
         </ApiProvider>
       </QueryClientProvider>

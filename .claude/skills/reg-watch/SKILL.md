@@ -29,9 +29,18 @@ NOT by you. -->
      flag on its own, whatever its wording.
    - Watched bodies and feeds: `references/feeds.md`.
 
-3. Severity guidance:
-   - Delisting or trading halt touching a universe asset -> flag `type: delisting`
-     or `halt`, `asset` set, active until human review (`ends_utc: null`).
+3. Severity guidance. "Universe" means the newest `knowledge/universe/<date>.json`
+   — watchlist tier included, because a hack on a coin Earn only watches still
+   moves the ones it holds:
+   - Delisting or trading halt touching ANY asset in that snapshot -> flag
+     `type: delisting` or `halt`, `asset` set to the base asset (per-asset, never
+     portfolio-wide), active until human review (`ends_utc: null`). The gate reads
+     this and moves a held position to `exit_only`: entries refused, and the exit
+     runs on the deterministic sliced ladder, never as a market dump.
+   - A hack, exploit or bridge failure on a tradeable asset -> `type: halt` on
+     that asset. One asset, one flag: a flag with no `asset` stops the whole book,
+     which is the right answer for a USDT depeg and the wrong one for a single
+     coin's exploit.
    - Stablecoin (USDT) depeg with corroboration -> `type: depeg`, portfolio-wide
      (`asset: null`).
    - Licence news (VARA/CMA/SEC actions on Binance entities) -> `type: licence`

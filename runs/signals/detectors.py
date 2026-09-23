@@ -10,6 +10,19 @@ A detector is a pure function of :class:`Ctx` (config + the computed
 :class:`~runs.signals.features.Features` + read-only DB handles). It returns
 :class:`Candidate` objects and never writes anything: persistence, dedupe and scoring all
 belong to :mod:`runs.signals.pipeline`.
+
+**Under a wide universe** the per-pair loops iterate ``ctx.pairs`` — every pair the feature
+builder actually computed, which is the watchlist, not a hardcoded two. Two consequences
+are handled here rather than downstream:
+
+* a detector reading a rich-tier key on a cheap-tier pair sees ``None`` and does not fire,
+  which is the existing fail-closed path; ``move`` (24h) and ``dip_from_high`` work off the
+  cheap tier and so genuinely see the whole watchlist;
+* one volatile night could otherwise let a single detector fill the entire screening queue,
+  so :func:`run_all` applies a **per-detector cap** and orders every detector's hits by
+  tier (core first) then strength. ``max_candidates_per_cycle`` downstream then spends its
+  budget on the best hit from each of several detectors instead of forty ``move`` rows off
+  the same correlated move.
 """
 
 from __future__ import annotations
@@ -27,6 +40,7 @@ from runs.signals.features import Features
 __all__ = [
     "Candidate",
     "Ctx",
+    "DEFAULT_MAX_PER_DETECTOR",
     "DETECTOR_ORDER",
     "breakout",
     "dip_from_high",
@@ -48,6 +62,13 @@ DIRECTION_UP = "up"
 DIRECTION_DOWN = "down"
 DIRECTION_RISK = "risk"
 DIRECTION_NEUTRAL = "neutral"
+
+#: How many candidates ONE detector may contribute to a cycle. Not a quality judgement:
+#: with 106 pairs on the watchlist, a 6% day across the alt book fires ``move`` on dozens
+#: of names that are one position wearing many tickers (measured avg pairwise correlation
+#: of the top-30 alts is 0.41-0.49), and without this cap they would crowd out
+#: ``near_stop`` on something we actually hold.
+DEFAULT_MAX_PER_DETECTOR = 3
 
 
 @dataclass(frozen=True)
@@ -80,6 +101,9 @@ class Ctx:
     root: Path = REPO_ROOT
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
     errors: dict[str, str] = field(default_factory=dict)
+    #: ``{detector: n_dropped}`` for this cycle's per-detector cap. Not an error: a cap
+    #: firing is the scanner working, and the count is how a human sees it working.
+    capped: dict[str, int] = field(default_factory=dict)
 
     def last_decide_started(self) -> str | None:
         if self.jdb is None:
@@ -96,6 +120,38 @@ class Ctx:
 
     def fget(self, pair: str | None, name: str) -> float | None:
         return self.features.get(pair, name)
+
+    @property
+    def pairs(self) -> tuple[str, ...]:
+        """Every pair a detector may look at: exactly what the feature builder computed.
+
+        Reading the watchlist off the features rather than off the config is the point —
+        it makes it impossible for a detector to fire on a pair with no numbers behind it,
+        and it means the token budget in ``features.build`` is the ONE place the scanner's
+        breadth is decided.
+        """
+        return tuple(self.features.pairs)
+
+    def tradeable(self, pair: str | None) -> bool:
+        """Is this pair one the gate would pass an order for, as opposed to watched only?"""
+        if pair is None:
+            return True
+        return pair in set(getattr(self.cfg.universe, "pairs", ()) or ())
+
+    def priority(self, candidate: Candidate) -> tuple[int, float]:
+        """Sort key: fast path, then core, then tradeable, then strength. Deterministic."""
+        pair = candidate.pair
+        core = {f"{a}/{self.cfg.universe.quote}"
+                for a in (getattr(self.cfg.universe, "core", None) or ())}
+        if candidate.fast_path or pair is None:
+            tier = 0
+        elif pair in core:
+            tier = 1
+        elif self.tradeable(pair):
+            tier = 2
+        else:
+            tier = 3
+        return (tier, -float(candidate.strength))
 
 
 Detector = Callable[[Ctx], list[Candidate]]
@@ -165,7 +221,7 @@ def news_event(ctx: Ctx) -> list[Candidate]:
     for event, items in by_event.items():
         assets = sorted({a for r in items for a in _assets_of(r)})
         pair = f"{assets[0]}/{ctx.cfg.universe.quote}" if len(assets) == 1 else None
-        if pair is not None and pair not in ctx.cfg.universe.pairs:
+        if pair is not None and pair not in ctx.features.pairs:
             pair = None
         out.append(Candidate(
             detector="news_event", pair=pair, direction=DIRECTION_RISK,
@@ -214,7 +270,7 @@ def move(ctx: Ctx) -> list[Candidate]:
     if not dc.enabled:
         return []
     out = []
-    for pair in ctx.cfg.universe.pairs:
+    for pair in ctx.pairs:
         for window, threshold in sorted(dc.pct.items()):
             name = {"1h": "ret_1h", "4h": "ret_4h", "24h": "ret_24h"}.get(window)
             if name is None:
@@ -259,7 +315,7 @@ def funding(ctx: Ctx) -> list[Candidate]:
         rate = r["last_rate"]
         if rate is None or abs(rate) <= dc.abs_8h:
             continue
-        pair = _pair_for_symbol(ctx.cfg, r["symbol"])
+        pair = _pair_for_symbol(ctx, r["symbol"])
         out.append(Candidate(
             detector="funding", pair=pair,
             direction=DIRECTION_DOWN if rate > 0 else DIRECTION_UP,
@@ -270,8 +326,8 @@ def funding(ctx: Ctx) -> list[Candidate]:
     return out
 
 
-def _pair_for_symbol(cfg: EarnConfig, symbol: str) -> str | None:
-    for pair in cfg.universe.pairs:
+def _pair_for_symbol(ctx: Ctx, symbol: str) -> str | None:
+    for pair in ctx.pairs:
         if pair.replace("/", "") == symbol:
             return pair
     return None
@@ -287,7 +343,7 @@ def breakout(ctx: Ctx) -> list[Candidate]:
     if not dc.enabled:
         return []
     out = []
-    for pair in ctx.cfg.universe.pairs:
+    for pair in ctx.pairs:
         close = ctx.fget(pair, "close")
         hi = ctx.fget(pair, "range_high_20d")
         lo = ctx.fget(pair, "range_low_20d")
@@ -318,7 +374,7 @@ def rsi_extreme(ctx: Ctx) -> list[Candidate]:
     if not dc.enabled:
         return []
     out = []
-    for pair in ctx.cfg.universe.pairs:
+    for pair in ctx.pairs:
         value = ctx.fget(pair, "rsi_4h")
         if value is None:
             continue
@@ -345,7 +401,7 @@ def volume_spike(ctx: Ctx) -> list[Candidate]:
     if not dc.enabled:
         return []
     out = []
-    for pair in ctx.cfg.universe.pairs:
+    for pair in ctx.pairs:
         z = ctx.fget(pair, "vol_z_1h")
         if z is None or z < dc.zscore:
             continue
@@ -367,7 +423,7 @@ def dip_from_high(ctx: Ctx) -> list[Candidate]:
     if not dc.enabled:
         return []
     out = []
-    for pair in ctx.cfg.universe.pairs:
+    for pair in ctx.pairs:
         dip = ctx.fget(pair, "dip_from_high_pct")
         if dip is None or dip < dc.pct:
             continue
@@ -388,7 +444,7 @@ def ma_cross(ctx: Ctx) -> list[Candidate]:
     if not dc.enabled:
         return []
     out = []
-    for pair in ctx.cfg.universe.pairs:
+    for pair in ctx.pairs:
         fast, slow = ctx.fget(pair, "ma_fast_1d"), ctx.fget(pair, "ma_slow_1d")
         pfast, pslow = ctx.fget(pair, "ma_fast_1d_prev"), ctx.fget(pair, "ma_slow_1d_prev")
         if None in (fast, slow, pfast, pslow):
@@ -410,17 +466,43 @@ def ma_cross(ctx: Ctx) -> list[Candidate]:
 # --------------------------------------------------------------------------- run
 
 
-def run_all(ctx: Ctx, *, only: list[str] | None = None) -> list[Candidate]:
+def max_per_detector(cfg: EarnConfig) -> int:
+    """``signals.scanner.max_candidates_per_detector`` when the config carries it."""
+    value = getattr(cfg.signals.scanner, "max_candidates_per_detector", None)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_PER_DETECTOR
+
+
+def run_all(ctx: Ctx, *, only: list[str] | None = None,
+            cap: int | None = None) -> list[Candidate]:
     """Every enabled detector, in registration order. One failing detector never
-    silences the rest — it is skipped and reported through ``ctx.errors``."""
+    silences the rest — it is skipped and reported through ``ctx.errors``.
+
+    Each detector's hits are ordered by :meth:`Ctx.priority` and truncated to ``cap``
+    (default ``signals.scanner.max_candidates_per_detector``), so a wide watchlist cannot
+    let one detector's forty correlated hits consume the whole screening budget. Detector
+    ORDER is unchanged: the cap decides which of a detector's hits survive, never which
+    detectors do.
+    """
+    limit = max_per_detector(ctx.cfg) if cap is None else max(1, int(cap))
     out: list[Candidate] = []
     errors: dict[str, str] = {}
+    capped: dict[str, int] = {}
     for name in DETECTOR_ORDER:
         if only is not None and name not in only:
             continue
         try:
-            out.extend(registry[name](ctx))
+            hits = list(registry[name](ctx))
         except Exception as e:  # noqa: BLE001 — detectors are isolated by design
             errors[name] = str(e)
+            continue
+        if len(hits) > limit:
+            hits.sort(key=ctx.priority)
+            capped[name] = len(hits) - limit
+            hits = hits[:limit]
+        out.extend(hits)
     ctx.errors = errors
+    ctx.capped = capped
     return out

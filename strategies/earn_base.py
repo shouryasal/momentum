@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -52,6 +55,53 @@ _BREACH_CHECKS = {"weight_cap", "gross_cap", "usdt_floor", "order_notional",
 # Exit reasons that arm the re-entry cooldown (spec section 9).
 _COOLDOWN_EXITS = ("stop_loss", "trailing_stop_loss", "stoploss_on_exchange", "roi", "tp")
 
+#: How often ``_audit_selfcheck`` may re-raise the same audit-trail alarm. Short enough
+#: that an operator sees it inside one candle, long enough not to be a log storm.
+_AUDIT_ALERT_INTERVAL_MIN = 15
+
+
+def instrument_on() -> bool:
+    """Is the diagnostic entry tap armed? ``EARN_INSTRUMENT_CSV=<path>`` arms it."""
+    return bool(os.environ.get("EARN_INSTRUMENT_CSV"))
+
+
+def instrument(kind: str, pair: str, when: Any, reason: str = "",
+               value: float = 0.0) -> None:
+    """Append one diagnostic row. OFF unless ``EARN_INSTRUMENT_CSV`` names a file.
+
+    This exists for one question a backtest cannot otherwise answer: *why* an entry
+    signal did not become a trade. Journaling is deliberately off in a backtest
+    (``_journal_on = not _is_backtest``), and freqtrade's own "Rejected Entry signals"
+    counts only ``confirm_trade_entry`` refusals — not the far commoner case of
+    ``custom_stake_amount`` sizing the entry to zero, which looks like silence.
+
+    Never raises and touches nothing when disarmed, so the live and TEST paths are
+    byte-for-byte what they were.
+    """
+    path = os.environ.get("EARN_INSTRUMENT_CSV")
+    if not path:
+        return
+    try:
+        ts = when.isoformat() if hasattr(when, "isoformat") else str(when)
+        line = f"{kind},{pair},{ts},{reason},{value!r}\n"
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception:  # noqa: BLE001 — a diagnostic may never break the loop
+        pass
+
+
+def _candles(hours: float, tf_hours: int) -> int:
+    """A lock stated in HOURS, expressed in candles, never rounded away to nothing.
+
+    Freqtrade's protections count candles, and the plain ``hours // tf_hours`` this
+    replaces returns 0 whenever the configured lock is shorter than one candle — a
+    2-hour ``stoploss_guard.lock_hours`` on the 4h timeframe silently meant *no lock at
+    all*. The counterpart of the monthly-stop defect: a lock that dies before the
+    condition that set it. At today's config every value is a whole multiple of the
+    candle, so this changes no current number; it stops a future one from vanishing.
+    """
+    return max(int(float(hours) // max(int(tf_hours), 1)), 1)
+
 
 def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
@@ -68,6 +118,36 @@ def _parse(raw: str | None) -> datetime | None:
 
 def _iso(dt: datetime) -> str:
     return _aware(dt).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@dataclass
+class AdjustPlan:
+    """One candidate ``adjust_trade_position`` answer, computed WITHOUT side effects.
+
+    ``stake`` is what the callback returns (positive = add, negative = a COST-BASIS
+    trim); ``tag`` travels with the order as ``order.ft_order_tag``. ``effects`` are the
+    writes — journal rows, per-trade add counters, cadence stamps — that may only happen
+    once the candidate has WON the ``mechanics.ACTION_PRIORITY`` contest.
+
+    That deferral is the whole point: ``_mechanics_plan`` builds every candidate before
+    it knows which one is sent, so a candidate that loses must consume no budget. A
+    pyramid add beaten by a take-profit rung used to increment ``pyramid_adds`` and
+    stamp its cooldown for an order that was never submitted, and a losing SleeveB trim
+    used to write a ``partial_exit`` journal row and burn the rebalance interval.
+    """
+
+    stake: float
+    tag: str = ""
+    effects: list[Callable[[], None]] = field(default_factory=list)
+
+    def then(self, effect: Callable[[], None]) -> AdjustPlan:
+        """Register a side effect to run only if this plan wins. Returns ``self``."""
+        self.effects.append(effect)
+        return self
+
+    def commit(self) -> None:
+        for effect in self.effects:
+            effect()
 
 
 class EarnBaseStrategy(IStrategy):
@@ -134,18 +214,22 @@ class EarnBaseStrategy(IStrategy):
                 flags_provider=lambda pair, now: (False, ""),
                 staleness_provider=lambda now: 0.0,
                 kill_provider=lambda: False,
+                returns_provider=self._daily_returns,
             )
         else:
             store = SqliteStateStore(
                 os.environ.get("EARN_JOURNAL_DB", "/freqtrade/journal/journal.db"),
                 cfg.sleeve,
             )
-            self.gate = RiskGate(cfg, store)
+            self.gate = RiskGate(cfg, store, returns_provider=self._daily_returns)
         self._pending_quotes: dict[str, tuple[str, float, float]] = {}
-        self._pending_add_tag: dict[str, str] = {}
         self._params: dict = {}
         self._params_mtime: float = 0.0
         self._params_breached: str = ""
+        #: Callbacks that MUST have produced a journal row, counted so the loop can tell
+        #: "this bot is trading" from "this bot is idle" without a DB read.
+        self._trade_events: int = 0
+        self._audit_alert_at: datetime | None = None
 
     # ---------------------------------------------------------------- protections
 
@@ -155,12 +239,14 @@ class EarnBaseStrategy(IStrategy):
         per_day = mx.candles_per_day(self.timeframe)
         tf_h = max(int(round(24.0 / per_day)) if per_day else 4, 1)
         return [
-            {"method": "CooldownPeriod", "stop_duration_candles": c.cooldown_candles},
+            # Already stated in candles, so only the "never zero" floor applies.
+            {"method": "CooldownPeriod",
+             "stop_duration_candles": max(int(c.cooldown_candles), 1)},
             {
                 "method": "StoplossGuard",
-                "lookback_period_candles": c.stoploss_guard_window_h // tf_h,
+                "lookback_period_candles": _candles(c.stoploss_guard_window_h, tf_h),
                 "trade_limit": c.stoploss_guard_count,
-                "stop_duration_candles": c.stoploss_guard_lock_h // tf_h,
+                "stop_duration_candles": _candles(c.stoploss_guard_lock_h, tf_h),
                 "only_per_pair": False,
                 "required_profit": 0.0,
             },
@@ -170,7 +256,7 @@ class EarnBaseStrategy(IStrategy):
                 "lookback_period_candles": c.protection_drawdown_lookback,
                 "trade_limit": c.protection_drawdown_trade_limit,
                 "max_allowed_drawdown": c.daily_stop,
-                "stop_duration_candles": c.daily_lock_hours // tf_h,
+                "stop_duration_candles": _candles(c.daily_lock_hours, tf_h),
             },
         ]
 
@@ -192,6 +278,29 @@ class EarnBaseStrategy(IStrategy):
             pass
         return 0.0
 
+    #: Window for the gate's beta and correlation caps, in daily observations. 60 days is
+    #: the window docs/design/wide-universe.md §2.1 measured every correlation and beta
+    #: number on, so the limit and the evidence for it are computed the same way.
+    RISK_WINDOW_DAYS = 60
+
+    def _daily_returns(self, pair: str) -> list[float] | None:
+        """Recent daily log-ish returns for one pair, for the gate's beta/corr checks.
+
+        Read from the 1d informative frame the sleeves already populate — the gate asks
+        for numbers, never for an opinion, and it never fetches anything itself. ``None``
+        means "no history here", under which those two checks pass rather than blocking
+        the book on a data gap the tier caps already bound.
+        """
+        try:
+            df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+            close = df["close_1d"] if "close_1d" in df else df["close"]
+            series = close.dropna().drop_duplicates().tail(self.RISK_WINDOW_DAYS + 1)
+            if len(series) < 3:
+                return None
+            return [float(x) for x in series.pct_change().dropna()]
+        except Exception:  # noqa: BLE001 — a risk check may never break the loop
+            return None
+
     def _open_trades(self) -> list:
         from freqtrade.persistence import Trade
 
@@ -201,10 +310,13 @@ class EarnBaseStrategy(IStrategy):
         """Ledger NAV — the bot's own capital, never the whole exchange account.
 
         ``ledger_cash = starting_balance + closed profit + realized profit - Σ stake``;
-        a resting entry order has already had its stake deducted, so its unfilled
-        remainder is added back as ``reserved``. NAV therefore does not move when an
-        entry order is merely placed (verified HIGH #11), and USDT belonging to another
-        sleeve or to the human never enters the number.
+        the part of a resting entry order whose stake that subtraction ALREADY removed
+        is added back as ``reserved`` (see :meth:`_reserved_for` — for a trade that has
+        already filled something it is nothing, because freqtrade recomputes
+        ``stake_amount`` from filled orders only). NAV therefore does not move when an
+        entry order is merely placed (verified HIGH #11) and is not inflated by one
+        either, and USDT belonging to another sleeve or to the human never enters the
+        number.
         """
         now = _aware(now)
         quote = self.config.get("stake_currency", "USDT")
@@ -256,22 +368,37 @@ class EarnBaseStrategy(IStrategy):
 
     @staticmethod
     def _reserved_for(trade, price: float) -> float:
-        """USDT still sitting in this trade's *open entry* orders."""
-        total = 0.0
+        """USDT in this trade's open entry orders that ``ledger_cash`` HAS already deducted.
+
+        ``_portfolio_state`` subtracts ``trade.stake_amount``. For a brand-new trade
+        nothing has filled, ``recalc_trade_from_orders`` leaves the constructor's whole
+        stake in place, and the entire resting notional was therefore deducted — adding
+        it back is what keeps NAV flat when an order is merely placed. Once ANYTHING has
+        filled, freqtrade recomputes ``stake_amount`` from filled orders only, so a
+        resting position-adjustment order was never deducted and adding it back would
+        INFLATE NAV (verified HIGH): ``loop_tick`` stamps the day/month anchor straight
+        off that number, so an inflated anchor is a false daily flatten of the whole
+        book. Hence ``min(resting, still-deducted)``: never more than the cash that
+        actually left. Both halves are pinned in
+        ``tests/contract/test_freqtrade_contract.py``.
+        """
+        resting = 0.0       # unfilled remainder of this trade's open entry orders
+        filled_cost = 0.0   # cost basis of everything this trade's entry orders filled
         for order in (getattr(trade, "orders", None) or []):
             try:
                 if order.ft_order_side != trade.entry_side:
                     continue
-                if (getattr(order, "status", "") or "").lower() not in ("open", "new",
-                                                                       "partially_filled"):
-                    continue
                 amount = float(getattr(order, "safe_amount", 0.0) or 0.0)
                 filled = float(getattr(order, "safe_filled", 0.0) or 0.0)
                 rate = float(getattr(order, "safe_price", 0.0) or price)
-                total += max(amount - filled, 0.0) * rate
+                filled_cost += filled * rate
+                if (getattr(order, "status", "") or "").lower() in ("open", "new",
+                                                                    "partially_filled"):
+                    resting += max(amount - filled, 0.0) * rate
             except (AttributeError, TypeError, ValueError):
                 continue
-        return total
+        deducted = float(getattr(trade, "stake_amount", 0.0) or 0.0) - filled_cost
+        return max(min(resting, deducted), 0.0)
 
     def _capture_quote(self, pair: str) -> tuple[str, float, float] | None:
         ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -364,8 +491,12 @@ class EarnBaseStrategy(IStrategy):
         return None
 
     def _sleeve_adjust(self, trade, ps: PortfolioState, current_time: datetime,
-                       current_rate: float, current_profit: float) -> float | None:
-        """Sleeve-specific position adjustment (scheduled DCA, rebalance). Lowest priority."""
+                       current_rate: float, current_profit: float) -> AdjustPlan | None:
+        """Sleeve-specific position adjustment (scheduled DCA, rebalance). Lowest priority.
+
+        Returns a PLAN, never a bare stake: this candidate may lose the priority
+        contest, and then none of its side effects may happen.
+        """
         return None
 
     def _regime_up(self, pair: str) -> bool:
@@ -391,26 +522,46 @@ class EarnBaseStrategy(IStrategy):
     # ---------------------------------------------------------------- gate helpers
 
     def _gated_add(self, pair: str, stake: float, ps: PortfolioState, *, trade=None,
-                   tag: str = "") -> float | None:
-        """EVERY positive adjustment goes through here: check_entry then cap_stake."""
+                   tag: str = "") -> AdjustPlan | None:
+        """EVERY positive adjustment goes through here: SIZE first, then enforce.
+
+        ``cap_stake`` clamps the ask to the tightest sizing headroom (weight cap, gross
+        cap, USDT floor, ``max_order_notional_pct``, remaining daily turnover) and the
+        exchange filters put it on the LOT_SIZE/MIN_NOTIONAL grid; only then does
+        ``check_entry`` run — on the number that will actually be sent. Gating the RAW
+        ask instead (verified MEDIUM) turned a legal oversized proposal, e.g. a
+        0.25*NAV SleeveB gap under a 0.2 ``max_order_notional_pct``, into a repeating
+        ``order_notional`` *breach* alert and no order at all, while
+        ``custom_stake_amount`` sized the identical first entry down without complaint.
+        A sizing check can still only fail here if the cap was bypassed — which is
+        exactly the breach the confirm stage is meant to shout about.
+
+        Returns a PLAN: the journal row and the order tag are held back until the caller
+        knows this candidate won the priority contest.
+        """
         if stake <= 0:
+            instrument("add_out", pair, ps.now, f"zero_stake:{tag}", 0.0)
             return None
-        decision = self.gate.check_entry(pair, stake, ps)
+        sized = self.gate.cap_stake(pair, stake, ps)
+        capped = self._clamp_to_exchange(pair, sized)
+        if sized > 0 and capped <= 0:
+            instrument("add_out", pair, ps.now, f"exchange_limits:{tag}", stake)
+            self._journal_adjust(pair, trade, False, "exchange_limits", None, stake, ps,
+                                 action="reject", is_entry=True)
+            return None
+        decision = self.gate.check_entry(pair, capped, ps)
         if not decision.allowed:
+            instrument("add_reject", pair, ps.now, f"{decision.reason}:{tag}", capped)
             self._journal_adjust(pair, trade, False, decision.reason, decision.checks,
-                                 stake, ps, action="reject")
+                                 capped, ps, action="reject", is_entry=True)
             return None
-        capped = self.gate.cap_stake(pair, stake, ps)
-        capped = self._clamp_to_exchange(pair, capped)
-        if capped <= 0:
-            self._journal_adjust(pair, trade, False, "exchange_limits", decision.checks,
-                                 stake, ps, action="reject")
-            return None
-        self._journal_adjust(pair, trade, True, tag or "add", decision.checks, capped, ps,
-                             action="clamp" if capped < stake else "allow")
-        if tag:
-            self._pending_add_tag[pair] = tag
-        return capped
+        instrument("add_ok", pair, ps.now, tag, capped)
+        reason = tag or "add"
+        action = "clamp" if capped < stake - 1e-9 else "allow"
+        plan = AdjustPlan(stake=capped, tag=tag)
+        return plan.then(lambda: self._journal_adjust(
+            pair, trade, True, reason, decision.checks, capped, ps, action=action,
+            is_entry=True))
 
     def _exchange_filters(self, pair: str) -> mx.ExchangeFilters:
         limits = None
@@ -434,25 +585,99 @@ class EarnBaseStrategy(IStrategy):
 
     def _journal_adjust(self, pair: str, trade, allowed: bool, reason: str,
                         checks: dict[str, bool] | None, stake: float, ps: PortfolioState,
-                        *, action: str) -> None:
+                        *, action: str, is_entry: bool) -> None:
         if not self._journal_on:
             return
         failing = reason.split(":")[0]
         severity = "allow" if allowed else ("breach" if failing in _BREACH_CHECKS else "reject")
+        # The direction is the CALLER's, not the stake's sign: a rejected take-profit rung
+        # is journalled with a positive stake and is still a sell.
+        side = self._order_side(getattr(trade, "trade_direction", None) or "long",
+                                is_entry=is_entry, where="adjust_trade_position")
         _journal.record_gate_decision(
             self.gate_cfg.sleeve, pair, "adjust_trade_position", "adjust", allowed, reason,
+            side=side,
             severity=severity, checks=checks, proposed_stake=stake, nav=ps.nav,
             gross_exposure=ps.gross_exposure, strategy_version=STRATEGY_VERSION,
             run_id=self.gate_cfg.run_id or None, action=action,
             trade_id=getattr(trade, "id", None),
         )
 
+    # ---------------------------------------------------------------- audit trail
+
+    def _order_side(self, side: str | None, *, is_entry: bool, where: str) -> str | None:
+        """freqtrade's ``side`` argument as the EXCHANGE order side the journal stores.
+
+        The entry callbacks are handed the POSITION side (``long``/``short``); every
+        journal ``side`` column CHECKs ``IN ('buy','sell')``. This is the single
+        conversion point — see :func:`strategies.mechanics.order_side`. An unrecognised
+        value journals NULL and raises an incident rather than killing the row.
+        """
+        mapped = mx.order_side(side, is_entry=is_entry)
+        if mapped is None and self._journal_on:
+            _journal.alert(
+                "freqtrade_side_unknown",
+                f"{where}: freqtrade passed side={side!r}, which is neither a position "
+                f"side {mx.POSITION_SIDES} nor an order side {mx.ORDER_SIDES} — "
+                f"journalling NULL; the freqtrade contract test needs re-pinning",
+            )
+        return mapped
+
+    def _audit_selfcheck(self, now: datetime) -> None:
+        """Fail loudly when this bot is trading but its journal rows are not arriving.
+
+        The journal writers swallow their exceptions on purpose (journalling must never
+        veto an order) — which is exactly how 122 rejected writes stayed invisible for
+        eight hours while both sleeves held open dry-run positions. This runs every bot
+        loop and turns either symptom into an ``incidents`` row plus the ``.write_failed``
+        health marker ops/healthcheck.py alerts on:
+
+        * a swallowed write (``failed > 0``) — something raised and was eaten; and
+        * an empty audit trail (trade callbacks ran, ``ok == 0``) — nothing raised at all
+          and still not one row landed.
+        """
+        if not self._journal_on:
+            return
+        st = _journal.stats()
+        failed, ok = int(st.get("failed") or 0), int(st.get("ok") or 0)
+        if failed:
+            problem = (f"{failed} journal write(s) swallowed since "
+                       f"{st.get('first_failure_utc')} — last error: {st.get('last_error')}")
+        elif self._trade_events and not ok:
+            problem = (f"{self._trade_events} trade callback(s) ran and not one journal "
+                       f"row was written — the audit trail is empty")
+        else:
+            return
+        last = self._audit_alert_at
+        if last is not None and (
+                _aware(now) - last).total_seconds() < _AUDIT_ALERT_INTERVAL_MIN * 60:
+            return
+        self._audit_alert_at = _aware(now)
+        _journal.alert("audit_trail_missing",
+                       f"sleeve {self.gate_cfg.sleeve} is taking trades without an audit "
+                       f"trail: {problem}", dedupe=False)
+
     # ---------------------------------------------------------------- callbacks
 
     def bot_loop_start(self, current_time: datetime, **kwargs) -> None:
+        self._audit_selfcheck(current_time)
         self._reload_params()
         ps = self._portfolio_state(current_time)
         actions = self.gate.loop_tick(ps)
+        if actions.monthly_unlock:
+            # The Gulf month the drawdown was measured over has ended, so the stop it
+            # armed has ended with it. Journalled with the same weight as the stop, and
+            # any freqtrade pair locks the flatten left behind go with it: they are the
+            # daily stop's timed locks and the month boundary is always past them.
+            self._release_risk_pair_locks(current_time)
+            if self._journal_on:
+                _journal.record_gate_decision(
+                    self.gate_cfg.sleeve, "ALL", "bot_loop_start", "loop", True,
+                    f"risk_stop_monthly_expired:{actions.unlocked_month}",
+                    severity="allow", nav=ps.nav, gross_exposure=ps.gross_exposure,
+                    strategy_version=STRATEGY_VERSION,
+                    run_id=self.gate_cfg.run_id or None, action="allow",
+                )
         if not actions.flatten:
             return
         if self._journal_on:
@@ -464,9 +689,11 @@ class EarnBaseStrategy(IStrategy):
             )
         if self._is_backtest:
             return
-        # HIGH #10: only the DAILY stop takes a timed pair lock. The monthly stop is
-        # held by the gate's own monthly_locked flag plus flatten_pending(), so a
-        # human resume is not fighting a ten-year freqtrade lock afterwards.
+        # HIGH #10: only the DAILY stop takes a pair lock, and it is a TIMED one that
+        # expires with the stop (`daily_stop_lock_hours` from the moment it fired). The
+        # monthly stop takes none — it is held by the gate's own dated `monthly_locked`
+        # flag, which the Gulf month boundary releases — so neither a human resume nor
+        # the next month is fighting a lock that outlived its reason.
         if actions.lock_until is None:
             return
         for pair in self.gate_cfg.pairs:
@@ -475,13 +702,32 @@ class EarnBaseStrategy(IStrategy):
             except Exception:
                 pass
 
+    def _release_risk_pair_locks(self, now: datetime) -> None:
+        """Drop any still-live freqtrade pair lock this sleeve's risk stops created.
+
+        Best effort and never raises into the loop: the lock list is freqtrade's, and a
+        missing API on an older release must not stop the month from turning.
+        """
+        if self._is_backtest:
+            return
+        # Only OUR reasons: CooldownPeriod / StoplossGuard / MaxDrawdown locks are
+        # freqtrade's, carry their own candle-counted expiry, and are not ours to clear.
+        for reason in ("risk_stop_daily", "risk_stop_monthly"):
+            try:
+                self.unlock_reason(reason)
+            except Exception:  # noqa: BLE001 — a lock we cannot drop is not fatal
+                pass
+
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
                             time_in_force: str, current_time: datetime,
                             entry_tag: str | None, side: str, **kwargs) -> bool:
+        self._trade_events += 1
         ps = self._portfolio_state(current_time)
         quote = self._capture_quote(pair)
         stake = amount * rate
         d = self.gate.check_entry(pair, stake, ps)
+        instrument("confirm_ok" if d.allowed else "confirm_reject", pair, current_time,
+                   d.reason, stake)
         if d.allowed:
             self._pending_quotes[pair] = quote
         if self._journal_on:
@@ -490,7 +736,9 @@ class EarnBaseStrategy(IStrategy):
                 "breach" if failing in _BREACH_CHECKS else "reject")
             _journal.record_gate_decision(
                 self.gate_cfg.sleeve, pair, "confirm_trade_entry", "entry", d.allowed,
-                d.reason, side=side, severity=severity, checks=d.checks,
+                d.reason,
+                side=self._order_side(side, is_entry=True, where="confirm_trade_entry"),
+                severity=severity, checks=d.checks,
                 proposed_stake=stake, quote=quote, nav=ps.nav,
                 gross_exposure=ps.gross_exposure, strategy_version=STRATEGY_VERSION,
                 run_id=self.gate_cfg.run_id or None,
@@ -501,14 +749,22 @@ class EarnBaseStrategy(IStrategy):
     def confirm_trade_exit(self, pair: str, trade, order_type: str, amount: float,
                            rate: float, time_in_force: str, exit_reason: str,
                            current_time: datetime, **kwargs) -> bool:
+        self._trade_events += 1
         ps = self._portfolio_state(current_time)
         quote = self._capture_quote(pair)
         self._pending_quotes[pair] = quote
         d = self.gate.check_discretionary_exit(pair, amount * rate, ps, exit_reason)
         if self._journal_on:
+            # freqtrade passes NO `side` to this callback (pinned in the contract test):
+            # the exit's order side comes off the trade — `exit_side` is already buy/sell,
+            # `trade_direction` is the long/short fallback both of which map to 'sell' for
+            # a spot long. Hard-coding "sell" would silently lie the day shorts appear.
+            exit_side = self._order_side(
+                getattr(trade, "exit_side", None) or getattr(trade, "trade_direction", "long"),
+                is_entry=False, where="confirm_trade_exit")
             _journal.record_gate_decision(
                 self.gate_cfg.sleeve, pair, "confirm_trade_exit", "exit", d.allowed,
-                exit_reason if d.allowed else f"{d.reason}:{exit_reason}", side="sell",
+                exit_reason if d.allowed else f"{d.reason}:{exit_reason}", side=exit_side,
                 severity="allow" if d.allowed else "reject", checks=d.checks, quote=quote,
                 nav=ps.nav, strategy_version=STRATEGY_VERSION,
                 run_id=self.gate_cfg.run_id or None,
@@ -527,15 +783,23 @@ class EarnBaseStrategy(IStrategy):
             # Bad-order drill: bypass the cap so the confirm-stage gate must reject it.
             return 0.9 * ps.nav
         if desired <= 0:
+            instrument("sized_out", pair, current_time,
+                       f"desired_zero:{entry_tag or ''}", 0.0)
             return 0.0
         if max_stake:
             desired = min(desired, max_stake)
         capped = self.gate.cap_stake(pair, desired, ps)
         capped = self._clamp_to_exchange(pair, capped)
+        if instrument_on():
+            instrument("sized" if capped > 0 else "sized_out", pair, current_time,
+                       f"cap_stake:{entry_tag or ''}" if capped <= 0 else (entry_tag or ""),
+                       capped)
         if self._journal_on and 0 < capped < desired:
             _journal.record_gate_decision(
                 self.gate_cfg.sleeve, pair, "custom_stake_amount", "entry", True,
-                "clamped", side=side, checks={"clamped": True}, proposed_stake=desired,
+                "clamped",
+                side=self._order_side(side, is_entry=True, where="custom_stake_amount"),
+                checks={"clamped": True}, proposed_stake=desired,
                 nav=ps.nav, strategy_version=STRATEGY_VERSION,
                 run_id=self.gate_cfg.run_id or None, action="clamp",
             )
@@ -585,14 +849,14 @@ class EarnBaseStrategy(IStrategy):
 
     def custom_exit(self, pair: str, trade, current_time: datetime, current_rate: float,
                     current_profit: float, **kwargs):
-        reason = self.gate.flatten_pending()
+        reason = self.gate.flatten_pending(_aware(current_time))
         if reason:
             return reason
         return self._custom_exit_extra(pair, trade)
 
     def check_entry_timeout(self, pair: str, trade, order, current_time: datetime,
                             **kwargs) -> bool:
-        if self.gate._kill() or self.gate.flatten_pending():
+        if self.gate._kill() or self.gate.flatten_pending(_aware(current_time)):
             return True  # cancel open entry orders under KILL or an active stop
         return bool(self.mech.get("reprice_on_timeout", False))
 
@@ -600,7 +864,7 @@ class EarnBaseStrategy(IStrategy):
                            **kwargs) -> bool:
         # An unfilled exit is replaced by freqtrade; repricing is the configured default
         # and a risk flatten always wants the replacement.
-        if self.gate.flatten_pending():
+        if self.gate.flatten_pending(_aware(current_time)):
             return True
         return bool(self.mech.get("reprice_on_timeout", False))
 
@@ -613,37 +877,85 @@ class EarnBaseStrategy(IStrategy):
 
         Priority per trade per candle: flatten pending → TP ladder → DCA/pyramid →
         sleeve rebalance. Exactly one action is returned; ``None`` means do nothing.
-        """
-        return self._mechanics_adjust(trade, current_time, current_rate, current_profit,
-                                      min_stake, max_stake)
 
-    def _mechanics_adjust(self, trade, current_time, current_rate, current_profit,
-                          min_stake, max_stake):
+        Returns freqtrade's ``(stake, order_tag)`` pair (``_adjust_trade_position_internal``
+        unpacks a tuple) so the winner's tag rides on the order it created —
+        ``order.ft_order_tag`` — instead of being stashed per pair before the winner is
+        known. Only adds carry a tag; an exit passes ``""`` so freqtrade keeps its own
+        ``partial_exit`` reason.
+        """
+        plan = self._mechanics_plan(trade, current_time, current_rate, current_profit,
+                                    min_stake, max_stake)
+        if plan is None:
+            return None, ""
+        return plan.stake, plan.tag
+
+    def _mechanics_plan(self, trade, current_time, current_rate, current_profit,
+                        min_stake, max_stake) -> AdjustPlan | None:
+        """Build every candidate PURELY, pick one, then commit ONLY the winner's effects."""
         now = _aware(current_time)
-        if self.gate.flatten_pending():
+        if self.gate.flatten_pending(now):
             return None  # custom_exit owns the flatten; never add or trim beside it
         ps = self._portfolio_state(now)
         if not ps.valid:
             return None
 
         actions = mx.ActionSet()
-        tp = self._ladder_action(trade, ps, current_rate, current_profit, min_stake)
-        if tp is not None:
-            actions.offer("take_profit", tp)
-        add = self._add_action(trade, ps, now, current_rate, current_profit, min_stake)
-        if add is not None:
-            actions.offer("add", add)
-        sleeve = self._sleeve_adjust(trade, ps, now, current_rate, current_profit)
-        if sleeve is not None:
-            actions.offer("rebalance", sleeve)
+        actions.offer("take_profit",
+                      self._ladder_action(trade, ps, current_rate, current_profit, min_stake))
+        actions.offer("add",
+                      self._add_action(trade, ps, now, current_rate, current_profit, min_stake))
+        actions.offer("rebalance",
+                      self._sleeve_adjust(trade, ps, now, current_rate, current_profit))
 
         chosen = actions.choose()
-        return None if chosen is None else chosen[1]
+        if chosen is None:
+            return None
+        plan: AdjustPlan = chosen[1]
+        plan.commit()
+        return plan
+
+    def _mechanics_adjust(self, trade, current_time, current_rate, current_profit,
+                          min_stake, max_stake) -> float | None:
+        """The chosen stake alone, for callers that do not care about the order tag."""
+        plan = self._mechanics_plan(trade, current_time, current_rate, current_profit,
+                                    min_stake, max_stake)
+        return None if plan is None else plan.stake
+
+    # -- exit sizing ------------------------------------------------------------
+
+    @staticmethod
+    def _cost_basis_exit(trade, sell_value: float, position_value: float, *,
+                        full_exit: bool = False) -> float | None:
+        """Turn a MARKET-VALUE trim into the cost-basis stake freqtrade expects.
+
+        ``adjust_trade_position``'s negative return is a fraction of
+        ``trade.stake_amount``: freqtradebot sells
+        ``|stake| * trade.amount / trade.stake_amount`` base units, and
+        ``trade.stake_amount`` is the trade's COST BASIS (``amount * open_rate``), not
+        its market value — both pinned in ``tests/contract/test_freqtrade_contract.py``.
+        Handing freqtrade a market value therefore oversells by exactly the open profit
+        (a 50% rung sells 50% too much), and the ladder's "full exit" asks for more base
+        than the position holds, which freqtradebot silently declines because
+        ``remaining`` goes negative — the intended flatten never happens at all.
+        """
+        basis = float(getattr(trade, "stake_amount", 0.0) or 0.0)
+        if basis <= 0:
+            return None
+        if full_exit:
+            return -basis
+        if position_value <= 0:
+            return None
+        fraction = min(max(abs(float(sell_value)) / float(position_value), 0.0), 1.0)
+        if fraction <= 0:
+            return None
+        return -(fraction * basis)
 
     # -- take profit ------------------------------------------------------------
 
     def _ladder_action(self, trade, ps: PortfolioState, current_rate: float,
-                       current_profit: float, min_stake: float | None = None) -> float | None:
+                       current_profit: float,
+                       min_stake: float | None = None) -> AdjustPlan | None:
         ladder = (self.mech.get("take_profit") or {}).get("ladder") or []
         if not ladder:
             return None
@@ -663,25 +975,39 @@ class EarnBaseStrategy(IStrategy):
         )
         if decision.rung is None:
             return None
-        self._set_tdata(trade, "tp_rungs", list(decision.fired))
         if not decision.acts:
+            # The documented burn: a rung whose slice is under min_exit_stake is marked
+            # fired here so it cannot block the ladder forever.
+            self._set_tdata(trade, "tp_rungs", list(decision.fired))
             self._journal_adjust(pair, trade, False, f"tp_skip:{decision.reason}", None,
-                                 0.0, ps, action="reject")
+                                 0.0, ps, action="reject", is_entry=False)
             return None
         gate = self.gate.check_discretionary_exit(pair, decision.sell_stake, ps,
                                                  f"tp{decision.rung + 1}")
         if not gate.allowed:
+            # The rung is deliberately NOT persisted as fired (verified HIGH): a
+            # churn/turnover/fee refusal must not lose the profit level. fee_budget is a
+            # MONTHLY counter, so burning here would silently cost every remaining rung
+            # for the rest of the month.
             self._journal_adjust(pair, trade, False, gate.reason, gate.checks,
-                                 decision.sell_stake, ps, action="reject")
+                                 decision.sell_stake, ps, action="reject", is_entry=False)
             return None
-        self._journal_adjust(pair, trade, True, decision.reason, gate.checks,
-                             -decision.sell_stake, ps, action="partial_exit")
-        return -abs(decision.sell_stake)
+        stake = self._cost_basis_exit(trade, decision.sell_stake, position_value,
+                                      full_exit=decision.full_exit)
+        if stake is None:
+            self._journal_adjust(pair, trade, False, "tp_skip:no_cost_basis", gate.checks,
+                                 decision.sell_stake, ps, action="reject", is_entry=False)
+            return None
+        plan = AdjustPlan(stake=stake)
+        plan.then(lambda: self._set_tdata(trade, "tp_rungs", list(decision.fired)))
+        return plan.then(lambda: self._journal_adjust(
+            pair, trade, True, decision.reason, gate.checks, -decision.sell_stake, ps,
+            action="partial_exit", is_entry=False))
 
     # -- adds -------------------------------------------------------------------
 
     def _add_action(self, trade, ps: PortfolioState, now: datetime, current_rate: float,
-                    current_profit: float, min_stake: float | None) -> float | None:
+                    current_profit: float, min_stake: float | None) -> AdjustPlan | None:
         pair = str(trade.pair)
         first_stake = float(self._tdata(trade, "first_stake", 0.0) or 0.0)
         if first_stake <= 0:
@@ -714,13 +1040,14 @@ class EarnBaseStrategy(IStrategy):
             return None
 
         stake = self._clamp_add_to_target(pair, decision.stake, ps)
-        stake = self._gated_add(pair, stake, ps, trade=trade, tag=decision.tag)
-        if stake is None:
+        plan = self._gated_add(pair, stake, ps, trade=trade, tag=decision.tag)
+        if plan is None:
             return None
         used = dca_used if kind_key == "dca_adds" else pyr_used
-        self._set_tdata(trade, kind_key, used + 1)
-        self._set_tdata(trade, stamp_key, _iso(now))
-        return stake
+        # Deferred: the add budget and its cooldown may only be consumed by an order
+        # that is actually submitted, i.e. by the winner of the priority contest.
+        plan.then(lambda: self._set_tdata(trade, kind_key, used + 1))
+        return plan.then(lambda: self._set_tdata(trade, stamp_key, _iso(now)))
 
     def _clamp_add_to_target(self, pair: str, stake: float, ps: PortfolioState) -> float:
         """In target-weight sizing an add may never push past ``target_w * nav``."""
@@ -738,14 +1065,77 @@ class EarnBaseStrategy(IStrategy):
 
     # ---------------------------------------------------------------- fills
 
+    def _fill_fee(self, trade, order, *, is_entry: bool,
+                  notional: float) -> tuple[float, str, float]:
+        """``(fee_amount, fee_currency, fee_in_quote)`` for ONE fill.
+
+        freqtrade's ``Order`` has no ``fee_cost``/``fee_currency``: reading them raised
+        AttributeError on every real fill, and freqtrade swallows it
+        (``strategy_safe_wrapper(..., supress_error=True)``), so the fills table stayed
+        empty and every churn/turnover/fee counter the gate reads back stayed at zero.
+        What the model actually carries — pinned in
+        ``tests/contract/test_freqtrade_contract.py`` — is ``Order.safe_fee_base``, the
+        fee taken out of the BASE asset in base units, plus the per-trade fee RATE
+        (``Trade.fee_open`` / ``Trade.fee_close``) and its currency; ``fee_open_cost`` is
+        a trade-level total, not this fill's share.
+        """
+        quote_ccy = str(self.config.get("stake_currency", "USDT") or "USDT")
+        try:
+            base_fee = float(getattr(order, "safe_fee_base", 0.0) or 0.0)
+            price = float(getattr(order, "safe_price", 0.0) or 0.0)
+            if base_fee > 0:
+                base_ccy = str(getattr(trade, "pair", "") or "").split("/")[0]
+                return base_fee, base_ccy or quote_ccy, base_fee * price
+            rate = getattr(trade, "fee_open" if is_entry else "fee_close", 0.0)
+            fee_quote = abs(float(notional)) * float(rate or 0.0)
+            ccy = getattr(trade, "fee_open_currency" if is_entry else "fee_close_currency", "")
+            return fee_quote, str(ccy or quote_ccy), fee_quote
+        except (AttributeError, TypeError, ValueError):
+            return 0.0, quote_ccy, 0.0
+
     def order_filled(self, pair: str, trade, order, current_time: datetime, **kwargs) -> None:
+        """Enforcement counters and cadence stamps FIRST, journalling last.
+
+        freqtrade calls this through ``strategy_safe_wrapper(..., supress_error=True)``,
+        so anything raised here is swallowed without a trace. The counters below are what
+        the gate reads back for ``orders_per_day`` / ``turnover_day`` / ``fee_budget`` /
+        ``max_trades_per_day``, and the stamps are what arm the DCA interval and the
+        re-entry cooldown — none of that may ever depend on a journal write succeeding.
+        """
+        self._trade_events += 1
         quote = self._pending_quotes.pop(pair, None)
         is_entry = order.ft_order_side == trade.entry_side
         now = _aware(current_time)
-        amount = float(order.safe_filled or 0)
-        price = float(order.safe_price or 0)
-        fee = float(getattr(order, "fee_cost", 0.0) or 0.0)
-        if self._journal_on:
+        amount = float(getattr(order, "safe_filled", 0.0) or 0.0)
+        price = float(getattr(order, "safe_price", 0.0) or 0.0)
+        notional = amount * price
+        fee_amount, fee_currency, fee_usdt = self._fill_fee(
+            trade, order, is_entry=is_entry, notional=notional)
+        exit_reason = str(getattr(trade, "exit_reason", "") or "")
+        order_tag = str(getattr(order, "ft_order_tag", "") or "")
+
+        self.gate.record_order_fill(now, notional=notional, fee_usdt=fee_usdt,
+                                    risk_exit=(not is_entry) and mx.is_risk_exit(exit_reason))
+        if is_entry:
+            # One TRADE, not one order: counting every entry fill against
+            # max_trades_per_day let a single trade that averaged down three times
+            # exhaust the whole day's trade budget for every other pair.
+            if self._entries_used(trade) <= 1:
+                self.gate.record_entry_fill(now)
+            if order_tag in ("scheduled_dca", "dca"):
+                # Scheduled DCA is stamped on the FILL, not on submission (spec section 9),
+                # so a cancelled or unfilled chunk does not consume the interval — and off
+                # THIS order's own tag, so a pyramid fill on the same pair cannot consume
+                # the week's calendar DCA.
+                self.gate.store.set(f"last_dca_fill_{pair}", _iso(now))
+            if not self._tdata(trade, "first_stake", None):
+                self._set_tdata(trade, "first_stake", notional)
+        else:
+            self._stamp_exit(pair, trade, exit_reason, now)
+
+        if not self._journal_on:
+            return
+        try:
             oid = _journal.record_order(
                 self.gate_cfg.sleeve, pair, order.ft_order_side, order.order_type or "limit",
                 amount, price, "filled",
@@ -754,24 +1144,12 @@ class EarnBaseStrategy(IStrategy):
             )
             _journal.record_fill(
                 self.gate_cfg.sleeve, pair, order.ft_order_side, amount, price,
-                order_id=oid, fee_amount=order.fee_cost, fee_currency=order.fee_currency,
+                order_id=oid, fee_amount=fee_amount, fee_currency=fee_currency,
                 ft_order_id=str(order.order_id), quote=quote,
                 mode=self.gate_cfg.mode, run_id=self.gate_cfg.run_id or None,
             )
-        exit_reason = str(getattr(trade, "exit_reason", "") or "")
-        self.gate.record_order_fill(now, notional=amount * price, fee_usdt=fee,
-                                    risk_exit=(not is_entry) and mx.is_risk_exit(exit_reason))
-        add_tag = self._pending_add_tag.pop(pair, "")
-        if is_entry:
-            self.gate.record_entry_fill(now)
-            if add_tag == "scheduled_dca" or str(getattr(trade, "enter_tag", "") or "") == "dca":
-                # Scheduled DCA is stamped on the FILL, not on submission (spec section 9),
-                # so a cancelled or unfilled chunk does not consume the interval.
-                self.gate.store.set(f"last_dca_fill_{pair}", _iso(now))
-            if not self._tdata(trade, "first_stake", None):
-                self._set_tdata(trade, "first_stake", amount * price)
-            return
-        self._stamp_exit(pair, trade, exit_reason, now)
+        except Exception as exc:  # noqa: BLE001 — never let the journal stop enforcement
+            print(f"earn: journal write failed for {pair} fill: {exc!r}", file=sys.stderr)
 
     def _stamp_exit(self, pair: str, trade, exit_reason: str, now: datetime) -> None:
         """Arm the re-entry cooldown after a stop / ROI / take-profit exit."""

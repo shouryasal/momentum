@@ -16,7 +16,13 @@ The order in which candidates are filtered matters, so it is worth stating once:
 3. **capabilities** — a model that cannot do what the task needs is *skipped*
    (``skipped_capability``), never downgraded. A local model reaches a tool-using task
    only through ``local_mode: context_pack``, and then with the tools profile forced to
-   ``none`` and the pack in the prompt;
+   ``none`` and the pack in the prompt. **Context window is one of those capabilities**:
+   a candidate whose declared ``max_ctx`` cannot hold the prompt is skipped here, with the
+   estimate and the window on the ``provider_switches`` row. It used not to be, and that
+   is exactly how the local screener spent weeks being handed an 18,379-token prompt
+   through an 8,192-token window: Ollama truncated it silently, the model answered from a
+   fifth of its input by inventing signal ids, host verification discarded 100% of the
+   output — and nothing anywhere said any of this had happened;
 4. **rate-limit preference** — for the tasks in ``prefer_local_when_rate_limited``, local
    candidates move to the front while the subscription is under pressure;
 5. **circuit breakers** — an open breaker skips the provider with a ``provider_switches``
@@ -36,6 +42,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -48,6 +55,7 @@ from runs.decision_core import StageMeta, StageResult
 from runs.llm import health as health_mod
 from runs.llm.base import ProviderRegistry, classify_error
 from runs.llm.types import (
+    PROVIDER_FAILURES,
     TERMINAL_FAILURES,
     Attempt,
     LLMRequest,
@@ -61,15 +69,51 @@ from runs.llm.types import (
 )
 
 __all__ = [
+    "CHARS_PER_TOKEN",
     "FALLBACK_ACTIONS",
     "MIN_STAGE_S",
+    "OUTPUT_RESERVE_TOKENS",
     "Candidate",
+    "estimated_tokens",
+    "fits_context",
+    "metered_month_spend",
+    "month_spend",
     "resolve_chain",
     "run_task",
 ]
 
 #: Never start an attempt with less than this much of the run's deadline left.
 MIN_STAGE_S = 15.0
+
+#: Characters per token, for the context-window check only. Deliberately LOW: English
+#: prose runs nearer 4, but these prompts are dense with JSON, symbols and numbers, which
+#: tokenize worse. Under-guessing the divisor over-estimates the token count, and
+#: over-estimating means we skip a model that might just have fitted — which is the safe
+#: error. The alternative error is the one that already cost us weeks: handing a model a
+#: prompt it silently truncates and trusting what comes back.
+CHARS_PER_TOKEN = 3.5
+
+#: Room left for the answer inside the same window. Ollama's ``num_ctx`` covers prompt
+#: AND completion, so a prompt that exactly fills it leaves nothing to reply with.
+OUTPUT_RESERVE_TOKENS = 1024
+
+
+def estimated_tokens(text: str) -> int:
+    """A deliberately pessimistic token count for ``text``. Never a billing number."""
+    return int(len(text) / CHARS_PER_TOKEN) + 1
+
+
+def fits_context(text: str, max_ctx: int | None,
+                 reserve: int = OUTPUT_RESERVE_TOKENS) -> tuple[bool, int]:
+    """``(fits, estimated_prompt_tokens)`` for a declared window.
+
+    ``max_ctx is None`` means "no declared limit" and always fits: the Claude models do
+    not declare one here, and inventing a number for them would be worse than not checking.
+    """
+    est = estimated_tokens(text)
+    if not max_ctx:
+        return True, est
+    return est + reserve <= int(max_ctx), est
 
 #: What ``tasks.<t>.on_all_failed`` may say; the caller acts on it.
 FALLBACK_ACTIONS: tuple[str, ...] = (
@@ -86,13 +130,20 @@ _ESCALATION_TRIGGERS = {
 
 @dataclass
 class Candidate:
-    """One resolved chain entry: which model, through which provider key."""
+    """One resolved chain entry: which model, at which effort, through which key.
+
+    ``effort`` is part of the identity of a candidate, not a property of the task: the
+    same model at two efforts is two different things to try, and trying the cheap lever
+    before the expensive one is the whole point of ``tasks.<t>.escalation_effort``.
+    ``None`` means "whatever the task configures", resolved at request time.
+    """
 
     ref: ModelRef
     provider_key: str
     index: int
     tools_profile: str = "none"
     packed: bool = False
+    effort: str | None = None
 
     @property
     def is_local(self) -> bool:
@@ -160,6 +211,49 @@ def _escalation_reasons(
     return reasons
 
 
+def _plan(task: str, tcfg: Any, *, escalate: bool,
+          pin: str | None, effort: str | None,
+          local_aliases: frozenset[str] = frozenset()) -> list[tuple[str, str | None]]:
+    """The ordered ``(alias, effort)`` plan for one call, before any filtering.
+
+    Three shapes:
+
+    * **pinned** — a panel pass names one model and one effort. Nothing else is tried:
+      a pass that cannot be served must fail visibly, not be answered by a different
+      model whose verdict then gets counted as that model's;
+    * **escalated** — the cheap lever first. ``escalation_effort`` re-runs the CHAIN HEAD
+      harder before ``escalation`` reaches for a bigger model, because the same tokens
+      thought about longer cost far less than the same thinking on a dearer model. The
+      escalation model then runs at that same raised effort;
+    * **plain** — the chain at the task's configured effort.
+
+    Deduplicated by alias, first occurrence winning, so an escalated plan stays top-heavy
+    instead of falling back through the same models at the effort that just failed.
+    """
+    if pin:
+        return [(pin, effort)]
+    plan: list[tuple[str, str | None]] = []
+    if escalate:
+        raised = getattr(tcfg, "escalation_effort", None)
+        # A local chain head has no reasoning-effort dial at all, so "the same model
+        # thinking harder" is not a thing that exists for it — re-running it would ask the
+        # identical question and call the identical answer a second opinion. `scan` is
+        # exactly this case: its escalation goes to the CLOUD model on purpose.
+        if raised and tcfg.chain and tcfg.chain[0] not in local_aliases:
+            plan.append((tcfg.chain[0], raised))
+        if tcfg.escalation:
+            plan.append((tcfg.escalation, None if tcfg.escalation in local_aliases
+                         else (raised or effort)))
+    plan += [(alias, effort) for alias in tcfg.chain]
+    seen: set[str] = set()
+    out: list[tuple[str, str | None]] = []
+    for alias, eff in plan:
+        if alias and alias not in seen:
+            seen.add(alias)
+            out.append((alias, eff))
+    return out
+
+
 def resolve_chain(
     task: str,
     models_cfg: Any,
@@ -171,11 +265,21 @@ def resolve_chain(
     kdb: sqlite3.Connection | None = None,
     environ: Mapping[str, str] | None = None,
     now: datetime | None = None,
+    prompt: str | None = None,
+    pin: str | None = None,
+    effort: str | None = None,
 ) -> tuple[list[Candidate], list[_Dropped]]:
     """The ordered candidates for one call, plus what was dropped and why."""
     tcfg = models_cfg.task(task)
-    aliases = ([tcfg.escalation] if (escalate and tcfg.escalation) else []) + list(tcfg.chain)
-    refs = _refs(models_cfg, aliases)
+    local_aliases = frozenset(
+        alias for alias, entry in (models_cfg.models or {}).items()
+        if entry is not None
+        and getattr((models_cfg.providers or {}).get(entry.provider), "kind", None)
+        == "ollama")
+    plan = _plan(task, tcfg, escalate=escalate, pin=pin, effort=effort,
+                 local_aliases=local_aliases)
+    efforts = {alias: eff for alias, eff in plan}
+    refs = _refs(models_cfg, [alias for alias, _ in plan])
 
     kept = chain_for(task, refs, min_tier=tcfg.min_tier, allow_local=tcfg.allow_local)
     kept_aliases = {r.alias for r in kept}
@@ -197,15 +301,25 @@ def resolve_chain(
             output_schema=output_schema is not None,
             skills=bool(skills) and effective != "none",
         )
-        if not _caps_of(models_cfg, ref.alias).satisfies(need):
+        caps = _caps_of(models_cfg, ref.alias)
+        if not caps.satisfies(need):
             dropped.append(_Dropped(ref=ref, reason="skipped_capability",
                                     detail=f"cannot serve tools={effective}"
                                            f" schema={output_schema is not None}"))
             continue
+        if prompt is not None:
+            fits, est = fits_context(prompt, caps.max_ctx)
+            if not fits:
+                dropped.append(_Dropped(
+                    ref=ref, reason="skipped_capability",
+                    detail=(f"prompt ~{est} tokens does not fit max_ctx {caps.max_ctx}"
+                            f" with {OUTPUT_RESERVE_TOKENS} reserved for the answer")))
+                continue
         for provider_key in _provider_keys(ref, models_cfg, kdb=kdb, environ=environ,
                                            now=now):
             candidates.append(Candidate(ref=ref, provider_key=provider_key, index=0,
-                                        tools_profile=effective, packed=packed))
+                                        tools_profile=effective, packed=packed,
+                                        effort=efforts.get(ref.alias)))
 
     if rate_limited and task in (models_cfg.switching.prefer_local_when_rate_limited or []):
         candidates.sort(key=lambda c: 0 if c.is_local else 1)
@@ -258,8 +372,12 @@ def _log_call(
              attempt.input_tokens, attempt.output_tokens, attempt.cost_usd),
         )
         jdb.commit()
-    except sqlite3.Error:  # pragma: no cover - journaling never vetoes a run
-        pass
+    except sqlite3.Error as e:
+        # Journalling never vetoes a run — but it must not disappear either. A bare
+        # `pass` here hid a status the llm_calls CHECK constraint rejected
+        # (``provider_down``) for the entire life of the provider layer: the router
+        # reported the failure and the console's usage view could never see it.
+        print(f"llm_calls insert failed ({attempt.status}): {e}", file=sys.stderr)
 
 
 def _log_switch(
@@ -303,12 +421,19 @@ def _journal_run(
     escalation_reasons: Sequence[str],
     requested: str | None,
     ts: str,
+    effort: str | None = None,
 ) -> None:
     """Upsert the ``runs`` row for this stage, filling the provider/chain columns.
 
     An upsert, not an insert: ``research_run`` and the signal jobs write their own row
     for the same ``(run_id, stage)`` with the fields only they know. This adds the
     routing facts without clobbering those.
+
+    ``runs.effort`` prefers ``meta.applied_effort`` — the CLI's own init frame, which is
+    the authoritative answer — and falls back to the effort the router ASKED for. The
+    frame does not always carry an ``effort`` key, and on this host it never does, so the
+    column was NULL for every call ever made and the console could not show what the tier
+    matrix had actually requested. A matrix whose effort column is blank cannot be tuned.
     """
     if jdb is None or not run_ctx.run_id or not run_ctx.stage:
         return
@@ -329,7 +454,7 @@ def _journal_run(
              requested, meta.served_model, int(bool(escalation_reasons)),
              json.dumps(list(escalation_reasons)) if escalation_reasons else None,
              meta.input_tokens, meta.output_tokens, meta.cost_usd, meta.num_turns,
-             meta.applied_effort, meta.auth_source,
+             meta.applied_effort or effort, meta.auth_source,
              candidate.provider_key if candidate else None,
              candidate.index if candidate else None,
              switched_from, run_ctx.signal_id, status, meta.error),
@@ -366,6 +491,31 @@ def month_spend(
         return 0.0
 
 
+def metered_month_spend(jdb: sqlite3.Connection | None, *, month: str) -> float:
+    """Every dollar billed to the metered API key this month, however it was labelled.
+
+    Keyed on ``auth_source`` as well as ``provider``: ``auth_source`` comes from the CLI's
+    own init frame (``apiKeySource``), so it is the only field that knows what the child
+    process *actually* authenticated with. A subscription attempt on a host where the
+    plain ``ANTHROPIC_API_KEY`` leaked into the environment spends real money and would
+    otherwise not count against the one cap that exists to bound it.
+
+    Every row counts, whatever its ``status``: a failed attempt is billed exactly like a
+    successful one (:func:`_failed_spend` is what keeps its cost on the row), so summing
+    only the successes would let the cap be evaded by failing.
+    """
+    if jdb is None:
+        return 0.0
+    try:
+        return float(jdb.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls WHERE ts_utc LIKE ?"
+            " AND (provider = ? OR auth_source = 'api_key')",
+            (f"{month}%", claude_auth.PROVIDER_API_KEY),
+        ).fetchone()[0] or 0.0)
+    except sqlite3.Error:  # pragma: no cover
+        return 0.0
+
+
 def _budget_block(
     jdb: sqlite3.Connection | None,
     models_cfg: Any,
@@ -380,7 +530,7 @@ def _budget_block(
     if candidate.provider_key == claude_auth.PROVIDER_API_KEY:
         cap = float(models_cfg.auth.api_key_monthly_cap_usd or 0)
         if cap > 0:
-            spent = month_spend(jdb, month=month, provider=candidate.provider_key)
+            spent = metered_month_spend(jdb, month=month)
             if spent >= cap:
                 return (f"api_key_monthly_cap_usd {cap:.2f} reached"
                         f" (spent {spent:.2f})")
@@ -404,21 +554,54 @@ def _budget_block(
 
 
 def _provider_for(providers: Any, key: str) -> Any:
+    """The provider registered under ``key``, or ``None``. Never raises.
+
+    ``ProviderRegistry.get`` raises :class:`~runs.llm.types.ProviderDown` for a key it does
+    not hold — and ``run_task`` default-builds exactly that registry, so on a host whose
+    auth mode builds only ``claude:subscription`` a chain entry resolving to
+    ``claude:api_key`` used to abort the *whole* chain with an exception escaping a
+    function whose docstring promises it never raises. A key this process has no provider
+    for is a miss: the caller writes a ``provider_down`` switch row and walks on to the
+    next entry.
+    """
     if providers is None:
         return None
     if isinstance(providers, ProviderRegistry):
-        return providers.get(key)
+        return providers.get(key) if key in providers else None
     if isinstance(providers, Mapping):
         return providers.get(key)
-    return providers.get(key)  # pragma: no cover - duck-typed registry
+    try:                              # a duck-typed registry: it may raise like ours does
+        return providers.get(key)
+    except Exception:  # noqa: BLE001 — "no such provider" is a miss, never an abort
+        return None
 
 
-def _effort_for(candidate: Candidate, tcfg: Any) -> str | None:
+def _failed_spend(exc: BaseException) -> Any | None:
+    """The ``StageMeta`` a provider attached to the exception it raised, if any.
+
+    A provider raises *after* the model has already been paid for: ``error_max_turns``
+    burned every turn it was given, ``error_max_budget_usd`` burned exactly the per-run
+    cap, and a caller-side timeout burns whatever ran before it. Dropping that number made
+    failed metered attempts count $0.00 against ``auth.api_key_monthly_cap_usd`` — the one
+    cap that bounds real money — so a credential could fail expensively all month without
+    ever reaching it. :mod:`runs.llm.providers.claude_sdk` attaches the stage's own meta;
+    a provider that attaches nothing simply reports no cost, as before.
+    """
+    return getattr(exc, "meta", None)
+
+
+def _effort_for(candidate: Candidate, tcfg: Any, task: str) -> str | None:
+    """The effort this attempt runs at, clamped to the task's code floor.
+
+    The candidate's own effort wins when it has one — that is an escalation or a pinned
+    panel pass — but it is clamped exactly like the task's configured effort, so neither
+    an escalation nor a panel can reach below the floor for an authoring task.
+    """
     if candidate.is_local:
         return None                      # Ollama has no reasoning-effort dial
     from runs.router import clamp_effort
 
-    return clamp_effort(getattr(tcfg, "effort", None))
+    return clamp_effort(candidate.effort or getattr(tcfg, "effort", None), task)
 
 
 def run_task(
@@ -446,8 +629,20 @@ def run_task(
     monotonic: Callable[[], float] = time.monotonic,
     alert: Callable[[str, str], None] | None = None,
     journal_runs: bool = True,
+    pin: str | None = None,
+    effort: str | None = None,
 ) -> TaskResult:
-    """Run one task through its chain. Returns a :class:`TaskResult`, never raises."""
+    """Run one task through its chain. Returns a :class:`TaskResult`, never raises.
+
+    ``pin`` and ``effort`` are how :mod:`runs.llm.panel` runs one pass on one named model
+    at one named effort. A pinned call has a chain of exactly one entry and no fallback:
+    if that model cannot serve, the pass fails and says so. Silently answering with a
+    different model would attribute its verdict to the model that was asked for, which is
+    precisely the measurement the panel exists to make. The code floors still apply — a
+    pin below ``MIN_TIER_FLOOR``, or a local model pinned to ``decide``, is dropped by
+    :func:`~runs.llm.types.chain_for` like any other candidate, and ``effort`` is clamped
+    by :func:`runs.router.clamp_effort` like any other effort.
+    """
     from ops.models_config import load_models_cfg
 
     mc = models_cfg if models_cfg is not None else load_models_cfg()
@@ -458,13 +653,15 @@ def run_task(
     reasons = _escalation_reasons(mc, hard_flags=hard_flags,
                                   force_escalation=force_escalation,
                                   gray_zone=gray_zone, low_confidence=low_confidence)
-    escalate = bool(reasons) and bool(tcfg.escalation)
+    escalate = bool(reasons) and bool(
+        tcfg.escalation or getattr(tcfg, "escalation_effort", None))
     candidates, dropped = resolve_chain(
         task, mc, escalate=escalate, output_schema=output_schema, skills=skills,
         rate_limited=rate_limited, kdb=kdb, environ=environ, now=now,
+        prompt=prompt, pin=pin, effort=effort,
     )
     requested = candidates[0].ref.alias if candidates else (
-        tcfg.chain[0] if tcfg.chain else None)
+        pin or (tcfg.chain[0] if tcfg.chain else None))
 
     for drop in dropped:
         _log_switch(jdb, ts=stamp, task=task, run_ctx=run_ctx, frm=None, to=None,
@@ -481,8 +678,15 @@ def run_task(
     attempts: list[Attempt] = []
     last_failure: str | None = None
     last_error: str | None = None
+    if not candidates and dropped:
+        # Nothing was attempted because nothing could be. Report WHY rather than the
+        # generic 'error' — a pinned panel pass below the tier floor, and a prompt too
+        # large for the only local model, are both this case and both need naming.
+        last_failure = dropped[0].reason
+        last_error = f"{dropped[0].ref.alias}: {dropped[0].detail}"
     served: Candidate | None = None
     served_result: StageResult | None = None
+    served_req: LLMRequest | None = None
     previous: Candidate | None = None
     attempt_budget = int(mc.switching.max_attempts_per_call or 4)
 
@@ -571,23 +775,34 @@ def run_task(
                         claude_auth.clear_degraded(kdb)
                     served = candidate
                     served_result = result
+                    served_req = req
                     break
             except Exception as e:  # noqa: BLE001 — every provider failure is classified
                 failure = classify_error(e)
                 latency = int((monotonic() - started) * 1000)
+                spent = _failed_spend(e)
                 attempt = Attempt(idx=candidate.index, ref=candidate.ref,
                                   status=failure, error=str(e)[:500],
-                                  latency_ms=latency)
+                                  latency_ms=latency,
+                                  cost_usd=getattr(spent, "cost_usd", None),
+                                  input_tokens=getattr(spent, "input_tokens", None),
+                                  output_tokens=getattr(spent, "output_tokens", None),
+                                  auth_source=getattr(spent, "auth_source", None))
             attempts.append(attempt)
             _log_call(jdb, ts=stamp, task=task, run_ctx=run_ctx, candidate=candidate,
                       attempt=attempt)
             last_failure = failure
             last_error = attempt.error
-            health_mod.record_failure(
-                jdb, candidate.provider_key, attempt.error, now=now,
-                failures=breaker.failures, window_min=breaker.window_min,
-                open_min=breaker.open_min,
-            )
+            if failure in PROVIDER_FAILURES:
+                # Only provider-level failures move the breaker. A `schema_invalid` from
+                # the CALLER's validator (or an empty completion) says the model wrote
+                # something unusable, not that the credential is dead — counting those
+                # opened a credential-wide circuit on three bad JSON replies.
+                health_mod.record_failure(
+                    jdb, candidate.provider_key, attempt.error, now=now,
+                    failures=breaker.failures, window_min=breaker.window_min,
+                    open_min=breaker.open_min,
+                )
             if (candidate.provider_key == claude_auth.PROVIDER_SUBSCRIPTION
                     and failure in set(mc.auth.fallback_on or ())):
                 claude_auth.mark_degraded(kdb, minutes=mc.auth.return_after_min, now=now)
@@ -615,7 +830,8 @@ def run_task(
         if journal_runs:
             _journal_run(jdb, run_ctx=run_ctx, candidate=served,
                          switched_from=switched_from, meta=meta, status="success",
-                         escalation_reasons=reasons, requested=requested, ts=stamp)
+                         escalation_reasons=reasons, requested=requested, ts=stamp,
+                         effort=served_req.effort if served_req else None)
         if served.index > 0 and alert is not None and task == "decide":
             alert(f"decide served by {served.ref.alias} (chain index {served.index},"
                   f" after {switched_from or 'a skipped entry'})", "info")
@@ -687,7 +903,7 @@ def _request(
         env=None,
         max_turns=int(tcfg.max_turns or 1),
         max_usd=float(tcfg.max_usd_per_run or 0.0),
-        effort=_effort_for(candidate, tcfg),
+        effort=_effort_for(candidate, tcfg, task),
         deadline_s=deadline,
     )
 

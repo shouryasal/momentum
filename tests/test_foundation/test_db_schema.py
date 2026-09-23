@@ -66,7 +66,7 @@ def test_idempotent_and_versioned(dbs, tmp_path):
     cfg, journal, _ = dbs
     db.init_all(cfg, root=tmp_path)  # second run: no error
     with db.opened(journal) as j:
-        assert j.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 3
+        assert j.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 5
         assert j.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
 
 
@@ -85,6 +85,67 @@ def test_check_constraints(dbs):
         j.execute(
             "INSERT INTO nav_daily(date_utc, sleeve, nav_usdt) VALUES ('2026-09-22','benchmark',1.0)"
         )
+
+
+def test_sleeve_runs_accepts_every_mode_word_the_machine_can_write(dbs):
+    """``sleeve_runs.mode``/``nav_points.mode`` and ``ops.modes.mode_word_for`` are one
+    vocabulary.
+
+    They diverged when Binance Spot Demo Mode arrived: the mode machine files a demo run
+    under ``demo`` (it is neither a simulation nor real money), and the CHECK list only
+    knew ``test`` and ``live``. The failure landed at step 12 of a transition that had
+    already recreated the container, so the whole thing rolled back and engaged the kill
+    switch. Widening the list is schema v5.
+    """
+    from ops.modes import mode_word_for
+
+    words = {mode_word_for(state) for state in ("TEST", "DEMO_PROPOSE", "DEMO_EXECUTE",
+                                                "LIVE_PROPOSE", "LIVE_EXECUTE")}
+    assert words == {"test", "demo", "live"}
+
+    _, journal, _ = dbs
+    with db.opened(journal) as j:
+        for i, word in enumerate(sorted(words)):
+            j.execute(
+                "INSERT INTO sleeve_runs(run_id, sleeve, mode, seed_usdt, started_utc,"
+                " status, strategy, config_sha, ft_db_path)"
+                " VALUES (?,'a',?,100.0,'2026-09-22T00:00:00Z','closed','SleeveA','sha','p')",
+                (f"{word}-a-{i}", word),
+            )
+            j.execute(
+                "INSERT INTO nav_points(ts_utc, sleeve, mode, nav_usdt)"
+                " VALUES (?, 'a', ?, 100.0)",
+                (f"2026-09-22T0{i}:00:00Z", word),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            j.execute(
+                "INSERT INTO sleeve_runs(run_id, sleeve, mode, seed_usdt, started_utc,"
+                " status, strategy, config_sha, ft_db_path)"
+                " VALUES ('x','a','testnet',100.0,'2026-09-22T00:00:00Z','closed',"
+                "'SleeveA','sha','p')"
+            )
+
+
+def test_llm_calls_accepts_every_status_the_router_can_write(dbs):
+    """``llm_calls.status`` and ``runs.llm.types.CALL_STATUSES`` are one vocabulary.
+
+    They diverged on ``provider_down``: chain.py classifies a dead Ollama daemon (or a
+    missing registry entry) that way from inside an ATTEMPT, so it writes a row — and the
+    CHECK rejected it while ``_log_call``'s bare ``except sqlite3.Error: pass`` swallowed
+    the IntegrityError. The most common local failure could never appear in the journal.
+    """
+    from runs.llm.types import CALL_STATUSES
+
+    _, journal, _ = dbs
+    with db.opened(journal) as j:
+        for i, status in enumerate(CALL_STATUSES):
+            j.execute(
+                "INSERT INTO llm_calls(ts_utc, task, provider, model, attempt, status)"
+                " VALUES ('2026-09-22T00:00:00Z','scan','ollama','m',?,?)", (i, status))
+        with pytest.raises(sqlite3.IntegrityError):
+            j.execute(
+                "INSERT INTO llm_calls(ts_utc, task, provider, model, attempt, status)"
+                " VALUES ('2026-09-22T00:00:00Z','scan','ollama','m',0,'not_a_status')")
 
 
 def test_runs_composite_pk(dbs):
@@ -227,8 +288,8 @@ def _v2_journal(path):
     conn.close()
 
 
-def test_v1_to_v3_migration_adds_every_column(tmp_path):
-    """A DB created under schema v1 (no effort/auth/trigger columns) reaches v3."""
+def test_v1_to_v5_migration_adds_every_column(tmp_path):
+    """A DB created under schema v1 (no effort/auth/trigger columns) reaches the head."""
     old = tmp_path / "journal" / "journal.db"
     old.parent.mkdir(parents=True)
     conn = sqlite3.connect(old)
@@ -245,7 +306,7 @@ def test_v1_to_v3_migration_adds_every_column(tmp_path):
         cols = _cols(c, "runs")
         assert {"effort", "auth_source", "trigger_reason"} <= cols       # v2
         assert {"provider", "chain_index", "switched_from", "signal_id"} <= cols  # v3
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 5
         assert "whatif_nav" in _tables(c)
         assert JOURNAL_V3_TABLES <= _tables(c)
         db.apply_schema(c, db.SQL_DIR / "journal.sql")  # idempotent rerun
@@ -284,7 +345,7 @@ def test_migrated_schema_equals_fresh_schema(tmp_path):
         db.apply_schema(c, db.SQL_DIR / "journal.sql")
         right = _schema(c)
 
-    rebuilt = {"gate_decisions", "change_log"}
+    rebuilt = {"gate_decisions", "change_log", "llm_calls"}
     in_scope = {
         key for key in right
         if key[1] in (rebuilt | JOURNAL_V3_TABLES)

@@ -22,6 +22,17 @@ export interface DataTableProps<T> {
   emptyTitle?: string;
   emptyDescription?: ReactNode;
   onRowClick?: (row: T) => void;
+  /**
+   * Double-click, for a table where going deeper is a second gesture.
+   *
+   * The owner's words were *"if i double click i should see reasoning"*: single click
+   * selects the row and leaves the list where it is, double click opens the story behind
+   * it.  Enter and Space do the same as a double click, because a gesture that only works
+   * with a mouse is not available to everyone.
+   */
+  onRowDoubleClick?: (row: T) => void;
+  /** The {@link DataTableProps.rowKey} of the selected row, highlighted. */
+  selectedKey?: string | null;
   maxHeight?: number | string;
   caption?: ReactNode;
   dense?: boolean;
@@ -38,6 +49,8 @@ export function DataTable<T>({
   emptyTitle = 'Nothing to show',
   emptyDescription,
   onRowClick,
+  onRowDoubleClick,
+  selectedKey,
   maxHeight,
   caption,
   dense,
@@ -83,7 +96,7 @@ export function DataTable<T>({
   const table = (
     <Table
       data-testid="data-table"
-      highlightOnHover={Boolean(onRowClick)}
+      highlightOnHover={Boolean(onRowClick || onRowDoubleClick)}
       verticalSpacing={dense ? 4 : 'xs'}
       horizontalSpacing={dense ? 6 : 'sm'}
       stickyHeader
@@ -120,19 +133,41 @@ export function DataTable<T>({
         </Table.Tr>
       </Table.Thead>
       <Table.Tbody>
-        {sorted.map((row, index) => (
-          <Table.Tr
-            key={rowKey(row, index)}
-            onClick={onRowClick ? () => onRowClick(row) : undefined}
-            style={onRowClick ? { cursor: 'pointer' } : undefined}
-          >
-            {columns.map((column) => (
-              <Table.Td key={column.key} style={{ textAlign: column.align ?? 'left' }}>
-                {column.render(row, index)}
-              </Table.Td>
-            ))}
-          </Table.Tr>
-        ))}
+        {sorted.map((row, index) => {
+          const key = rowKey(row, index);
+          const interactive = Boolean(onRowClick || onRowDoubleClick);
+          const selected = selectedKey !== undefined && selectedKey !== null && selectedKey === key;
+          return (
+            <Table.Tr
+              key={key}
+              data-testid={`data-row-${key}`}
+              data-selected={selected ? 'true' : undefined}
+              aria-selected={interactive ? selected : undefined}
+              tabIndex={onRowDoubleClick ? 0 : undefined}
+              onClick={onRowClick ? () => onRowClick(row) : undefined}
+              onDoubleClick={onRowDoubleClick ? () => onRowDoubleClick(row) : undefined}
+              onKeyDown={
+                onRowDoubleClick
+                  ? (event) => {
+                      if (event.key !== 'Enter' && event.key !== ' ') return;
+                      event.preventDefault();
+                      onRowDoubleClick(row);
+                    }
+                  : undefined
+              }
+              style={{
+                ...(interactive ? { cursor: 'pointer' } : {}),
+                ...(selected ? { background: 'var(--mantine-color-default-hover)' } : {}),
+              }}
+            >
+              {columns.map((column) => (
+                <Table.Td key={column.key} style={{ textAlign: column.align ?? 'left' }}>
+                  {column.render(row, index)}
+                </Table.Td>
+              ))}
+            </Table.Tr>
+          );
+        })}
       </Table.Tbody>
     </Table>
   );

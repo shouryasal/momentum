@@ -176,3 +176,54 @@ class TestRegistry:
         out = detectorslib.run_all(c)
         assert any(x.detector == "funding" for x in out)     # the rest still ran
         assert "breakout" in c.errors
+
+
+class TestWideUniverse:
+    """A detector looks at the whole watchlist, and no detector may own the queue."""
+
+    def test_detectors_see_the_watchlist_not_just_the_tradeable_pairs(
+            self, ctx, monkeypatch):
+        from tests.test_signals.test_features import widen
+
+        make, cfg, jdb, kdb, _ = ctx
+        widen(monkeypatch, cfg, ["BTC/USDT", "ETH/USDT", "SOL/USDT", "PEPE/USDT"])
+        for p in ("BTC/USDT", "ETH/USDT", "SOL/USDT", "PEPE/USDT"):
+            seed_candles(kdb, pair=p, tf="1d", n=40, start=100.0, step=0.0)
+        seed_candle(kdb, "PEPE/USDT", "1d", open_=100.0, close=130.0)   # +30% day
+        c = make()
+        assert "PEPE/USDT" in c.pairs
+        out = detectorslib.move(c)
+        assert any(x.pair == "PEPE/USDT" for x in out), [x.reason for x in out]
+
+    def test_one_detector_cannot_fill_the_queue(self, ctx, monkeypatch):
+        """A correlated alt move fires `move` on dozens of names; the cap keeps room."""
+        from tests.test_signals.test_features import widen
+
+        make, cfg, jdb, kdb, _ = ctx
+        pairs = ["BTC/USDT"] + [f"ALT{i}/USDT" for i in range(12)]
+        widen(monkeypatch, cfg, pairs)
+        for p in pairs:
+            seed_candles(kdb, pair=p, tf="1d", n=40, start=100.0, step=0.0)
+            seed_candle(kdb, p, "1d", open_=100.0, close=120.0)         # everything +20%
+        c = make()
+        uncapped = detectorslib.move(c)
+        assert len(uncapped) > detectorslib.DEFAULT_MAX_PER_DETECTOR
+        out = detectorslib.run_all(c, only=["move"])
+        assert len(out) == detectorslib.DEFAULT_MAX_PER_DETECTOR
+        assert c.capped["move"] == len(uncapped) - len(out)
+        assert "move" not in c.errors            # a cap is not a failure
+        # and the one that survives first is the core asset, not whichever alt sorted first
+        assert out[0].pair == "BTC/USDT"
+
+    def test_priority_puts_core_ahead_of_a_watchlist_only_name(self, ctx, monkeypatch):
+        from tests.test_signals.test_features import widen
+
+        make, cfg, jdb, kdb, _ = ctx
+        widen(monkeypatch, cfg, ["BTC/USDT", "WATCH/USDT"])
+        c = make()
+        core = detectorslib.Candidate(detector="move", direction="up", strength=0.4,
+                                      reason="r", pair="BTC/USDT")
+        watched = detectorslib.Candidate(detector="move", direction="up", strength=0.99,
+                                         reason="r", pair="WATCH/USDT")
+        assert c.priority(core) < c.priority(watched)      # strength does not outrank tier
+        assert sorted([watched, core], key=c.priority)[0] is core

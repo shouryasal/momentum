@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { render } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -193,7 +193,12 @@ function renderShell(
   });
   return render(
     <MemoryRouter initialEntries={[route]}>
-      <AppProviders client={client} queryClient={testQueryClient()} sseFactory={(url) => new FakeEventSource(url)}>
+      <AppProviders
+        client={client}
+        queryClient={testQueryClient()}
+        sseFactory={(url) => new FakeEventSource(url)}
+        viewMode="operator"
+      >
         <App />
       </AppProviders>
     </MemoryRouter>,
@@ -215,20 +220,32 @@ describe('shell', () => {
     expect(await screen.findByTestId('app-header')).toBeInTheDocument();
 
     const badgeA = await screen.findByTestId('mode-badge-a');
-    expect(badgeA).toHaveTextContent('A: TEST · seed 10,000');
-    expect(await screen.findByTestId('mode-badge-b')).toHaveTextContent('B: LIVE·PROPOSE');
+    expect(badgeA).toHaveTextContent('Rules bot: TEST · seed 10,000');
+    expect(await screen.findByTestId('mode-badge-b')).toHaveTextContent('AI bot: LIVE·PROPOSE');
     expect(screen.getByTestId('mode-badge-b')).toHaveAttribute('data-live', 'true');
 
+    // One small badge, not five pills of text. It carries the worst status, and the five
+    // promises are behind it — the guarantees matter, the permanent wall of text did not.
     expect(screen.getByTestId('safety-strip')).toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.getByTestId('safety-gate-in-order-path')).toHaveAttribute('data-status', 'ok'),
+      expect(screen.getByTestId('safety-badge')).toHaveAttribute('data-status', 'fail'),
     );
-    expect(screen.getByTestId('safety-config-blessed')).toHaveAttribute('data-status', 'fail');
+    await userEvent.click(screen.getByTestId('safety-badge'));
+    const promises = await screen.findByTestId('safety-detail');
+    expect(within(promises).getByTestId('safety-gate-in-order-path')).toHaveAttribute(
+      'data-status',
+      'ok',
+    );
+    expect(within(promises).getByTestId('safety-config-blessed')).toHaveAttribute(
+      'data-status',
+      'fail',
+    );
     // A pill the invariants service did not report is unknown, never "ok".
-    expect(screen.getByTestId('safety-live-entry-human-only')).toHaveAttribute(
+    expect(within(promises).getByTestId('safety-live-entry-human-only')).toHaveAttribute(
       'data-status',
       'unknown',
     );
+    await userEvent.click(screen.getByTestId('safety-badge'));
 
     expect(screen.getByTestId('kill-button')).toBeInTheDocument();
     expect(screen.getByTestId('sse-indicator')).toBeInTheDocument();
@@ -239,8 +256,30 @@ describe('shell', () => {
     );
     expect(screen.getByTestId('provider-chip')).toHaveTextContent('RL 42%');
     expect(screen.getByTestId('provider-chip')).toHaveAttribute('data-status', 'ok');
+    // The operator navigation: five destinations, and the developer screens behind the
+    // corner switch rather than in the list.
     expect(screen.getByTestId('nav-overview')).toBeInTheDocument();
+    expect(screen.getByTestId('nav-primary')).toBeInTheDocument();
+    expect(screen.queryByTestId('nav-invariants')).not.toBeInTheDocument();
+    expect(screen.getByTestId('view-mode-toggle')).toHaveAttribute('data-view', 'operator');
+  });
+
+  it('brings the developer screens into the navigation, and takes them out again', async () => {
+    const user = userEvent.setup();
+    renderShell();
+    await screen.findByTestId('app-header');
+
+    await user.click(screen.getByTestId('view-mode-toggle'));
+    expect(screen.getByTestId('view-mode-toggle')).toHaveAttribute('data-view', 'developer');
     expect(screen.getByTestId('nav-invariants')).toBeInTheDocument();
+    expect(screen.getByTestId('nav-audit')).toBeInTheDocument();
+    // The five destinations do not move when the developer area opens.
+    expect(screen.getByTestId('nav-overview')).toBeInTheDocument();
+    expect(screen.getByTestId('nav-skills')).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('view-mode-toggle'));
+    expect(screen.queryByTestId('nav-invariants')).not.toBeInTheDocument();
+    expect(screen.getByTestId('nav-overview')).toBeInTheDocument();
   });
 
   it('counts only the approvals a human can still act on', async () => {

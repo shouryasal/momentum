@@ -178,11 +178,15 @@ def test_strategy_lab_tells_the_session_its_numbers_are_claims():
 
 def test_skill_smith_clears_its_own_eval_floor(tmp_path):
     """Self-referential on purpose: one case checks skill-smith against its own rules."""
-    from evals.skill_eval import evaluate
+    from evals.skill_eval import Sandbox, evaluate
     from ops.config import load_config
 
     cfg = load_config()
+    # A skill's eval cases are model-authored, so ``evaluate`` will not execute one
+    # without a sandbox. The repo's own suite is one of the two callers allowed to say
+    # "unconfined, on purpose" — see tests/test_review/test_skill_containment.py.
     result = evaluate(REPO_ROOT / ".claude" / "skills" / "skill-smith",
-                      cwd=REPO_ROOT, repo_root=REPO_ROOT, timeout_s=120)
+                      cwd=REPO_ROOT, repo_root=REPO_ROOT, timeout_s=120,
+                      sandbox=Sandbox.unconfined("the repo's own test suite"))
     assert result.ok(float(cfg.skills.eval.min_pass_rate)), \
         [case.as_dict() for case in result.cases]

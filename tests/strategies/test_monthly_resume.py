@@ -11,7 +11,7 @@ import pytest
 
 from strategies.riskgate import MemoryStateStore, SqliteStateStore
 
-from .conftest import NOW, benign_gate, ps
+from .conftest import ENTRY, NOW, benign_gate, ps
 
 
 def _tripped(gate_cfg, store=None):
@@ -30,10 +30,10 @@ class TestResume:
         result = gate.human_resume_monthly(ps(nav=8900, now=later))
         assert result.resumed and result.anchor_nav == 8900
         assert not gate.monthly_locked()
-        assert gate.flatten_pending() is None
+        assert gate.flatten_pending(later) is None
         # the same NAV that tripped the stop is now the anchor: no re-lock
         assert not gate.loop_tick(ps(nav=8900, now=later + timedelta(minutes=5))).flatten
-        assert gate.check_entry("BTC/USDT", 100.0, ps(nav=8900, now=later)).allowed
+        assert gate.check_entry("BTC/USDT", ENTRY, ps(nav=8900, now=later)).allowed
 
     def test_a_fresh_ten_percent_drop_relocks_after_a_resume(self, gate_cfg):
         gate = _tripped(gate_cfg)
@@ -44,7 +44,7 @@ class TestResume:
         # -11% from the new anchor: armed again
         actions = gate.loop_tick(ps(nav=7900, now=later + timedelta(hours=2)))
         assert actions.flatten and actions.monthly_lock
-        assert gate.flatten_pending() == "risk_stop_monthly"
+        assert gate.flatten_pending(later + timedelta(hours=2)) == "risk_stop_monthly"
 
     def test_resume_survives_a_restart(self, gate_cfg, tmp_path):
         from ops import db
@@ -71,7 +71,7 @@ class TestResume:
         gate.store.set("locked_until", (NOW + timedelta(hours=20)).strftime(
             "%Y-%m-%dT%H:%M:%SZ"))
         gate.human_resume_monthly(ps(nav=8900, now=NOW + timedelta(hours=2)))
-        d = gate.check_entry("BTC/USDT", 100.0, ps(nav=8900, now=NOW + timedelta(hours=3)))
+        d = gate.check_entry("BTC/USDT", ENTRY, ps(nav=8900, now=NOW + timedelta(hours=3)))
         assert d.allowed, d.reason
 
     def test_resume_stamps_the_audit_fields(self, gate_cfg):
@@ -92,10 +92,43 @@ class TestNoTenYearLocks:
 
     def test_monthly_stop_never_supplies_a_lock_until(self, gate_cfg):
         gate = _tripped(gate_cfg)
-        assert gate.flatten_pending() == "risk_stop_monthly"
+        assert gate.flatten_pending(NOW + timedelta(hours=2)) == "risk_stop_monthly"
 
 
 class TestRunScopedState:
+    def test_the_no_runtime_fallback_is_the_generators_own_run_id(self, tmp_path):
+        """Two implementations of one name, pinned against each other.
+
+        ``ops.gen_freqtrade_config.default_run_id`` is what a *rendered* runtime file
+        would have carried on a fresh checkout; ``GateConfig.load`` used to fall back to
+        ``""`` instead, so a gate running from the committed baseline wrote
+        un-namespaced ``risk_state`` rows while every host-side reader that consults the
+        generator looked under ``run:test-<s>-000:``. ``strategies/`` may not import
+        ``ops`` (it is mounted flat into the container), so the mirror is manual and this
+        is the test that keeps the two honest.
+        """
+        from ops.gen_freqtrade_config import default_run_id as generator_run_id
+        from strategies.riskgate import GateConfig, default_run_id
+
+        from .conftest import write_riskgate
+
+        for sleeve in ("a", "b"):
+            assert default_run_id(sleeve) == generator_run_id(sleeve)
+        cfg = GateConfig.load(write_riskgate(tmp_path), sleeve="b")
+        assert cfg.run_id == generator_run_id("b") == "test-b-000"
+
+    def test_the_fallback_run_id_namespaces_the_rows_it_writes(self, tmp_path):
+        """The point of agreeing: the rows land where a reader will find them."""
+        from strategies.riskgate import GateConfig, default_run_id
+
+        from .conftest import write_riskgate
+
+        cfg = GateConfig.load(write_riskgate(tmp_path), sleeve="a")
+        store = MemoryStateStore()
+        benign_gate(cfg, store).loop_tick(ps(nav=10000))
+        assert store.get(f"run:{default_run_id('a')}:day_anchor_nav") is not None
+        assert store.get("day_anchor_nav") is None
+
     def test_run_id_namespaces_every_key(self, tmp_path):
         from .conftest import gate_cfg_with
 
@@ -124,11 +157,16 @@ class TestRunScopedState:
         assert not fresh.monthly_locked()
 
     def test_a_runtime_file_for_the_other_sleeve_is_ignored(self, tmp_path):
+        from strategies.riskgate import default_run_id
+
         from .conftest import gate_cfg_with
 
         cfg = gate_cfg_with(tmp_path, lambda raw: None, sleeve="a", runtime={
             "version": 1, "sleeve": "b", "mode": "live", "run_id": "live-b-1"})
-        assert cfg.mode == "test" and cfg.run_id == ""
+        # Not sleeve b's run id, and not "" either: the committed baseline names the same
+        # run the generator would have rendered, so the gate's risk_state rows land where
+        # every host-side reader looks for them.
+        assert cfg.mode == "test" and cfg.run_id == default_run_id("a")
 
     def test_a_corrupt_runtime_file_leaves_the_test_baseline(self, tmp_path):
         from strategies.riskgate import GateConfig

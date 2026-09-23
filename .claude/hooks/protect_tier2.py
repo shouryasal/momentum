@@ -15,7 +15,12 @@ What it denies
   ``a/../config/earn.yaml`` and a symlink into ``config/`` are caught too;
 * a **read** (``Read``/``Grep``/``Glob``, or a Bash ``cat``/``grep``/``source``) of ``.env*``,
   ``var/state/**``, ``~/.config/earn/**`` or the Claude credential store;
-* a **Bash write** to tier 2 (redirects, ``mv``, ``sed -i``, ``rm`` …);
+* a **Bash write** to tier 2 (redirects, ``mv``, ``sed -i``, ``rm`` …), any Bash command
+  that merely *names* a tier-2 path without being one of the read-only commands allowed
+  to, every inline interpreter or heredoc (``python -c``, ``sh -c``, ``perl``, ``pytest``,
+  ``<<EOF``) and every writer whose destinations live inside its payload (``tar -x``,
+  ``unzip``, ``git apply``, ``patch``, ``xargs``, ``find -exec``) — those run code, or
+  write paths, that no path check can see;
 * any Bash command that reaches the **console origin** or the network (``curl``, ``wget``,
   ``127.0.0.1``, ``localhost``): an automated run must never drive the human's console.
 
@@ -36,9 +41,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tier2_paths import (  # noqa: E402
+    bash_denial,
     bash_reaches_network,
     bash_reads_denied,
-    bash_touches_tier2,
     is_read_denied,
     is_tier0_writable,
     is_tier2,
@@ -160,10 +165,9 @@ def main() -> int:
             deny(f"bash command reads '{secret}', which holds secrets or signed state",
                  tool=tool, detail={"match": secret})
             return 0
-        hit = bash_touches_tier2(command)
-        if hit:
-            deny(f"bash write touching tier-2 path '{hit}' is human-only (spec §7)",
-                 tool=tool, detail={"match": hit})
+        reason = bash_denial(command)
+        if reason:
+            deny(reason, tool=tool, detail={"command": command[:400]})
     elif tool in ("WebFetch", "WebSearch"):
         deny(f"{tool} is not available to an automated Earn run", tool=tool)
     return 0

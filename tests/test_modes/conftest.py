@@ -46,11 +46,16 @@ class FakeBot:
         trades: list[dict[str, Any]] | None = None,
         stoploss_on_exchange: bool = True,
         fail: str | None = None,
+        exchange: str | None = None,
     ) -> None:
         self.up = up
         self.dry_run = dry_run
         self.strategy = strategy
         self.bot_name = bot_name
+        #: What ``/show_config`` reports as the exchange id. freqtrade 2026.8 renames it to
+        #: ``binance_demo`` itself once ccxt's ``enable_demo_trading(True)`` has fired, so
+        #: this is the transition's independent confirmation of which venue was reached.
+        self.exchange = exchange
         self.trades = trades or []
         self.stoploss_on_exchange = stoploss_on_exchange
         self.fail = fail
@@ -76,6 +81,7 @@ class FakeBot:
                 "dry_run": self.dry_run,
                 "strategy": self.strategy,
                 "bot_name": self.bot_name,
+                "exchange": self.exchange,
                 "db_url": self.db_url,
                 "order_types": {"stoploss_on_exchange": self.stoploss_on_exchange},
             }

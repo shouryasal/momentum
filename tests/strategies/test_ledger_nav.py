@@ -25,15 +25,23 @@ PRICE = 50_000.0
 
 @dataclass
 class FakeOrder:
+    """Only fields freqtrade's ``Order`` really has — see tests/contract.
+
+    ``fee_cost``/``fee_currency`` are deliberately ABSENT: this fake carrying them is
+    what let ``order_filled`` ship an AttributeError on every real fill for a whole
+    build. Anything added here must be pinned in
+    ``tests/contract/test_freqtrade_contract.py`` first.
+    """
+
     ft_order_side: str = "buy"
     status: str = "open"
     safe_amount: float = 0.0
     safe_filled: float = 0.0
     safe_price: float = PRICE
+    safe_fee_base: float = 0.0
     order_type: str = "limit"
     order_id: str = "o1"
-    fee_cost: float = 0.0
-    fee_currency: str = "USDT"
+    ft_order_tag: str = ""
 
 
 @dataclass
@@ -49,6 +57,10 @@ class FakeTrade:
     exit_reason: str = ""
     enter_tag: str = ""
     nr_of_successful_entries: int = 1
+    fee_open: float = 0.0
+    fee_close: float = 0.0
+    fee_open_currency: str = "USDT"
+    fee_close_currency: str = "USDT"
     orders: list = field(default_factory=list)
     _data: dict = field(default_factory=dict)
 
@@ -190,6 +202,38 @@ class TestLedgerNav:
         strategy.wallets = FakeWallets(start=10_000.0, free=5_000.0)
         assert strategy._portfolio_state(NOW).reserved_usdt == 0.0
 
+    def test_a_resting_position_adjustment_order_does_not_inflate_nav(
+            self, strategy, monkeypatch):
+        """Verified HIGH: once anything has filled, the resting add was never deducted.
+
+        freqtrade recomputes ``stake_amount`` from FILLED orders only (pinned in
+        tests/contract), so the 1 000 USDT resting here is still inside ``ledger_cash``.
+        Adding it back as ``reserved`` counted it twice.
+        """
+        filled = FakeOrder(status="closed", safe_amount=0.1, safe_filled=0.1)
+        resting = FakeOrder(status="open", safe_amount=0.02, safe_filled=0.0, order_id="o2")
+        trade = FakeTrade(amount=0.1, stake_amount=5_000.0, orders=[filled, resting])
+        with_trades(monkeypatch, strategy, [trade])
+        strategy.wallets = FakeWallets(start=10_000.0, free=5_000.0)
+        ps = strategy._portfolio_state(NOW)
+        assert ps.reserved_usdt == 0.0
+        assert ps.nav == pytest.approx(10_000.0)
+
+    def test_an_inflated_anchor_cannot_fire_a_false_daily_stop(self, strategy, monkeypatch):
+        """The money consequence: loop_tick stamps the day anchor straight off ps.nav."""
+        filled = FakeOrder(status="closed", safe_amount=0.1, safe_filled=0.1)
+        resting = FakeOrder(status="open", safe_amount=0.02, safe_filled=0.0, order_id="o2")
+        trade = FakeTrade(amount=0.1, stake_amount=5_000.0, orders=[filled, resting])
+        with_trades(monkeypatch, strategy, [trade])
+        strategy.wallets = FakeWallets(start=10_000.0, free=5_000.0)
+        # First loop of the Gulf day, with a resting add worth 10% of NAV: this stamps
+        # day_anchor_nav.
+        assert not strategy.gate.loop_tick(strategy._portfolio_state(NOW)).flatten
+        # The add is then cancelled unfilled. Nothing about the book changed, so no stop.
+        trade.orders = [filled]
+        later = strategy.gate.loop_tick(strategy._portfolio_state(NOW + timedelta(hours=1)))
+        assert not later.flatten, "a 10% inflated anchor faked a -9% day and flattened"
+
     def test_entries_used_comes_from_the_trade(self, strategy, monkeypatch):
         trade = FakeTrade(amount=0.1, stake_amount=5_000.0, nr_of_successful_entries=3)
         with_trades(monkeypatch, strategy, [trade])
@@ -220,18 +264,35 @@ class TestGatedAdjustments:
         monkeypatch.setattr(strategy.gate, "check_entry",
                             lambda pair, stake, state: seen.append((pair, stake)) or
                             real(pair, stake, state))
-        got = strategy._gated_add("BTC/USDT", 1_000.0, ps, tag="dca")
-        assert got == pytest.approx(1_000.0)
+        plan = strategy._gated_add("BTC/USDT", 1_000.0, ps, tag="dca")
+        assert plan is not None and plan.stake == pytest.approx(1_000.0)
+        assert plan.tag == "dca"
         assert seen == [("BTC/USDT", 1_000.0)]
 
-    def test_a_rejected_add_returns_none(self, strategy, monkeypatch):
+    def test_an_oversized_add_is_capped_not_rejected(self, strategy, monkeypatch):
+        """Verified MEDIUM: size first, enforce second.
+
+        Gating the RAW ask made a legal-but-large proposal an ``order_notional`` BREACH
+        alert with no order at all, every candle, while ``custom_stake_amount`` sized the
+        identical first entry down without complaint.
+        """
         ps = self._ps(strategy, monkeypatch)
-        assert strategy._gated_add("BTC/USDT", 9_000.0, ps) is None   # order_notional
+        plan = strategy._gated_add("BTC/USDT", 9_000.0, ps)
+        assert plan is not None
+        assert plan.stake == pytest.approx(2_000.0)   # max_order_notional_pct * nav
+        assert strategy.gate.check_entry("BTC/USDT", plan.stake, ps).allowed
+
+    def test_an_operationally_refused_add_is_still_refused(self, strategy, monkeypatch):
+        """Capping is for SIZING limits only; a lock/kill/blackout must still say no."""
+        ps = self._ps(strategy, monkeypatch)
+        strategy.gate.store.set("monthly_locked", "1")
+        assert strategy._gated_add("BTC/USDT", 1_000.0, ps) is None
 
     def test_an_add_is_clamped_to_the_headroom(self, strategy, monkeypatch):
         ps = self._ps(strategy, monkeypatch)
         # 2000 is the max_order_notional_pct headroom; ask for 1900 and it survives
-        assert strategy._gated_add("BTC/USDT", 1_900.0, ps) == pytest.approx(1_900.0)
+        plan = strategy._gated_add("BTC/USDT", 1_900.0, ps)
+        assert plan is not None and plan.stake == pytest.approx(1_900.0)
 
     def test_a_sub_min_notional_add_is_refused(self, strategy, monkeypatch):
         ps = self._ps(strategy, monkeypatch)
@@ -265,9 +326,61 @@ class TestGatedAdjustments:
                                                     "sell_fraction": 0.25}]}
         trade = FakeTrade(amount=0.1, stake_amount=5_000.0)
         self._ps(strategy, monkeypatch, trades=[trade])
-        for _ in range(12):
+        for _ in range(strategy.gate_cfg.max_orders_per_day):
             strategy.gate.record_order_fill(NOW, notional=1.0)
         assert strategy._mechanics_adjust(trade, NOW, PRICE, 0.12, 25.0, 9_999.0) is None
+
+    def test_a_gate_refused_tp_rung_is_not_burned(self, strategy, monkeypatch):
+        """Verified HIGH: the rung was persisted as fired BEFORE the gate was consulted.
+
+        ``fee_budget`` is a MONTHLY counter, so one refusal used to cost every remaining
+        profit level for the rest of the month.
+        """
+        strategy.mech["take_profit"] = {"ladder": [{"at_profit_pct": 0.10,
+                                                    "sell_fraction": 0.25}]}
+        trade = FakeTrade(amount=0.1, stake_amount=5_000.0)
+        self._ps(strategy, monkeypatch, trades=[trade])
+        for _ in range(strategy.gate_cfg.max_orders_per_day):
+            strategy.gate.record_order_fill(NOW, notional=1.0)   # orders_per_day gone
+        assert strategy._mechanics_adjust(trade, NOW, PRICE, 0.12, 25.0, 9_999.0) is None
+        assert not (trade.get_custom_data("tp_rungs") or [])
+        # Next Gulf day the order budget is back and the rung finally fires.
+        tomorrow = NOW + timedelta(days=1)
+        assert strategy._mechanics_adjust(
+            trade, tomorrow, PRICE, 0.12, 25.0, 9_999.0) == pytest.approx(-1_250.0)
+        assert trade.get_custom_data("tp_rungs") == [0]
+
+    def test_a_tp_rung_sells_a_fraction_of_the_cost_basis(self, strategy, monkeypatch):
+        """Verified CRITICAL: freqtrade divides the returned stake by trade.stake_amount.
+
+        Opened at 50k, now 100k: market value 10 000, cost basis 5 000. A 25% rung must
+        sell 0.025 BTC; a market-value stake made freqtrade sell 0.05.
+        """
+        strategy.mech["take_profit"] = {"ladder": [{"at_profit_pct": 0.10,
+                                                    "sell_fraction": 0.25}]}
+        trade = FakeTrade(amount=0.1, stake_amount=5_000.0, open_rate=PRICE)
+        monkeypatch.setattr(type(strategy), "_last_price", lambda self, pair: 2 * PRICE)
+        self._ps(strategy, monkeypatch, trades=[trade], free=10_000.0)
+        got = strategy._mechanics_adjust(trade, NOW, 2 * PRICE, 1.0, 25.0, 9_999.0)
+        assert got == pytest.approx(-1_250.0)
+        # ... which is what freqtradebot turns into a base quantity.
+        sold = abs(got) * trade.amount / trade.stake_amount
+        assert sold == pytest.approx(0.025)
+
+    def test_a_full_exit_rung_returns_the_whole_cost_basis(self, strategy, monkeypatch):
+        """A market-value full exit asked for more base than the trade held, so
+        freqtradebot's ``remaining < min_exit_stake`` guard declined the exit entirely."""
+        strategy.mech["take_profit"] = {"ladder": [{"at_profit_pct": 0.10,
+                                                    "sell_fraction": 0.99}]}
+        # Opened at 50k, now 100k: market value 2 000, cost basis 1 000. The 99% rung
+        # leaves 20 USDT, under the dust weight, so the ladder asks for a full exit.
+        trade = FakeTrade(amount=0.02, stake_amount=1_000.0, open_rate=PRICE)
+        monkeypatch.setattr(type(strategy), "_last_price", lambda self, pair: 2 * PRICE)
+        self._ps(strategy, monkeypatch, trades=[trade], free=10_000.0)
+        got = strategy._mechanics_adjust(trade, NOW, 2 * PRICE, 1.0, 25.0, 9_999.0)
+        assert got == pytest.approx(-1_000.0)
+        sold = abs(got) * trade.amount / trade.stake_amount
+        assert sold == pytest.approx(trade.amount)      # exactly flat, remaining == 0
 
     def test_dca_add_goes_through_the_gate_and_counts_up(self, strategy, monkeypatch):
         strategy.mech["dca"] = {"enabled": True, "max_adds": 2, "step_pct": 0.05,

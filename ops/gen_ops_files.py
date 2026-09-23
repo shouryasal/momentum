@@ -43,6 +43,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ops.config import REPO_ROOT, EarnConfig, load_config, slots_for
 
@@ -137,13 +138,46 @@ JOBS: dict[str, JobSpec] = {
                            module="runs.maintenance"),
     "daily_review": JobSpec("daily_review", "cron-daily", "daily_review.log",
                             module="runs.daily_review"),
+    # The local holdings watcher. Its cadence and deadline come from `watch:` in
+    # earn.yaml, not from ops.schedules — that section is its single source, and it
+    # carries the `enabled` switch too. It is wrapped exactly as runs/watch/__main__.py
+    # prescribes: `cron-watch.lock` and the `signals` envwrap allowlist.
+    "watch": JobSpec("signals", "cron-watch", "watch.log", module="runs.watch",
+                     args=("once",)),
+    # The self-research loop, one line per `discovery.passes` entry. Both passes take the
+    # SAME lock on purpose: a deep pass that overruns must delay the next light one rather
+    # than race it through the same ledger, the same trial counter and the same changes/
+    # directory. Their cron and deadline live in ops.schedules like any other job; what
+    # `discovery:` owns is whether they are rendered at all and what each pass does.
+    "discovery_light": JobSpec("discovery", "cron-discovery", "discovery.log",
+                               module="runs.discovery", args=("light",)),
+    "discovery_deep": JobSpec("discovery", "cron-discovery", "discovery.log",
+                              module="runs.discovery", args=("deep",)),
 }
 
 #: Deterministic order of the rendered lines (fast cadence first, then the day jobs).
 JOB_ORDER: tuple[str, ...] = (
-    "ingest", "scanner", "nav_tick", "reconcile", "healthcheck", "tca_job", "nav_job",
-    "research_run", "daily_review", "review_run", "backtest_data", "backup", "maintenance",
+    "ingest", "scanner", "watch", "nav_tick", "reconcile", "healthcheck", "tca_job",
+    "nav_job", "research_run", "daily_review", "discovery_light", "discovery_deep",
+    "review_run", "backtest_data", "backup", "maintenance",
 )
+
+#: Jobs rendered from their own config section rather than from ``ops.schedules``.
+#: ``(cron attribute, deadline attribute, enabled attribute)`` on ``cfg.<section>``.
+SELF_SCHEDULED: dict[str, str] = {"watch": "watch"}
+
+#: Jobs whose cron and deadline come from ``ops.schedules`` like everything else, but whose
+#: own config section carries the on/off switch. Keeping the switch where the behaviour is
+#: configured means turning the loop off in one place actually stops it firing, rather than
+#: leaving a cron line that starts a process whose first act is to exit.
+ENABLED_BY: dict[str, str] = {"discovery_light": "discovery", "discovery_deep": "discovery"}
+
+#: Every cron line runs through the one autonomy gate (``ops/autonomy.py``). It checks the
+#: bot's autonomy level and the spend caps, records a heartbeat either way, and either
+#: execs the real command or exits 0 with the reason recorded. Gating here — in the
+#: rendering, once — is what keeps it out of every individual runner, and what makes it
+#: impossible for a new job to forget to ask.
+GATE_MODULE = "ops.autonomy"
 
 
 class GenOpsError(Exception):
@@ -163,11 +197,43 @@ def slot_cron(slot: str) -> str:
     return f"{mm} {hh} * * *"
 
 
+def _section(cfg: EarnConfig, job: str) -> Any | None:
+    """The config section a self-scheduled job reads its cadence from, when it has one."""
+    name = SELF_SCHEDULED.get(job)
+    return getattr(cfg, name, None) if name else None
+
+
+def job_enabled(cfg: EarnConfig, job: str) -> bool:
+    """False for a job whose own config section switches it off.
+
+    Two ways a section owns a switch: ``SELF_SCHEDULED`` (the section owns the cadence too)
+    and ``ENABLED_BY`` (the cadence stays in ``ops.schedules``, only the switch moves).
+    """
+    section = _section(cfg, job)
+    if section is None and job in ENABLED_BY:
+        section = getattr(cfg, ENABLED_BY[job], None)
+    return True if section is None else bool(getattr(section, "enabled", True))
+
+
+def deadline_for(cfg: EarnConfig, job: str) -> int:
+    """The ``timeout(1)`` budget for a job, from whichever section owns it."""
+    section = _section(cfg, job)
+    if section is not None:
+        return int(getattr(section, "deadline_s"))
+    sched = cfg.ops.schedules.get(job)
+    if sched is None:
+        raise GenOpsError(f"ops.schedules has no job {job!r}")
+    return int(sched.deadline_s)
+
+
 def crons_for(cfg: EarnConfig, job: str) -> list[str]:
     """Every cron expression a job fires on. Research derives its lines from the slots."""
     spec = JOBS.get(job)
     if spec is not None and spec.per_slot:
         return [slot_cron(s) for s in slots_for(cfg)]
+    section = _section(cfg, job)
+    if section is not None:
+        return [str(getattr(section, "cron"))]
     sched = cfg.ops.schedules.get(job)
     if sched is None:
         raise GenOpsError(f"ops.schedules has no job {job!r}")
@@ -185,18 +251,29 @@ def _command(spec: JobSpec, ctx: HostCtx, extra: tuple[str, ...] = ()) -> str:
     return " ".join(parts)
 
 
+def _gated(job: str, spec: JobSpec, ctx: HostCtx, extra: tuple[str, ...] = ()) -> str:
+    """The real command, behind the one autonomy gate.
+
+    ``python -m ops.autonomy run <job> -- <cmd>`` checks the autonomy level and the spend
+    caps, writes the job's heartbeat, and either execs ``<cmd>`` or exits **0** having
+    recorded why it did not. Exit 0 is deliberate: a bot that is deliberately off is not a
+    cron failure, and colouring it red teaches an operator to ignore red.
+    """
+    return (f'"$E/.venv/bin/python" -m {GATE_MODULE} run {job} -- '
+            f"{_command(spec, ctx, extra)}")
+
+
 def cron_line(cfg: EarnConfig, job: str, cron: str, ctx: HostCtx,
               extra: tuple[str, ...] = ()) -> str:
-    """One fully-guarded cron line: mkdir guard, flock, timeout, envwrap, quoted paths."""
+    """One fully-guarded cron line: mkdir guard, flock, timeout, envwrap, gate, quoted paths."""
     spec = JOBS[job]
-    sched = cfg.ops.schedules[job]
     mkdirs = " ".join(f'"$E/{d}"' for d in CRON_MKDIRS)
     return (
         f"{cron:<14} mkdir -p {mkdirs} && "
         f'flock -n "$E/ops/locks/{spec.lock}.lock" '
-        f"timeout -k {KILL_GRACE_S} {sched.deadline_s} "
+        f"timeout -k {KILL_GRACE_S} {deadline_for(cfg, job)} "
         f'bash "$E/ops/envwrap.sh" {spec.envwrap} -- '
-        f"{_command(spec, ctx, extra)} "
+        f"{_gated(job, spec, ctx, extra)} "
         f'>> "$E/logs/{spec.log}" 2>&1'
     )
 
@@ -210,20 +287,40 @@ def render_crontab(cfg: EarnConfig, ctx: HostCtx | None = None) -> str:
         "#   render/check:  python -m ops.gen_ops_files --check",
         "#   install:       python -m ops.gen_ops_files --install --yes",
         "#",
-        "# Distro timezone MUST be Asia/Dubai (Gulf, UTC+4, no DST): the expressions below",
-        "# are Gulf time verbatim and come from config/earn.yaml ops.schedules, with the",
-        "# research lines derived from research.slots (one line per slot). Every job runs",
-        "# under flock (no overlap), timeout (its deadline_s) and envwrap (per-job secret",
-        "# allowlist), after a mkdir guard so a missing logs/ or ops/locks/ cannot make the",
-        "# line fail before the job starts. E must point at the checkout on ext4.",
+        "# The expressions below are Gulf time verbatim and come from config/earn.yaml",
+        "# ops.schedules, with the research lines derived from research.slots (one line per",
+        "# slot). CRON_TZ below is what MAKES them Gulf time: cron evaluates an expression",
+        "# in the distro timezone, and ops/healthcheck.py forces Gulf before croniter, so",
+        "# on a stock UTC WSL the watchdog expected every daily job four hours early, found",
+        "# no artifact, spawned a detached rerun and alerted — then the real cron fire ran",
+        "# it a second time. Setting CRON_TZ keeps the schedule right whatever the distro",
+        "# clock says (ops/setup.sh checks the clock too, because everything else on the",
+        "# host still reads it). Every job runs under flock (no overlap), timeout (its",
+        "# deadline_s) and envwrap (per-job secret allowlist), after a mkdir guard so a",
+        "# missing logs/ or ops/locks/ cannot make the line fail before the job starts.",
+        "#",
+        "# Every line then runs `python -m ops.autonomy run <job> --` before the real",
+        "# command. That is the ONE autonomy gate: it reads the signed per-bot level in",
+        "# var/state/autonomy.json, checks the spend caps, writes the job's heartbeat and",
+        "# either execs the job or exits 0 having recorded why it did not. No runner has",
+        "# to know autonomy exists, and no runner can forget to ask. Installing this file",
+        "# is what gives the system a heartbeat at all: `python -m ops.autonomy start <bot>`",
+        "# installs it and then READS IT BACK to prove it.",
+        "# E must point at the checkout on ext4.",
         "SHELL=/bin/bash",
+        f"CRON_TZ={cfg.meta.display_timezone}",
         f"PATH={ctx.venv_bin}:/usr/local/bin:/usr/bin:/bin",
         f'MAILTO="{mailto}"',
         f'E="{ctx.root}"',
         "",
     ]
     for job in JOB_ORDER:
-        if job not in cfg.ops.schedules:
+        if job in SELF_SCHEDULED:
+            if not job_enabled(cfg, job):
+                continue
+        elif job not in cfg.ops.schedules:
+            continue
+        elif not job_enabled(cfg, job):
             continue
         spec = JOBS[job]
         if spec.per_slot:
@@ -249,6 +346,11 @@ def render_telegram_unit(cfg: EarnConfig, ctx: HostCtx | None = None) -> str:
     return f"""# GENERATED by ops/gen_ops_files.py — do not edit by hand.
 # Install:  sudo cp ops/systemd/earn-telegram.service /etc/systemd/system/
 #           sudo systemctl daemon-reload && sudo systemctl enable --now earn-telegram
+#
+# Environment=TZ below sets this PROCESS's clock, so the bot prints Gulf time.
+# It pins no schedule and enforces nothing: a systemd timer (and cron) fires on the
+# distro timezone. The schedule is pinned by CRON_TZ in ops/crontab, and the distro
+# clock itself is checked by ops/setup.sh and the console's host checks.
 [Unit]
 Description=Earn Telegram command bot (long polling, single chat)
 After=network-online.target
@@ -289,6 +391,9 @@ def render_console_unit(cfg: EarnConfig, ctx: HostCtx | None = None) -> str:
 # The console is the human's seat: it reads .env directly (EARN_CONSOLE_TOKEN and
 # EARN_CONSOLE_SECRET are in NO envwrap allowlist) and must never see
 # EARN_AUTOMATED_RUN=1 — it refuses to start when that is set.
+#
+# Environment=TZ below sets this PROCESS's clock only.
+# It pins no schedule; see CRON_TZ in ops/crontab for the one that does.
 [Unit]
 Description=Earn console (FastAPI + React, 127.0.0.1 only)
 After=network-online.target
@@ -426,6 +531,15 @@ def install(cfg: EarnConfig | None = None, root: Path | None = None, *, runner=N
     if rc != 0:
         raise GenOpsError(f"crontab install failed: {err.strip() or rc}")
 
+    # Read it back. `crontab -` can return 0 against a host with no cron daemon, or write
+    # to a different user's table; this host spent its whole life believing it was
+    # scheduled while `crontab -l` was empty. An install nobody verified is a claim.
+    readback = installed_crontab(run)
+    installed_ok = readback.strip() == rendered.strip()
+    verify_diff = "" if installed_ok else "".join(difflib.unified_diff(
+        readback.splitlines(keepends=True), rendered.splitlines(keepends=True),
+        fromfile="crontab (read back)", tofile="crontab (rendered)"))
+
     stage = staging or (base / "var" / "runtime" / "systemd")
     stage.mkdir(parents=True, exist_ok=True)
     units: list[str] = []
@@ -438,7 +552,10 @@ def install(cfg: EarnConfig | None = None, root: Path | None = None, *, runner=N
     sudo = [f"sudo cp {stage}/{n} /etc/systemd/system/" for n in units]
     sudo.append("sudo systemctl daemon-reload")
     sudo += [f"sudo systemctl enable --now {Path(n).stem}" for n in units]
-    return {"crontab_diff": diff, "units": units, "staged_in": str(stage), "sudo": sudo}
+    return {"crontab_diff": diff, "units": units, "staged_in": str(stage), "sudo": sudo,
+            "installed_verified": installed_ok, "verify_diff": verify_diff,
+            "installed_lines": len([ln for ln in readback.splitlines()
+                                    if ln.strip() and not ln.lstrip().startswith("#")])}
 
 
 # --------------------------------------------------------------------------- cli
@@ -494,10 +611,15 @@ def main(argv: list[str] | None = None) -> int:
             print("re-run with --yes to install", file=sys.stderr)
             return 2
         result = install(cfg)
+        verified = bool(result.get("installed_verified"))
         print(f"crontab installed; units staged in {result['staged_in']}")
+        print(f"read-back verification: {'OK' if verified else 'FAILED'} "
+              f"({result.get('installed_lines')} lines installed)")
+        if not verified:
+            print(result.get("verify_diff") or "", file=sys.stderr)
         for line in result["sudo"]:  # type: ignore[union-attr]
             print(f"  {line}")
-        return 0
+        return 0 if verified else 1
 
     ap.print_help()
     return 2

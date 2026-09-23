@@ -68,9 +68,30 @@ def _publish(request: Request, topic: str, payload: dict[str, Any]) -> None:
 
 @router.get("/jobs")
 def list_jobs(actor: Actor, cfg: Cfg, kdb: Kdb, settings: Settings) -> dict[str, Any]:
-    """Every scheduled job: cron expressions, next fire, last outcome, lock state."""
-    rows = ops_service.jobs(cfg, kdb, root=Path(settings.state_root))
-    return {"jobs": [r.to_json() for r in rows]}
+    """Every scheduled job: cron expressions, next fire, last outcome, lock state.
+
+    Reading the list is also where detached "Run now" rows are reconciled: a row whose pid
+    is gone is closed from its exit-code file, so the Operations timeline never shows a
+    ``running`` job that ended (see ``ops_service.reap_jobs``).
+    """
+    root = Path(settings.state_root)
+    reaped = _reap(cfg, root)
+    rows = ops_service.jobs(cfg, kdb, root=root)
+    return {"jobs": [r.to_json() for r in rows], "reaped": reaped}
+
+
+def _reap(cfg: EarnConfig, root: Path) -> list[dict[str, Any]]:
+    """Close finished detached rows; a broken journal must never fail the page."""
+    from ops import db
+
+    journal = root / cfg.paths.journal_db
+    if not journal.exists():
+        return []
+    try:
+        with db.opened(journal) as jdb:
+            return ops_service.reap_jobs(jdb, root=root)
+    except Exception:  # noqa: BLE001 - bookkeeping, never the reason a read 500s
+        return []
 
 
 @router.get("/jobs/{job}/runs")

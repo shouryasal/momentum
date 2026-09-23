@@ -1,4 +1,4 @@
-import { Badge, Button, Group, Stack, Text } from '@mantine/core';
+import { Badge, Button, Group, Stack, Text, Tooltip } from '@mantine/core';
 
 import { DataTable, type DataTableColumn } from '@/components';
 
@@ -13,17 +13,19 @@ function SimBadge({ mode }: { mode: string | null }) {
   );
 }
 
-export function OrdersTable({ rows, onCancel, loading }: {
+export function OrdersTable({ rows, onCancel, loading, onSelect }: {
   rows: OrderRow[];
   onCancel?: (row: OrderRow) => void;
   loading?: boolean;
+  /** Opens this order's story in the detail pane. */
+  onSelect?: (row: OrderRow) => void;
 }) {
   const columns: Array<DataTableColumn<OrderRow>> = [
     { key: 'ts', header: 'Time (UTC)', sortValue: (r) => r.ts_utc,
       render: (r) => <Text size="xs" ff="monospace">{r.ts_utc}</Text> },
     {
       key: 'pair',
-      header: 'Pair',
+      header: 'Coin',
       sortValue: (r) => r.pair,
       render: (r) => (
         <Group gap={6}>
@@ -32,7 +34,7 @@ export function OrdersTable({ rows, onCancel, loading }: {
         </Group>
       ),
     },
-    { key: 'side', header: 'Side', sortValue: (r) => r.side,
+    { key: 'side', header: 'Buy or sell', sortValue: (r) => r.side,
       render: (r) => (
         <Badge size="xs" color={r.side === 'buy' ? 'teal' : 'orange'}>{r.side}</Badge>
       ) },
@@ -48,8 +50,16 @@ export function OrdersTable({ rows, onCancel, loading }: {
       header: '',
       render: (r) =>
         onCancel && r.status === 'open' ? (
-          <Button size="compact-xs" variant="light" color="orange"
-            onClick={() => onCancel(r)}>
+          <Button
+            size="compact-xs"
+            variant="light"
+            color="orange"
+            // The row itself opens the detail pane; cancelling must not do both.
+            onClick={(event) => {
+              event.stopPropagation();
+              onCancel(r);
+            }}
+          >
             Cancel
           </Button>
         ) : null,
@@ -61,10 +71,11 @@ export function OrdersTable({ rows, onCancel, loading }: {
       rows={rows}
       rowKey={(r) => String(r.id)}
       loading={loading}
+      {...(onSelect ? { onRowClick: onSelect } : {})}
       maxHeight={360}
       dense
-      emptyTitle="No orders"
-      emptyDescription="Nothing has been submitted for this sleeve yet."
+      emptyTitle="No orders yet"
+      emptyDescription="This bot has not asked the exchange to do anything yet."
     />
   );
 }
@@ -77,13 +88,18 @@ export function slippageBps(row: FillRow): number | null {
   return ((row.fill_price - quote) / quote) * 10_000 * sign;
 }
 
-export function FillsTable({ rows, loading }: { rows: FillRow[]; loading?: boolean }) {
+export function FillsTable({ rows, loading, onSelect }: {
+  rows: FillRow[];
+  loading?: boolean;
+  /** Opens this trade's story in the detail pane. */
+  onSelect?: (row: FillRow) => void;
+}) {
   const columns: Array<DataTableColumn<FillRow>> = [
     { key: 'ts', header: 'Time (UTC)', sortValue: (r) => r.ts_utc,
       render: (r) => <Text size="xs" ff="monospace">{r.ts_utc}</Text> },
     {
       key: 'pair',
-      header: 'Pair',
+      header: 'Coin',
       sortValue: (r) => r.pair,
       render: (r) => (
         <Group gap={6}>
@@ -92,7 +108,7 @@ export function FillsTable({ rows, loading }: { rows: FillRow[]; loading?: boole
         </Group>
       ),
     },
-    { key: 'side', header: 'Side', sortValue: (r) => r.side,
+    { key: 'side', header: 'Buy or sell', sortValue: (r) => r.side,
       render: (r) => (
         <Badge size="xs" color={r.side === 'buy' ? 'teal' : 'orange'}>{r.side}</Badge>
       ) },
@@ -112,17 +128,33 @@ export function FillsTable({ rows, loading }: { rows: FillRow[]; loading?: boole
     },
     {
       key: 'slippage',
-      header: 'Slippage (bps)',
+      header: 'Price vs the plan',
       align: 'right',
       sortValue: (r) => slippageBps(r),
       render: (r) => {
         const bps = slippageBps(r);
         return (
-          <Stack gap={0} align="flex-end">
-            <Text size="xs" ff="monospace" c={bps !== null && bps > 0 ? 'orange' : undefined}>
-              {bps === null ? '—' : bps.toFixed(1)}
-            </Text>
-          </Stack>
+          <Tooltip
+            withArrow
+            multiline
+            w={280}
+            label={
+              bps === null
+                ? 'No decision-time price was recorded for this trade.'
+                : bps > 0
+                  ? `You paid ${(bps / 100).toFixed(3)}% more than the price the decision assumed.`
+                  : `You did ${Math.abs(bps / 100).toFixed(3)}% better than the price the decision assumed.`
+            }
+          >
+            <Stack gap={0} align="flex-end">
+              <Text size="xs" ff="monospace" c={bps !== null && bps > 0 ? 'orange' : undefined}>
+                {bps === null ? '—' : `${bps > 0 ? '+' : ''}${(bps / 100).toFixed(3)}%`}
+              </Text>
+              <Text size="xs" c="dimmed">
+                {bps === null ? 'not recorded' : bps > 0 ? 'worse than planned' : 'better than planned'}
+              </Text>
+            </Stack>
+          </Tooltip>
         );
       },
     },
@@ -133,10 +165,11 @@ export function FillsTable({ rows, loading }: { rows: FillRow[]; loading?: boole
       rows={rows}
       rowKey={(r) => String(r.id)}
       loading={loading}
+      {...(onSelect ? { onRowClick: onSelect } : {})}
       maxHeight={360}
       dense
-      emptyTitle="No fills"
-      emptyDescription="No order has filled for this sleeve yet."
+      emptyTitle="Nothing has traded yet"
+      emptyDescription="No order this bot placed has traded yet."
     />
   );
 }

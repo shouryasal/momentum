@@ -15,6 +15,13 @@ from strategies.riskgate import GateConfig, MemoryStateStore, PortfolioState, Ri
 
 NOW = datetime(2026, 9, 22, 8, 0, tzinfo=UTC)  # 12:00 Gulf
 
+#: "An ordinary entry", used wherever the stake is incidental to what the test is about.
+#: It is 3% of the canonical 10,000 NAV because the gate refuses to OPEN a position below
+#: ``risk.min_position_pct_nav`` (2%): under a wide universe a position too small to trim
+#: without falling under min_notional can only be opened and closed, never managed
+#: (docs/design/wide-universe.md §2.4). Tests that mean something by the number say it.
+ENTRY = 300.0
+
 
 def container_paths(tmp_path: Path) -> dict[str, str]:
     return {

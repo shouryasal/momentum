@@ -95,6 +95,121 @@ class TestRiskService:
         assert set(got["sleeves"]) == {"a", "b"}
         assert got["navs"]["a"] == 10_000.0
 
+    def test_overview_reads_nav_from_the_journal_when_the_caller_passes_none(self, env):
+        """``GET /api/risk`` passes no navs, and ``navs or {}`` made that an empty dict.
+
+        Every NAV-derived meter on the page then divided by zero: the exposure bar read
+        0.0% while the sleeve was fully invested, and the USDT floor read as a permanent
+        breach. The default has to be the real number, not nothing.
+        """
+        cfg, root, journal = env
+        with db.opened(journal) as conn:
+            conn.execute(
+                "INSERT INTO nav_points(ts_utc, sleeve, mode, nav_usdt, cash_usdt)"
+                " VALUES (?,?,?,?,?)",
+                (NOW.strftime("%Y-%m-%dT%H:%M:%SZ"), "a", "test", 9_500.0, 2_000.0))
+            conn.commit()
+        got = rsvc.overview(cfg, root=root)
+        assert got["navs"]["a"] == pytest.approx(9_500.0)
+        assert "b" not in got["navs"]          # no row: absent, never a zero
+
+    def test_utilisation_marks_nav_derived_meters_unknown_without_a_nav(self, env):
+        """With no NAV the exposure/floor/turnover/fee meters are unknown, not zero.
+
+        ``RiskGate.utilisation`` divides by ``max(nav, 1e-9)``, so a zero NAV turns a real
+        counter into an astronomical bar and turns the USDT *floor* into a headroom of
+        ``-usdt_floor``, which the page draws as a red breach. Both are lies.
+        """
+        cfg, root, _ = env
+        out = rsvc.utilisation(cfg, "a", nav=0.0, positions={}, free_usdt=0.0, now=NOW,
+                               root=root)
+        assert out["nav_valid"] is False
+        meters = out["meters"]
+        for name in rsvc.NAV_DERIVED_METERS:
+            assert meters[name]["valid"] is False, name
+        # The pure counters do not depend on NAV and stay real.
+        assert meters["orders_per_day"]["valid"] is True
+        assert meters["trades_per_day"]["valid"] is True
+
+    def test_utilisation_meters_are_valid_once_nav_is_known(self, env):
+        cfg, root, _ = env
+        out = rsvc.utilisation(cfg, "a", nav=10_000.0, positions={"BTC/USDT": 2_000.0},
+                               free_usdt=8_000.0, now=NOW, root=root)
+        assert out["nav_valid"] is True and out["nav_source"] == "caller"
+        assert all(m["valid"] is True for m in out["meters"].values())
+        assert out["meters"]["gross_cap"]["used"] == pytest.approx(0.2)
+        assert out["meters"]["usdt_floor"]["headroom"] > 0
+
+    def test_portfolio_view_prefers_the_bot_and_values_the_book_at_the_mark(self, env):
+        cfg, _root, _ = env
+        view = rsvc.portfolio_view(
+            cfg, "a",
+            bot_status=[{"pair": "BTC/USDT", "amount": 0.05, "current_rate": 50_000.0,
+                         "open_rate": 40_000.0}],
+            balance={"total": 10_000.0, "total_bot": 10_000.0,
+                     "currencies": [{"currency": "USDT", "free": 7_500.0}]},
+        )
+        assert view["source"] == "bot"
+        assert view["nav"] == pytest.approx(10_000.0)
+        assert view["positions"] == {"BTC/USDT": pytest.approx(2_500.0)}
+        assert view["free_usdt"] == pytest.approx(7_500.0)
+
+    def test_portfolio_view_uses_the_sleeve_nav_not_the_exchange_account(self, env):
+        """``total`` is the whole account; the gate and the anchors divide by ``total_bot``.
+
+        A sleeve sharing an exchange account with the operator's own coins used to report
+        the operator's money as its NAV, which halves every meter on the page.
+        """
+        cfg, _root, _ = env
+        view = rsvc.portfolio_view(
+            cfg, "a",
+            bot_status=[{"pair": "BTC/USDT", "amount": 0.04, "current_rate": 50_000.0}],
+            balance={"total": 10_000.0, "total_bot": 5_000.0,
+                     "currencies": [{"currency": "USDT", "free": 8_000.0,
+                                     "bot_owned": 3_000.0}]},
+        )
+        assert view["nav"] == pytest.approx(5_000.0)
+        # The bot's own spendable stake, not the whole wallet's free USDT.
+        assert view["free_usdt"] == pytest.approx(3_000.0)
+        util = rsvc.utilisation(cfg, "a", nav=view["nav"], positions=view["positions"],
+                                free_usdt=view["free_usdt"], now=NOW, root=_root)
+        assert util["meters"]["gross_cap"]["used"] == pytest.approx(0.4)
+
+    def test_portfolio_view_will_not_guess_a_nav_from_a_balance_without_total_bot(self, env):
+        """No ``total_bot`` means the sleeve's own capital is unprovable — say unknown.
+
+        Falling back to ``total`` would be the same lie with fewer witnesses; with no
+        ledger row either, the answer is ``unavailable`` and every NAV-derived meter
+        renders as unknown.
+        """
+        cfg, _root, _ = env
+        view = rsvc.portfolio_view(
+            cfg, "a",
+            bot_status=[{"pair": "BTC/USDT", "amount": 0.04, "current_rate": 50_000.0}],
+            balance={"total": 10_000.0,
+                     "currencies": [{"currency": "USDT", "free": 8_000.0}]},
+        )
+        assert view == {"nav": 0.0, "free_usdt": 0.0, "positions": {},
+                        "source": "unavailable"}
+
+    def test_portfolio_view_falls_back_to_the_ledger_row_when_the_bot_is_down(self, env):
+        """``nav - cash`` is the marked value of the book, which is all ``gross`` needs."""
+        cfg, _root, _ = env
+        view = rsvc.portfolio_view(
+            cfg, "a", bot_status=None, balance=None,
+            fallback_nav={"nav_usdt": 9_500.0, "cash_usdt": 2_000.0})
+        assert view["source"] == "ledger"
+        assert view["nav"] == pytest.approx(9_500.0)
+        assert view["free_usdt"] == pytest.approx(2_000.0)
+        assert sum(view["positions"].values()) == pytest.approx(7_500.0)
+
+    def test_portfolio_view_says_unavailable_rather_than_inventing_a_zero(self, env):
+        cfg, _root, _ = env
+        view = rsvc.portfolio_view(cfg, "a", bot_status=None, balance=None,
+                                   fallback_nav=None)
+        assert view == {"nav": 0.0, "free_usdt": 0.0, "positions": {},
+                        "source": "unavailable"}
+
     def test_gate_decisions_decode_the_checks_matrix(self, env):
         cfg, root, journal = env
         with db.opened(journal) as conn:
@@ -294,6 +409,83 @@ class TestRouters:
         assert body["kill"] is False
         assert "flags" in body
 
+    def test_risk_overview_carries_the_journal_nav(self, client):
+        """The router used to call ``svc.overview(cfg)`` with no navs, for ever."""
+        api, cfg, root = client
+        with db.opened(db.journal_path(cfg, root=root)) as conn:
+            conn.execute(
+                "INSERT INTO nav_points(ts_utc, sleeve, mode, nav_usdt, cash_usdt)"
+                " VALUES (?,?,?,?,?)",
+                (NOW.strftime("%Y-%m-%dT%H:%M:%SZ"), "b", "test", 10_100.0, 100.0))
+            conn.commit()
+        body = api.get("/api/risk").json()
+        assert body["navs"]["b"] == pytest.approx(10_100.0)
+
+    def test_utilisation_reads_the_portfolio_itself(self, client, monkeypatch):
+        """No ``nav``/``free_usdt`` query parameters: the server does the read.
+
+        The page had no way to know NAV, so it sent ``nav=0&free_usdt=0`` and the router
+        additionally hardcoded ``positions={}`` — which is why the exposure, USDT-floor,
+        turnover and fee meters were structurally 0 and the floor was always breached.
+        """
+        from console.routers import risk as risk_router
+
+        class FakeBot:
+            def status(self):
+                return [{"pair": "BTC/USDT", "amount": 0.05, "current_rate": 50_000.0,
+                         "open_rate": 40_000.0}]
+
+            def balance(self):
+                return {"total": 10_000.0, "total_bot": 10_000.0,
+                        "currencies": [{"currency": "USDT", "free": 7_500.0}]}
+
+        api, _cfg, _root = client
+        monkeypatch.setattr(risk_router, "bot_api", lambda c, s: FakeBot())
+        body = api.get("/api/risk/a/utilisation").json()
+        assert body["nav"] == pytest.approx(10_000.0)
+        assert body["nav_source"] == "bot" and body["nav_valid"] is True
+        assert body["free_usdt"] == pytest.approx(7_500.0)
+        assert body["meters"]["gross_cap"]["used"] == pytest.approx(0.25)
+        assert body["meters"]["usdt_floor"]["headroom"] > 0      # 0.75 free vs a 0.20 floor
+        assert all(m["valid"] is True for m in body["meters"].values())
+
+    def test_utilisation_falls_back_to_the_ledger_and_still_reports_exposure(self, client):
+        """A dead bot must not make the sleeve look flat.
+
+        The ledger row cannot name the pairs, only the total, so the aggregate rides under
+        one synthetic key — and ``_ps`` has to keep it. Filtering the book down to
+        ``cfg.pairs`` would drop it and report 0% gross with the sleeve fully invested,
+        which is the same class of lie this whole area was fixed for.
+        """
+        api, cfg, root = client      # the fixture's bot_api returns None
+        with db.opened(db.journal_path(cfg, root=root)) as conn:
+            conn.execute(
+                "INSERT INTO nav_points(ts_utc, sleeve, mode, nav_usdt, cash_usdt)"
+                " VALUES (?,?,?,?,?)",
+                (NOW.strftime("%Y-%m-%dT%H:%M:%SZ"), "a", "test", 10_000.0, 2_000.0))
+            conn.commit()
+        body = api.get("/api/risk/a/utilisation").json()
+        assert body["nav_source"] == "ledger" and body["nav_valid"] is True
+        assert body["meters"]["gross_cap"]["used"] == pytest.approx(0.8)
+        assert body["meters"]["usdt_floor"]["used"] == pytest.approx(0.2)
+        assert all(m["valid"] is True for m in body["meters"].values())
+
+    def test_utilisation_says_unknown_when_neither_the_bot_nor_the_ledger_answers(
+            self, client):
+        api, _cfg, _root = client      # the fixture's bot_api returns None
+        body = api.get("/api/risk/a/utilisation").json()
+        assert body["nav_valid"] is False and body["nav_source"] == "unavailable"
+        assert body["meters"]["usdt_floor"]["valid"] is False
+        assert body["meters"]["gross_cap"]["valid"] is False
+
+    def test_utilisation_still_honours_an_explicit_what_if_nav(self, client):
+        api, _cfg, _root = client
+        body = api.get("/api/risk/a/utilisation",
+                       params={"nav": 20_000.0, "free_usdt": 5_000.0}).json()
+        assert body["nav"] == pytest.approx(20_000.0)
+        assert body["nav_source"] == "caller"
+        assert body["meters"]["usdt_floor"]["used"] == pytest.approx(0.25)
+
     def test_unknown_sleeve_is_a_404(self, client):
         api, _, _ = client
         assert api.get("/api/risk/c/anchors").status_code == 404
@@ -345,9 +537,13 @@ class TestRouters:
         assert body["pairs"] == list(cfg.universe.pairs)
 
     def test_market_rejects_a_pair_outside_the_universe(self, client):
-        api, _, _ = client
+        """Under a dynamic universe the rejected pair has to be one the resolver could
+        never admit — DOGE is a tradeable satellite now. A watchlist-only name is still
+        outside what the bots trade, and a nonexistent one is outside everything."""
+        api, cfg, _ = client
+        assert "NOTACOIN/USDT" not in cfg.universe.pairs
         assert api.get("/api/market/candles",
-                       params={"pair": "DOGE/USDT"}).status_code == 404
+                       params={"pair": "NOTACOIN/USDT"}).status_code == 404
 
     def test_portfolio_renders_with_a_dead_bot(self, client):
         api, _, _ = client

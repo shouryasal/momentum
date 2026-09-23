@@ -6,6 +6,7 @@ Nothing here touches a network or the Claude SDK: the Ollama probes go through a
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -20,6 +21,12 @@ from runs.llm.stub import StubProvider, scripted
 from runs.llm.types import ProviderCaps
 
 OLLAMA = "http://127.0.0.1:11434"
+
+#: Every seeded ``llm_calls`` row is stamped here, and ``pinned_clock`` puts the service's
+#: clock in the same month. ``month_totals`` buckets spend by the CURRENT calendar month,
+#: so without the pin this file asserted "1.5 spent in September" against whatever month
+#: the machine happened to be in — green in September, a KeyError from October onwards.
+NOW = datetime(2026, 9, 22, 8, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -186,8 +193,15 @@ def test_the_matrix_reports_overlay_provenance(auth_client: TestClient, env: Pat
 # --------------------------------------------------------------------------- usage
 
 
+@pytest.fixture
+def pinned_clock(monkeypatch: pytest.MonkeyPatch) -> datetime:
+    """Pin the service clock to ``NOW`` — the month the seeded rows belong to."""
+    monkeypatch.setattr(llm_service, "_now", lambda: NOW)
+    return NOW
+
+
 def _call(conn, **kwargs):
-    row = {"ts_utc": "2026-09-22T08:00:00Z", "task": "decide",
+    row = {"ts_utc": NOW.strftime("%Y-%m-%dT%H:%M:%SZ"), "task": "decide",
            "provider": "claude:subscription", "model": "claude-opus-5",
            "auth_source": "subscription", "attempt": 0, "status": "ok",
            "latency_ms": 1200, "input_tokens": 100, "output_tokens": 50,
@@ -200,7 +214,8 @@ def _call(conn, **kwargs):
     conn.commit()
 
 
-def test_usage_groups_and_reports_a_success_rate(auth_client: TestClient, journal: Path):
+def test_usage_groups_and_reports_a_success_rate(auth_client: TestClient, journal: Path,
+                                                 pinned_clock: datetime):
     with db.opened(journal) as conn:
         _call(conn)
         _call(conn, status="rate_limited", cost_usd=0.0)
@@ -212,6 +227,29 @@ def test_usage_groups_and_reports_a_success_rate(auth_client: TestClient, journa
     assert rows["decide"]["cost_usd"] == 1.5
     assert rows["scan"]["success_rate"] == 1.0
     assert body["month"]["by_provider"]["claude:subscription"] == 1.5
+
+
+def test_the_month_panel_follows_the_service_clock(auth_client: TestClient, journal: Path,
+                                                   monkeypatch: pytest.MonkeyPatch):
+    """Two clocks, two answers — so the assertion cannot quietly depend on the calendar.
+
+    ``month_totals`` buckets by the current month and takes its clock from
+    ``llm_service._now``. Pinned inside the seeded month the spend shows; pinned one month
+    on, the same rows are last month's and the panel is empty. Both are asserted here, so
+    neither September nor any later month can make this test mean something else.
+    """
+    with db.opened(journal) as conn:
+        _call(conn)
+
+    monkeypatch.setattr(llm_service, "_now", lambda: NOW)
+    body = auth_client.get("/api/llm/usage?group=task").json()
+    assert body["month"]["month"] == "2026-09"
+    assert body["month"]["by_provider"]["claude:subscription"] == 1.5
+
+    monkeypatch.setattr(llm_service, "_now", lambda: NOW.replace(month=10))
+    later = auth_client.get("/api/llm/usage?group=task").json()
+    assert later["month"]["month"] == "2026-10"
+    assert later["month"]["by_provider"] == {} and later["month"]["total_usd"] == 0.0
 
 
 @pytest.mark.parametrize("group", ["task", "model", "provider", "auth", "day"])

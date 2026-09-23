@@ -54,12 +54,41 @@ def _mode_env(tmp_path, mode, env_text=BOTH):
     return _env(_repo(tmp_path, f"EARN_CLAUDE_AUTH_MODE={mode}\n" + env_text), "research")
 
 
+def _has_plain_key(env: str) -> bool:
+    """Is the CLI-readable ``ANTHROPIC_API_KEY`` exported?
+
+    Substring matching is a trap here: ``EARN_FALLBACK_ANTHROPIC_API_KEY=`` contains
+    ``ANTHROPIC_API_KEY=``, so the old assertion ``"ANTHROPIC_API_KEY=" not in env`` was
+    satisfied by the leak and broken by the fix.
+    """
+    return any(line.startswith("ANTHROPIC_API_KEY=") for line in env.splitlines())
+
+
 class TestAuthModes:
-    def test_subscription_drops_the_api_key(self, tmp_path):
+    def test_subscription_renames_the_api_key(self, tmp_path):
         env = _mode_env(tmp_path, "subscription")
         assert "CLAUDE_CODE_OAUTH_TOKEN=sub-token" in env
-        assert "ANTHROPIC_API_KEY=" not in env
+        assert not _has_plain_key(env)
+        assert "EARN_FALLBACK_ANTHROPIC_API_KEY=sk-ant-test" in env
         assert "EARN_CLAUDE_AUTH_MODE=subscription" in env
+
+    def test_subscription_renames_the_key_even_with_no_oauth_token(self, tmp_path):
+        """The money bug. The key used to be dropped ONLY when an OAuth token was also
+        present — exactly backwards. With ``auth.subscription_source: login`` there is
+        legitimately no token in .env, so every cron model job got the plain
+        ``ANTHROPIC_API_KEY``; the headless CLI accepts it unconditionally, and the
+        research/review/daily stage runners pass no ``env=`` overlay, so the child
+        inherited it verbatim. Result: metered spend on a subscription-mode host, with no
+        chain, no monthly cap and nothing in llm_calls."""
+        env = _mode_env(tmp_path, "subscription", "ANTHROPIC_API_KEY=sk-ant-test\n" + BASE_ENV)
+        assert not _has_plain_key(env), "the CLI can spend this key implicitly"
+        assert "EARN_FALLBACK_ANTHROPIC_API_KEY=sk-ant-test" in env
+
+    def test_api_key_mode_is_the_only_one_that_exports_the_plain_name(self, tmp_path):
+        """One invariant, stated once: metered spend has to be chosen."""
+        for mode in ("subscription", "auto", "", "nonsense"):
+            assert not _has_plain_key(_mode_env(tmp_path, mode)), mode
+        assert _has_plain_key(_mode_env(tmp_path, "api_key"))
 
     def test_api_key_drops_the_subscription_token(self, tmp_path):
         env = _mode_env(tmp_path, "api_key")
@@ -93,7 +122,7 @@ class TestAuthModes:
     def test_an_unknown_mode_falls_back_to_subscription(self, tmp_path, mode):
         env = _mode_env(tmp_path, mode)
         assert "EARN_CLAUDE_AUTH_MODE=subscription" in env
-        assert "ANTHROPIC_API_KEY=" not in env
+        assert not _has_plain_key(env)
 
     def test_the_process_environment_wins_over_the_file(self, tmp_path):
         wrap = _repo(tmp_path, "EARN_CLAUDE_AUTH_MODE=subscription\n" + BOTH)

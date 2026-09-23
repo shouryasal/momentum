@@ -168,6 +168,37 @@ class TestRun:
         assert rows["a"]["btc_price"] == 50000.0
         assert rows["a"]["mode"] == "test"
 
+    def test_a_live_sleeve_is_labelled_live(self, cfg, dbs, monkeypatch):
+        """Verified: this job's allowlist (``ops/envwrap.sh nav_tick``) has no
+        ``EARN_CONSOLE_SECRET``, so ``state.sleeve(s).is_live`` was always False and a
+        live sleeve's whole NAV history was stamped ``mode='test'`` — a permanent, silent
+        mislabelling of the real-money record."""
+        root, jdb, kdb = dbs
+        from ops.lib import paths, signing
+
+        monkeypatch.setenv(paths.STATE_ROOT_ENV, str(root))
+        monkeypatch.delenv(signing.SECRET_ENV, raising=False)
+        modes.open_run(jdb, cfg, run_id="live-b-1", sleeve="b", mode="live",
+                       submode="execute", seed_usdt=500.0,
+                       started_utc="2026-10-01T00:00:00Z")
+        summary = nav_tick.run(cfg, jdb, kdb, {"b": FakeBot()}, now=NOW, root=root)
+        assert summary["mode_unproven"] == ["a"]   # sleeve a has no run and no overlay
+        row = jdb.execute("SELECT mode FROM nav_points WHERE sleeve='b'").fetchone()
+        assert row["mode"] == "live"
+
+    def test_an_unprovable_sleeve_is_never_labelled_test(self, cfg, dbs, monkeypatch):
+        """``nav_points.mode`` admits only test|live, so the restrictive label is 'live':
+        never claim real money was paper. The sleeve is named in the summary."""
+        root, jdb, kdb = dbs
+        from ops.lib import paths, signing
+
+        monkeypatch.setenv(paths.STATE_ROOT_ENV, str(root))
+        monkeypatch.delenv(signing.SECRET_ENV, raising=False)
+        summary = nav_tick.run(cfg, jdb, kdb, {"a": FakeBot()}, now=NOW, root=root)
+        assert summary["mode_unproven"] == ["a", "b"]
+        row = jdb.execute("SELECT mode FROM nav_points WHERE sleeve='a'").fetchone()
+        assert row["mode"] == "live"
+
     def test_the_timestamp_is_minute_aligned_and_idempotent(self, world):
         cfg, jdb, kdb = world
         apis = {"a": FakeBot(), "b": FakeBot()}

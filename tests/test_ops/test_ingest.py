@@ -105,11 +105,15 @@ def test_books_fields(ing):
     assert json.loads(r["levels_json"])["bids"][0] == [100.0, 2.0]
 
 
-def test_funding_and_oi(ing):
+def test_funding_and_oi(ing, cfg):
     ingest, _, kdb, _ = ing
     ingest.refresh_funding()
     ingest.refresh_funding()  # idempotent upserts
-    assert kdb.execute("SELECT COUNT(*) FROM funding_current").fetchone()[0] == 2
+    # One row per tradeable pair: the universe is resolved from a snapshot now, so the
+    # count tracks it rather than a hardcoded 2.
+    assert kdb.execute("SELECT COUNT(*) FROM funding_current").fetchone()[0] == len(
+        cfg.universe.pairs
+    )
     assert kdb.execute("SELECT COUNT(*) FROM funding WHERE symbol='BTCUSDT'").fetchone()[0] == 1
     oi = kdb.execute("SELECT oi FROM open_interest WHERE symbol='ETHUSDT'").fetchone()
     assert oi["oi"] == 1234.5
@@ -232,7 +236,10 @@ def test_classifier_labels_and_corroborate_preserves(classify_env):
     prompt, kw = calls[0]
     assert "ml1" in prompt and "kw1" not in prompt  # only rule-unlabelable items sent
     assert kw["model"] == "claude-haiku-4-5-20251001"
-    assert kw["effort"] == "high" and kw["max_turns"] == 1
+    # `low`, not `high`: putting one label from a fixed set on a headline does not get
+    # better with more thinking, and an invalid label is discarded and re-derived from the
+    # keyword rules anyway (config/models.yaml: tasks.classify.why).
+    assert kw["effort"] == "low" and kw["max_turns"] == 1
     r = kdb.execute("SELECT * FROM news_items WHERE url_hash='ml1'").fetchone()
     assert r["event_class"] == "outage" and r["classified_by"] == "model"
     assert json.loads(r["assets"]) == ["ETH"]
@@ -449,3 +456,70 @@ def test_a_scanner_failure_never_fails_ingest(ing, monkeypatch):
 
     monkeypatch.setattr(pipelinelib, "on_ingest", boom)
     ingest._maybe_trigger()   # must not raise
+
+
+def test_classify_attempts_reach_the_journal(classify_env, dbs):
+    """No ``jdb`` meant no ``llm_calls`` row — and therefore no breaker and no budget.
+
+    The classifier routes through ``runs.llm.chain`` like every other task, but it reached
+    the router with ``jdb=None``: nothing was journalled, ``tasks.classify.monthly_budget_usd``
+    counted $0.00 for ever, no circuit breaker could ever open, and the console's AI &
+    Models page showed a classifier that never ran.
+    """
+    ingest, kdb, _ = classify_env
+    _, jdb, _ = dbs
+    _seed_item(kdb, "Validators offline across the network", "j1")
+    ingest.stage_runner = None
+    from runs.llm import base as llm_base
+    from runs.llm.stub import StubProvider, scripted
+
+    llm_base.registry.clear()
+    llm_base.registry.register(StubProvider(key="claude:subscription", responses=[
+        scripted(text=json.dumps({"labels": [{"url_hash": "j1",
+                                              "event_class": "outage",
+                                              "assets": ["ETH"]}]}),
+                 cost_usd=0.02, input_tokens=900, output_tokens=40)]), replace=True)
+    try:
+        ingest.classify_news()
+    finally:
+        llm_base.registry.clear()
+
+    rows = [dict(r) for r in jdb.execute(
+        "SELECT * FROM llm_calls WHERE task='classify' ORDER BY id")]
+    assert rows, "a classify attempt wrote no llm_calls row"
+    assert rows[0]["status"] == "ok"
+    assert rows[0]["provider"] == "claude:subscription"
+    assert rows[0]["cost_usd"] == pytest.approx(0.02)
+    from runs.llm import chain as chain_mod
+
+    month = NOW.strftime("%Y-%m")
+    assert chain_mod.month_spend(jdb, month=month, task="classify") == pytest.approx(0.02)
+
+
+def test_a_dead_credential_opens_the_classifier_circuit(classify_env, dbs):
+    """Three auth failures in the window must take the credential out of the chain.
+
+    Ingest runs every 15 minutes; without the journal the breaker could never open, so a
+    revoked token was re-attempted for ever instead of being skipped.
+    """
+    ingest, kdb, _ = classify_env
+    _, jdb, _ = dbs
+    ingest.stage_runner = None
+    from runs.llm import base as llm_base
+    from runs.llm import health as health_mod
+    from runs.llm.stub import StubProvider, scripted
+
+    llm_base.registry.clear()
+    llm_base.registry.register(
+        StubProvider(key="claude:subscription",
+                     default=scripted(failure="auth_error", error="401 invalid")),
+        replace=True)
+    try:
+        for i in range(3):
+            _seed_item(kdb, f"Validators offline, take {i}", f"d{i}")
+            assert ingest._phase("classify", ingest.classify_news) is False
+    finally:
+        llm_base.registry.clear()
+
+    assert health_mod.is_open(jdb, "claude:subscription", now=NOW), \
+        "three auth failures left the credential's breaker closed"

@@ -26,7 +26,7 @@ from pathlib import Path
 
 from evals import metrics
 from evals import snapshot as snapshotlib
-from ops.config import REPO_ROOT, load_config
+from ops.config import REPO_ROOT, load_config, max_weight_for
 from runs import build_prompt
 from schemas.proposal import ProposalInvalid, json_schema, validate_proposal
 
@@ -88,6 +88,27 @@ def _call_decide(decide_fn, prompt: str, model: str, cwd: Path, schema: dict,
         return decide_fn(prompt, model, cwd, schema)
 
 
+def _universe_of(snap) -> tuple[list[str] | None, str]:
+    """The tradeable set THIS snapshot was taken under, for grading its replay.
+
+    A replayed answer must be judged against the universe the prompt actually showed, not
+    against today's: a satellite that was tradeable in March and is not now would
+    otherwise read as an invalid proposal in every rerun, and the replay score would drift
+    with the watchlist instead of with the model. Pre-v4 snapshots carry no universe
+    block, which correctly falls back to the default BTC/ETH shape they were written with.
+    """
+    raw = (snap.inputs or {}).get("universe") or ""
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None, "USDT"
+    if not isinstance(payload, dict):
+        return None, "USDT"
+    rows = payload.get("tradeable") or []
+    assets = [r["asset"] for r in rows if isinstance(r, dict) and r.get("asset")]
+    return (assets or None), str(payload.get("quote") or "USDT")
+
+
 def _run_over_snapshots(snap_dirs, prompt_for, model_for, decide_fn,
                         runs_per_snapshot: int, budget_usd: float,
                         cwd: Path | None = None, skills: list[str] | None = None
@@ -115,7 +136,9 @@ def _run_over_snapshots(snap_dirs, prompt_for, model_for, decide_fn,
                                               Path(sandbox), schema, skills)
             spent += cost
             try:
-                attempts.append(validate_proposal(text).model_dump() if text else None)
+                attempts.append(
+                    validate_proposal(text, *_universe_of(snap)).model_dump()
+                    if text else None)
             except ProposalInvalid:
                 attempts.append(None)
         results.append({"run_id": snap.run_id, "attempts": attempts})
@@ -141,7 +164,9 @@ def _rules_targets_for(snap_dirs) -> dict[str, dict[str, float]]:
             }
             out[snap.run_id] = compute_rules_targets(
                 latest, cfg.sleeve_a.base_weights,
-                {a: cfg.risk.max_weight.get(a, cfg.risk.max_weight["default"])
+                # No max_weight.default any more: a replayed asset with neither an
+                # explicit cap nor a tier caps at ZERO, exactly as the gate would treat it.
+                {a: max_weight_for(cfg, a, cfg.universe.tier_of(a))
                  for a in cfg.universe.assets},
                 cfg.sleeve_a.vol.target_annual)
         except (json.JSONDecodeError, KeyError):

@@ -51,7 +51,7 @@ STEP_UP = Depends(require_step_up)
 CFG = Depends(cfg_dep)
 JDB = Depends(get_jdb)
 
-TARGETS = ("TEST", "LIVE_PROPOSE", "LIVE_EXECUTE")
+TARGETS = modes.TARGETS
 
 
 # --------------------------------------------------------------------------- DTOs
@@ -63,30 +63,71 @@ class _Dto(BaseModel):
 
 class SleeveModeState(_Dto):
     sleeve: str = Field(description="Sleeve id: a or b.")
-    state: str = Field(description="TEST | ARMING | LIVE_PROPOSE | LIVE_EXECUTE | DISARMING.")
-    submode: str | None = Field(default=None, description="propose | execute while live.")
+    state: str = Field(
+        description="TEST | ARMING | DEMO_PROPOSE | DEMO_EXECUTE | LIVE_PROPOSE | "
+                    "LIVE_EXECUTE | DISARMING."
+    )
+    submode: str | None = Field(default=None, description="propose | execute on a venue.")
     run_id: str | None = Field(default=None, description="The active sleeve_runs id.")
     seed_usdt: float = Field(description="Starting balance of the active run.")
     label: str | None = Field(default=None, description="Operator label on the active run.")
-    mode: str = Field(description="test | live — the coarse mode of the active run.")
+    mode: str = Field(description="test | demo | live — the coarse mode of the active run.")
     since: str | None = Field(default=None, description="When this state began (UTC).")
     days: float | None = Field(default=None, description="Days in this state.")
     transition_in_progress: bool = Field(description="A mode_transitions row is running.")
-    max_seed_usdt: float = Field(description="modes.live.max_seed_usdt ceiling for this sleeve.")
+    max_seed_usdt: float = Field(
+        description="Seed ceiling for this sleeve in its CURRENT state's family."
+    )
+    venue: str | None = Field(
+        default=None, description="live | demo | null — the one Binance this state reaches."
+    )
+    venue_host: str | None = Field(
+        default=None, description="The REST host that venue resolves to, e.g. demo-api.binance.com."
+    )
+    is_live: bool = Field(
+        default=False, description="Real money. False for demo — demo P&L is not live performance."
+    )
+    is_demo: bool = Field(
+        default=False, description="Real orders on Binance Spot Demo Mode with fake money."
+    )
+    badge: str = Field(default="TEST", description="TEST | DEMO | LIVE | TRANSITIONING.")
+    pnl_basis: str = Field(
+        default="paper",
+        description="paper | demo | live — how this sleeve's P&L may be presented. "
+                    "A demo run is NEVER live performance.",
+    )
+    seed_ceilings: dict[str, float] = Field(
+        default_factory=dict,
+        description="Seed ceiling per reachable target, so the UI can size a demo run "
+                    "against its own limit rather than live's.",
+    )
+    confirm_phrases: dict[str, str] = Field(
+        default_factory=dict,
+        description="The exact phrase each reachable target needs, from ops.modes. Demo "
+                    "and live phrases are disjoint words, never one with a suffix.",
+    )
+    allowed_targets: list[str] = Field(
+        default_factory=list, description="Targets ops.modes.ALLOWED permits from here."
+    )
 
 
 class ModeResponse(_Dto):
     verified: bool = Field(description="False means the mode file failed to verify: all TEST.")
     reason: str = Field(description="ok | missing | bad_signature | no_secret | …")
-    phase: str = Field(description="paper | live_propose | live_execute, computed.")
+    phase: str = Field(
+        description="paper | live_propose | live_execute, computed. A DEMO sleeve is NOT a "
+                    "live phase — read any_demo and the per-sleeve badge for that."
+    )
     set_at: str | None = None
     set_by: str | None = None
+    any_live: bool = Field(default=False, description="Some sleeve is on real money.")
+    any_demo: bool = Field(default=False, description="Some sleeve is on Binance Demo Mode.")
     sleeves: list[SleeveModeState]
 
 
 class PreflightRequestBody(_Dto):
     sleeve: Literal["a", "b"]
-    target: Literal["TEST", "LIVE_PROPOSE", "LIVE_EXECUTE"]
+    target: Literal["TEST", "DEMO_PROPOSE", "DEMO_EXECUTE", "LIVE_PROPOSE", "LIVE_EXECUTE"]
     submode: Literal["propose", "execute"] | None = None
     seed_usdt: float | None = Field(default=None, ge=0, description="Live seed; null = current.")
     override_reason: str | None = Field(
@@ -115,7 +156,7 @@ class PreflightResponse(_Dto):
 
 class TransitionBody(_Dto):
     sleeve: Literal["a", "b"]
-    target: Literal["TEST", "LIVE_PROPOSE", "LIVE_EXECUTE"]
+    target: Literal["TEST", "DEMO_PROPOSE", "DEMO_EXECUTE", "LIVE_PROPOSE", "LIVE_EXECUTE"]
     submode: Literal["propose", "execute"] | None = None
     seed_usdt: float | None = Field(default=None, ge=0)
     preflight_id: str | None = None
@@ -267,7 +308,9 @@ def transition(
     """The twelve-step transition of spec §2.2, under the ops lock."""
     state = ms.load()
     seed = _seed(cfg, body.sleeve, body.seed_usdt, state)
-    if body.target in ms.LIVE_MODES:
+    # Demo arms through its own preflight, so it needs a fresh id exactly as live does —
+    # the evidence the operator approved must be the evidence the transition re-checks.
+    if body.target in ms.VENUE_MODES:
         cached = (
             preflight_service.cache.get(body.preflight_id) if body.preflight_id else None
         )
@@ -361,7 +404,7 @@ def history(
     return out
 
 
-@router.get("/recover", response_model=list[dict], summary="Recover an interrupted transition")
+@router.post("/recover", response_model=list[dict], summary="Recover an interrupted transition")
 def recover(
     request: Request,
     actor: HumanActor = STEP_UP,
@@ -371,6 +414,13 @@ def recover(
 
     Run automatically at console start-up; exposed here because an operator who sees a
     pulsing TRANSITIONING badge after a crash should not have to restart the console.
+
+    It is a ``POST`` because it *writes*: it rewrites the signed mode file, regenerates
+    ``var/runtime`` and engages the kill switch. ``CsrfMiddleware`` and
+    ``AutomatedRunMiddleware`` both key on the verb (``security.is_mutating``), so a
+    state-mutating ``GET`` would sit outside the origin allow-list, the double-submit
+    token and the automated-run refusal by construction — and would be safe for a browser
+    or a proxy to repeat on a reload, a back-navigation or a prefetch.
     """
     recovered = mode_service.recover_on_start(
         cfg, root=_root(), bot_factory=_factory(request)

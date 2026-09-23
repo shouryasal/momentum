@@ -1,0 +1,12 @@
+{
+ "code": "000000",
+ "data": {
+  "catalogs": [
+   {
+    "catalogId": 999,
+    "catalogName": "Something Else",
+    "articles": []
+   }
+  ]
+ }
+}

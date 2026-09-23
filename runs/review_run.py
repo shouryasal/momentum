@@ -37,25 +37,12 @@ GRADE_INPUTS = ".claude/skills/post-mortem/scripts/grade_inputs.py"
 OUTCOME_STATS = ".claude/skills/post-mortem/scripts/outcome_stats.py"
 
 #: Explicit script paths replace ``Bash(python3 *)``, ``Bash(bash *)`` and
-#: ``Bash(docker compose *)`` (spec §10 hook hardening). Anything broader is a way out.
-REVIEW_BASH_ALLOWLIST = [
-    "Bash(git add *)",
-    "Bash(git commit *)",
-    "Bash(git diff *)",
-    "Bash(git status *)",
-    "Bash(git log *)",
-    "Bash(git rev-parse *)",
-    "Bash(python3 .claude/skills/post-mortem/scripts/*)",
-    "Bash(python3 .claude/skills/strategy-lab/scripts/*)",
-    "Bash(python3 .claude/skills/skill-smith/scripts/*)",
-    "Bash(python3 .claude/skills/tca/scripts/*)",
-    "Bash(python3 .claude/skills/risk-gate/scripts/*)",
-    "Bash(python3 .claude/skills/asset-dossier/scripts/*)",
-    "Bash(python3 -m evals.replay *)",
-    "Bash(python3 -m evals.skill_lint *)",
-    "Bash(python3 -m evals.skill_eval *)",
-    "Bash(pytest .claude/skills/*)",
-]
+#: ``Bash(docker compose *)`` (spec §10 hook hardening). Anything broader is a way out —
+#: which is why this is now ``decision_core``'s one list rather than a copy of it, and why
+#: ``Bash(pytest .claude/skills/*)`` is gone from it (see that constant's docstring: a
+#: skill's ``tests/**`` is tier 1, so pytest over it ran session-authored code as the
+#: owner, in the job environment, outside every hook).
+REVIEW_BASH_ALLOWLIST = list(decision_core.AUTOMATED_BASH_ALLOWLIST)
 
 #: Wall clock the session may use: the cron budget minus the postflight reserve.
 REVIEW_POSTFLIGHT_RESERVE_S = 900

@@ -63,7 +63,7 @@ class TestJobs:
     def test_run_now_uses_the_cron_wrapper(self, ops_client, cfg, state, monkeypatch):
         spawned = {}
 
-        def fake_spawn(argv, cwd, log_path):
+        def fake_spawn(argv, cwd, log_path, **_kw):
             spawned["argv"] = list(argv)
             return 1234
 
@@ -81,7 +81,7 @@ class TestJobs:
         assert row["actor"].startswith("human:console:")
 
     def test_the_run_is_audited(self, ops_client, cfg, state, monkeypatch):
-        monkeypatch.setattr(ops_service, "_spawn_detached", lambda *a: 1)
+        monkeypatch.setattr(ops_service, "_spawn_detached", lambda *a, **k: 1)
         ops_client.post("/api/ops/jobs/healthcheck/run")
         with db.opened(state / cfg.paths.journal_db, readonly=True) as conn:
             row = conn.execute("SELECT action, target, result FROM audit_log"
@@ -110,6 +110,130 @@ class TestJobs:
             conn.commit()
         body = ops_client.get("/api/ops/jobs/ingest/runs").json()
         assert body["runs"][0]["status"] == "ok"
+
+
+# ------------------------------------------------------------------- detached lifecycle
+
+
+def _dead_pid() -> int:
+    """A pid that is certainly not running: run a trivial child and let it be reaped."""
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", ""])  # noqa: S603
+    proc.wait()
+    return proc.pid
+
+
+class TestDetachedJobLifecycle:
+    """``running -> ok | failed | killed``, for the rows nobody used to come back for.
+
+    ``run_job`` inserted a ``console_jobs`` row and spawned the job detached; nothing ever
+    reaped it. The Operations timeline therefore claimed a job was still going until the
+    next console restart stamped it ``killed`` — whatever it had really done. The schema
+    (``ops/sql/journal.sql``) and ``docs/contracts.md`` §9.4 both declare that lifecycle.
+    """
+
+    def _row(self, state, cfg, job_id=None):
+        with db.opened(state / cfg.paths.journal_db, readonly=True) as conn:
+            sql = "SELECT * FROM console_jobs"
+            row = (conn.execute(sql + " WHERE id=?", (job_id,)) if job_id
+                   else conn.execute(sql + " ORDER BY id DESC LIMIT 1")).fetchone()
+        return dict(row) if row else None
+
+    def _run(self, cfg, state, *, job="ingest", pid):
+        with db.opened(state / cfg.paths.journal_db) as jdb:
+            return ops_service.run_job(cfg, job, root=state, jdb=jdb, actor="human:console",
+                                       spawner=lambda *a, **k: pid)
+
+    def test_the_pid_is_recorded_on_the_row(self, cfg, state):
+        out = self._run(cfg, state, pid=4242)
+        row = self._row(state, cfg, out["id"])
+        assert row["status"] == "running"
+        assert ops_service.job_args(row["args_json"])["pid"] == 4242
+
+    def test_a_finished_job_is_closed_from_its_exit_code(self, cfg, state):
+        out = self._run(cfg, state, pid=_dead_pid())
+        ops_service.rc_path(state, out["id"]).write_text("0", encoding="utf-8")
+        with db.opened(state / cfg.paths.journal_db) as jdb:
+            closed = ops_service.reap_jobs(jdb, root=state)
+        assert closed == [{"id": out["id"], "job": "ingest", "status": "ok", "exit_code": 0}]
+        row = self._row(state, cfg, out["id"])
+        assert row["status"] == "ok" and row["exit_code"] == 0 and row["finished_utc"]
+
+    def test_a_nonzero_exit_is_failed_and_a_timeout_is_killed(self, cfg, state):
+        for rc, expected in ((2, "failed"), (124, "killed")):
+            out = self._run(cfg, state, pid=_dead_pid())
+            ops_service.rc_path(state, out["id"]).write_text(str(rc), encoding="utf-8")
+            with db.opened(state / cfg.paths.journal_db) as jdb:
+                ops_service.reap_jobs(jdb, root=state)
+            row = self._row(state, cfg, out["id"])
+            assert (row["status"], row["exit_code"]) == (expected, rc)
+
+    def test_an_unprovable_outcome_fails_closed(self, cfg, state):
+        """No exit-code file: the row still has to end, and it must not claim success."""
+        out = self._run(cfg, state, pid=_dead_pid())
+        with db.opened(state / cfg.paths.journal_db) as jdb:
+            ops_service.reap_jobs(jdb, root=state)
+        row = self._row(state, cfg, out["id"])
+        assert row["status"] == "failed" and row["exit_code"] is None
+
+    def test_a_live_job_is_left_alone(self, cfg, state):
+        import os
+
+        out = self._run(cfg, state, pid=os.getpid())
+        with db.opened(state / cfg.paths.journal_db) as jdb:
+            assert ops_service.reap_jobs(jdb, root=state) == []
+        assert self._row(state, cfg, out["id"])["status"] == "running"
+
+    def test_a_row_with_no_pid_belongs_to_the_in_process_runner(self, cfg, state):
+        """``console.services.jobs.JobRunner`` closes its own rows; never steal them."""
+        with db.opened(state / cfg.paths.journal_db) as jdb:
+            jdb.execute(
+                "INSERT INTO console_jobs(job, started_utc, status, log_path, actor)"
+                " VALUES ('skill.lint','2026-09-22T08:00:00Z','running','logs/x.log','h')")
+            jdb.commit()
+            assert ops_service.reap_jobs(jdb, root=state) == []
+        assert self._row(state, cfg)["status"] == "running"
+
+    def test_a_failed_spawn_does_not_leave_a_running_row(self, cfg, state):
+        def boom(*_a, **_k):
+            raise ops_service.OpsServiceError("spawn_failed", "no such binary")
+
+        with db.opened(state / cfg.paths.journal_db) as jdb:
+            with pytest.raises(ops_service.OpsServiceError):
+                ops_service.run_job(cfg, "ingest", root=state, jdb=jdb, spawner=boom)
+        assert self._row(state, cfg)["status"] == "failed"
+
+    def test_two_simultaneous_runs_only_spawn_once(self, cfg, state):
+        """The TOCTOU: ``lock_held()`` then spawn, with the child's flock in between.
+
+        Two posts (two tabs, or a double click) run in Starlette's threadpool; both used
+        to see the lock free, both spawned, the loser died inside ``flock -n``, and both
+        had already inserted a ``running`` row.
+        """
+        import os
+
+        spawns = []
+
+        def spawner(*_a, **_k):
+            spawns.append(1)
+            return os.getpid()          # alive, exactly as a real child would be
+
+        with db.opened(state / cfg.paths.journal_db) as jdb:
+            ops_service.run_job(cfg, "ingest", root=state, jdb=jdb, spawner=spawner)
+            with pytest.raises(ops_service.OpsServiceError) as excinfo:
+                ops_service.run_job(cfg, "ingest", root=state, jdb=jdb, spawner=spawner)
+        assert excinfo.value.code == "locked"
+        assert len(spawns) == 1
+
+    def test_listing_the_jobs_reconciles_the_rows(self, ops_client, cfg, state):
+        out = self._run(cfg, state, pid=_dead_pid())
+        ops_service.rc_path(state, out["id"]).write_text("0", encoding="utf-8")
+        body = ops_client.get("/api/ops/jobs").json()
+        assert body["reaped"] == [{"id": out["id"], "job": "ingest", "status": "ok",
+                                   "exit_code": 0}]
+        assert self._row(state, cfg, out["id"])["status"] == "ok"
 
 
 # --------------------------------------------------------------------------- schedules

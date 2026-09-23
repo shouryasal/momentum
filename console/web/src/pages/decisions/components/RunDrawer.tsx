@@ -9,6 +9,7 @@
 import {
   Alert,
   Badge,
+  Button,
   Code,
   Divider,
   Drawer,
@@ -20,13 +21,16 @@ import {
   Table,
   Tabs,
   Text,
+  Textarea,
   Title,
+  Tooltip,
 } from '@mantine/core';
-import { useQuery } from '@tanstack/react-query';
-import { useMemo } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
 
+import { shellKeys } from '@/api';
 import { useApi } from '@/app/ApiContext';
-import { EmptyState, JsonViewer } from '@/components';
+import { ConfirmDialog, EmptyState, JsonViewer } from '@/components';
 import { formatNumber, formatUsd, formatUtcStamp } from '@/lib/format';
 
 import { STATUS_COLOR, decisionKeys, decisionsApi } from '../api';
@@ -36,9 +40,19 @@ export interface RunDrawerProps {
   onClose: () => void;
 }
 
-export function RunDrawer({ runId, onClose }: RunDrawerProps) {
+/**
+ * One decision's story, with no container around it.
+ *
+ * The Decisions screen shows this inside the shared `DetailPane`, beside the list, so a
+ * click never takes the operator off the screen they are reading.  {@link RunDrawer}
+ * keeps the old drawer for any caller that still wants one; both render this.
+ */
+export function RunDetailBody({ runId }: { runId: string | null }) {
   const client = useApi();
   const api = useMemo(() => decisionsApi(client), [client]);
+  const queryClient = useQueryClient();
+  const [pendingDecision, setPendingDecision] = useState<'approve' | 'reject' | null>(null);
+  const [note, setNote] = useState('');
 
   const detail = useQuery({
     queryKey: decisionKeys.run(runId ?? ''),
@@ -53,23 +67,31 @@ export function RunDrawer({ runId, onClose }: RunDrawerProps) {
 
   const run = detail.data;
 
+  /** The same two writes the approvals queue makes, on the drawer the queue opens. */
+  const decide = useMutation({
+    mutationFn: (decision: 'approve' | 'reject') =>
+      decision === 'approve'
+        ? api.approve(runId as string, note)
+        : api.reject(runId as string, note),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: decisionKeys.pending });
+      void queryClient.invalidateQueries({ queryKey: shellKeys.approvals });
+      void queryClient.invalidateQueries({ queryKey: decisionKeys.run(runId ?? '') });
+      setNote('');
+    },
+  });
+
   return (
-    <Drawer
-      opened={Boolean(runId)}
-      onClose={onClose}
-      position="right"
-      size="xl"
-      title={<Text fw={600} ff="monospace">{runId ?? 'Run'}</Text>}
-    >
+    <>
       {detail.isLoading ? <Loader /> : null}
       {detail.isError ? <Alert color="red">Could not load this run.</Alert> : null}
       {run ? (
         <Tabs defaultValue="stages" keepMounted={false}>
           <Tabs.List>
-            <Tabs.Tab value="stages">Stages</Tabs.Tab>
-            <Tabs.Tab value="proposal">Proposal</Tabs.Tab>
-            <Tabs.Tab value="signal">Signal</Tabs.Tab>
-            <Tabs.Tab value="trace">Trace</Tabs.Tab>
+            <Tabs.Tab value="stages">Steps taken</Tabs.Tab>
+            <Tabs.Tab value="proposal">The plan</Tabs.Tab>
+            <Tabs.Tab value="signal">What was noticed</Tabs.Tab>
+            <Tabs.Tab value="trace">Full transcript</Tabs.Tab>
           </Tabs.List>
 
           <Tabs.Panel value="stages" pt="sm">
@@ -193,10 +215,24 @@ export function RunDrawer({ runId, onClose }: RunDrawerProps) {
               <Stack gap="sm">
                 <Group gap="xs">
                   <Badge>{run.proposal.module ?? '—'}</Badge>
-                  {run.proposal.abstain ? <Badge color="gray">abstain</Badge> : null}
-                  <Text size="sm">confidence {formatNumber(run.proposal.confidence, 2)}</Text>
-                  <Text size="sm">exposure x{formatNumber(run.proposal.exposure_scale, 2)}</Text>
-                  <Text size="sm">horizon {run.proposal.horizon_days ?? '—'} d</Text>
+                  {run.proposal.abstain ? (
+                    <Tooltip
+                      label="Claude declined to suggest a trade, because the inputs were stale or contradicted each other. Doing nothing is the safe default."
+                      multiline
+                      w={300}
+                    >
+                      <Badge color="gray">chose not to trade</Badge>
+                    </Tooltip>
+                  ) : null}
+                  <Text size="sm">
+                    confidence {formatNumber(run.proposal.confidence, 2)} out of 1
+                  </Text>
+                  <Text size="sm">
+                    position size x{formatNumber(run.proposal.exposure_scale, 2)} of normal
+                  </Text>
+                  <Text size="sm">
+                    meant to hold for {run.proposal.horizon_days ?? '—'} days
+                  </Text>
                   {run.proposal.approval_status && run.proposal.approval_status !== 'n/a' ? (
                     <Badge color="orange" variant="light">
                       {run.proposal.approval_status}
@@ -223,6 +259,56 @@ export function RunDrawer({ runId, onClose }: RunDrawerProps) {
                     {run.proposal.invalid_reason}
                   </Alert>
                 ) : null}
+                {run.proposal.approval_status === 'pending' ? (
+                  <Group gap="xs">
+                    <Button
+                      size="compact-sm"
+                      disabled={decide.isPending}
+                      onClick={() => setPendingDecision('approve')}
+                      data-testid="drawer-approve"
+                    >
+                      Approve
+                    </Button>
+                    <Button
+                      size="compact-sm"
+                      variant="default"
+                      disabled={decide.isPending}
+                      onClick={() => setPendingDecision('reject')}
+                      data-testid="drawer-reject"
+                    >
+                      Reject
+                    </Button>
+                  </Group>
+                ) : null}
+                <ConfirmDialog
+                  opened={pendingDecision !== null}
+                  onClose={() => setPendingDecision(null)}
+                  title={
+                    pendingDecision === 'approve'
+                      ? `Approve ${runId ?? ''}?`
+                      : `Reject ${runId ?? ''}?`
+                  }
+                  confirmLabel={pendingDecision === 'approve' ? 'Approve' : 'Reject'}
+                  danger={pendingDecision === 'approve'}
+                  description={
+                    pendingDecision === 'approve'
+                      ? 'Writes an HMAC-signed approval file the bot verifies before it acts on this proposal.'
+                      : 'Removes any approval file for this run and records it rejected.'
+                  }
+                  onConfirm={async () => {
+                    if (pendingDecision) await decide.mutateAsync(pendingDecision);
+                    setPendingDecision(null);
+                  }}
+                >
+                  <Textarea
+                    label="Note"
+                    description="Why, for the audit trail. Optional."
+                    value={note}
+                    onChange={(event) => setNote(event.currentTarget.value)}
+                    autosize
+                    minRows={2}
+                  />
+                </ConfirmDialog>
               </Stack>
             ) : (
               <EmptyState
@@ -253,6 +339,25 @@ export function RunDrawer({ runId, onClose }: RunDrawerProps) {
           </Tabs.Panel>
         </Tabs>
       ) : null}
+    </>
+  );
+}
+
+/** The same story in a right-hand drawer, for callers that are not master/detail yet. */
+export function RunDrawer({ runId, onClose }: RunDrawerProps) {
+  return (
+    <Drawer
+      opened={Boolean(runId)}
+      onClose={onClose}
+      position="right"
+      size="xl"
+      title={
+        <Text fw={600} ff="monospace">
+          {runId ?? 'Run'}
+        </Text>
+      }
+    >
+      <RunDetailBody runId={runId} />
     </Drawer>
   );
 }

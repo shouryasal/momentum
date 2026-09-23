@@ -29,7 +29,12 @@ INPUT_BUDGETS = {
     "graded": 2000, "lessons": 2500, "flags": 500,
     "dossiers": 1500, "event_stats": 600,   # v2 asset intelligence
     "signal": 1500,                          # v3 validated-signal block
+    "universe": 1500,                        # v4 point-in-time universe block
 }
+
+#: How many NON-quote assets a proposal may name. ``risk.max_open_positions`` is the
+#: number the gate enforces; this only ever reads it, never restates it.
+DEFAULT_MAX_ASSETS = 8
 
 #: The tier-1 overlay the change gate may write; it may only pin a prompt version.
 PROMPTS_OVERLAY = "config/prompts-auto.yaml"
@@ -49,11 +54,27 @@ class BuiltPrompt:
     static_prefix_len: int
 
 
+def max_assets_for(cfg: EarnConfig) -> int:
+    """``risk.max_open_positions`` — how many assets one proposal may name."""
+    value = getattr(cfg.risk, "max_open_positions", None)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_ASSETS
+
+
 def limits_yaml(cfg: EarnConfig) -> str:
     """The limits block copied verbatim — tests assert byte-equality with earn.yaml
-    values so the prompt can never disagree with the gate."""
+    values so the prompt can never disagree with the gate.
+
+    Under a wide universe the per-asset ceilings are **per tier**, not a list of names: a
+    hundred-entry ``max_weight`` map would be a hundred lines the model has to read to
+    learn one rule. The tier of each tradeable asset is in the UNIVERSE block instead.
+    """
     block = {
-        "universe": {"assets": list(cfg.universe.assets), "quote": cfg.universe.quote},
+        "universe": {"core": list(getattr(cfg.universe, "core", None) or cfg.universe.assets),
+                     "quote": cfg.universe.quote,
+                     "tradeable_assets": len(cfg.universe.assets)},
         "max_weight": dict(cfg.risk.max_weight),
         "max_gross_exposure": cfg.risk.max_gross_exposure,
         "usdt_floor": cfg.risk.usdt_floor,
@@ -62,7 +83,47 @@ def limits_yaml(cfg: EarnConfig) -> str:
         "max_trades_per_day": cfg.risk.max_trades_per_day,
         "min_notional_usdt": cfg.risk.min_notional_usdt,
     }
+    for key in ("tier_caps", "max_open_positions", "max_satellite_positions",
+                "max_satellite_gross", "max_beta_to_btc", "max_avg_pairwise_corr",
+                "min_position_pct_nav"):
+        value = getattr(cfg.risk, key, None)
+        if value is None:
+            continue
+        block[key] = value.model_dump() if hasattr(value, "model_dump") else value
     return yaml.safe_dump(block, sort_keys=True)
+
+
+def universe_block(cfg: EarnConfig, held: tuple[str, ...] = ()) -> str:
+    """The point-in-time universe the model is deciding against.
+
+    It carries the snapshot identity the proposal must quote back (``universe_snapshot``),
+    the tradeable set with each asset's tier and resolved cap, and the size of the wider
+    watchlist. The tradeable list is the CONTRACT: an asset that is not in it cannot be
+    named, and naming one rejects the whole proposal rather than clamping it.
+    """
+    from ops.config import max_weight_for
+
+    u = cfg.universe
+    core = list(getattr(u, "core", None) or u.assets)
+    tier_of = getattr(u, "tier_of", None)
+    rows = []
+    for asset in u.assets:
+        tier = tier_of(asset) if callable(tier_of) else ("core" if asset in core else "major")
+        try:
+            cap = max_weight_for(cfg, asset, tier)
+        except Exception:  # noqa: BLE001 — a prompt must never fail on a config edge
+            cap = None
+        rows.append({"asset": asset, "tier": tier, "max_weight": cap})
+    watchlist = list(getattr(u, "watchlist_pairs", None) or u.pairs)
+    payload = {
+        "snapshot": getattr(u, "snapshot_ref", None),
+        "quote": u.quote,
+        "core": core,
+        "tradeable": rows,
+        "watchlist_pairs": len(watchlist),
+        "max_assets_per_proposal": max_assets_for(cfg),
+    }
+    return json.dumps(payload, indent=2, sort_keys=True)
 
 
 def _truncate(text: str, budget_tokens: int) -> str:
@@ -182,9 +243,21 @@ def gather_inputs(cfg: EarnConfig, jdb: sqlite3.Connection,
         active = {"_unreadable": True}
     # v2 asset intelligence: the dossiers' Summary sections + the event studies.
     # Missing files read as "" so a v1 template (no placeholders) is unaffected.
+    #
+    # v4: dossiers for CORE plus whatever is actually held, not for every tradeable asset.
+    # A dossier is ~300 tokens of prose; fanning out over a 30-name tradeable tier would
+    # spend the entire dossier budget on assets the run has no position in and will most
+    # likely not open one in. The UNIVERSE block carries the rest as one compact table.
+    held = _held_assets(navs)
+    core = list(getattr(cfg.universe, "core", None) or cfg.universe.assets)
+    wanted = [a for a in (*core, *held) if a in set(cfg.universe.assets) | set(core)]
+    seen: list[str] = []
+    for asset in wanted:
+        if asset not in seen:
+            seen.append(asset)
     dossiers = "\n\n".join(
         s for s in (_dossier_summary(root / "knowledge" / "assets" / f"{a}.md")
-                    for a in cfg.universe.assets) if s)
+                    for a in seen) if s)
     event_stats = read(root / "knowledge" / "state" / "event_stats.json", "")
     return {
         "state": state,
@@ -196,7 +269,27 @@ def gather_inputs(cfg: EarnConfig, jdb: sqlite3.Connection,
         "dossiers": dossiers,
         "event_stats": event_stats,
         "signal": signal_block(jdb, signal_id),
+        "universe": universe_block(cfg, tuple(held)),
     }
+
+
+def _held_assets(navs: list[dict]) -> list[str]:
+    """Base assets with a non-zero position in the newest NAV row. Never raises."""
+    out: list[str] = []
+    for row in navs:
+        try:
+            positions = json.loads(row.get("positions_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(positions, dict):
+            continue
+        for key, amount in positions.items():
+            if not isinstance(amount, (int, float)) or amount <= 0:
+                continue
+            asset = str(key).split("/")[0].upper()
+            if asset not in out:
+                out.append(asset)
+    return out
 
 
 def _dossier_summary(path: Path) -> str:
@@ -257,6 +350,7 @@ def build(template: str, *, run_id: str, limits: str, fewshot: str,
             .replace("{{FLAGS}}", inputs["flags"])
             .replace("{{DOSSIERS}}", inputs.get("dossiers") or "(no dossiers yet)")
             .replace("{{EVENT_STATS}}", inputs.get("event_stats") or "{}")
+            .replace("{{UNIVERSE}}", inputs.get("universe") or "null")
             .replace("{{SIGNAL}}", inputs.get("signal") or "null"))
     est = token_estimate(text)
     if est > HARD_CAP:
@@ -317,6 +411,7 @@ def build_from_snapshot(snapshot_dir: Path, prompt_version: str | None = None,
         "dossiers": _read("dossiers.md"),
         "event_stats": _read("event_stats.json"),
         "signal": _read("signal.json"),
+        "universe": _read("universe.json"),
     }
     limits = (snapshot_dir / "limits.yaml").read_text()
     fewshot = (snapshot_dir / "fewshot.txt").read_text()

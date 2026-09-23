@@ -1,0 +1,89 @@
+# Eval cases for research-scout. `evals/skill_eval.py` runs these; the pass rate gates the
+# change (config: skills.eval.min_pass_rate).
+#
+# Every `run:` case is deterministic and needs no candle store, no network and no config —
+# the eval sandbox has none of the three, and a case that quietly needs them scores the
+# environment instead of the skill.
+cases:
+  - id: the-ledger-and-the-gates-hold
+    run: scripts/scout.py
+    args: ["--self-test"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "standing_rejections_present=True"
+        - "self_test: PASS"
+      stdout_not_contains: ["Traceback", "FAIL"]
+
+  - id: a-dead-idea-is-refused-with-its-measurement
+    run: scripts/scout.py
+    args: ["check", "--idea", "does exchange netflow of whale deposits predict 7d returns"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "verdict=rejected"
+        - "onchain-flows"
+        - "10 days"
+        - "STOP."
+      stdout_not_contains: ["Traceback", "verdict=open"]
+
+  - id: execution-timing-is-a-false-priority-not-a-false-signal
+    run: scripts/scout.py
+    args: ["check", "--idea", "optimise entry timing with a limit maker order to save fees"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "verdict=rejected"
+        - "execution-timing"
+        - "0.001 bps"
+      stdout_not_contains: ["Traceback"]
+
+  - id: an-unsearched-idea-is-open-not-endorsed
+    run: scripts/scout.py
+    args: ["check", "--idea", "how wide should a stop be given the forecast drawdown"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "verdict=open"
+        - "hypothesis-lab"
+      stdout_not_contains: ["Traceback", "verdict=rejected"]
+
+  - id: a-thirty-day-endpoint-fails-the-depth-gate
+    run: scripts/scout.py
+    args: ["gate", "--name", "openInterestHist", "--free", "yes", "--keyless", "yes",
+           "--history-days", "31", "--lag-min", "5", "--backtestable", "yes"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "deep_enough=false"
+        - "usable=false"
+      stdout_not_contains: ["Traceback", "usable=true"]
+
+  - id: a-forward-only-stream-is-observe-only
+    run: scripts/scout.py
+    args: ["gate", "--name", "forceorder-stream", "--free", "yes", "--keyless", "yes",
+           "--history-days", "0", "--lag-min", "1", "--backtestable", "no"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "backtestable=false"
+        - "usable=false"
+        - "observe-only"
+      stdout_not_contains: ["Traceback"]
+
+  - id: the-ledger-prints-every-standing-rejection
+    run: scripts/scout.py
+    args: ["ledger"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "hash-ribbons"
+        - "etf-flow-proxy"
+        - "unlock-calendar"
+        - "oi-deleveraging-buy"
+      stdout_not_contains: ["Traceback"]
+
+  - id: refuses-to-re-test-a-dead-end
+    ask: "Should we test whether exchange netflows predict BTC returns next week?"
+    expect:
+      contains: ["rejected", "backtest"]

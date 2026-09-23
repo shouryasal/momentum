@@ -139,7 +139,12 @@ def test_meta_schema_is_the_form_metadata(auth_client: TestClient):
     assert port["effects"] == ["restart:console"] and port["tier"] == "human"
     assert port["description"]
     assert "console" in body["groups"] and "console.port" in body["groups"]["console"]
-    assert by_path["universe.assets[]"]["kind"] == "leaf"
+    # `universe.assets`/`pairs` are computed from the snapshot, so they are no longer
+    # form fields. What the form owns is the core list and the thresholds the resolver
+    # reads (wide-universe.md §1.2).
+    assert "universe.assets[]" not in by_path
+    assert by_path["universe.core[]"]["kind"] == "leaf"
+    assert by_path["universe.rules.min_median_quote_volume_usdt"]["protected"] is True
 
 
 def test_meta_schema_rejects_an_unknown_config_id(auth_client: TestClient):

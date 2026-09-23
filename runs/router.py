@@ -17,9 +17,14 @@ keeps doing three things the chain router does not:
   ``choice.model`` straight to ``decision_core.run_stage`` — a pinned Claude model id is
   the only thing that means anything there. Routing to a local model is ``run_task``'s
   job, and only ``run_task`` knows how to give it a context pack.
-* the hard-case escalation flags, the code-enforced effort floor (``high``; decide and
-  review run at ``max``), rate-limit-aware brief throttling under the Claude Max
-  subscription (decide runs are never skipped), and the 30-day shadow window.
+* the hard-case escalation flags, the code-enforced effort floors
+  (:func:`effort_floor_for` — ``high`` for anything that authors, ``low`` for the
+  input-side tasks whose output host code re-checks), rate-limit-aware brief throttling
+  under the Claude Max subscription (decide runs are never skipped), and the 30-day
+  shadow window.
+
+Both floors live here and are enforced on this path as well as on ``run_task``'s:
+:func:`resolve` re-checks ``MIN_TIER_FLOOR`` against the alias it is about to return.
 """
 
 from __future__ import annotations
@@ -34,10 +39,48 @@ import yaml
 
 from ops.config import REPO_ROOT, EarnConfig
 from ops.lib import flags as flagslib
+from ops.lib import mode_view
 
 EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
 EFFORT_FLOOR = "high"   # code-enforced: no config or overlay can go below this
 OVERLAY_PATH = REPO_ROOT / "config" / "models-auto.yaml"
+
+#: The tasks whose output is an **authored artefact** — a proposal, a signal validation,
+#: an adjudication, a change to the system itself. These carry :data:`EFFORT_FLOOR` and
+#: nothing lowers it, because the floor exists for exactly them: whatever ends up acting
+#: on the account was thought about at ``high`` or better.
+#:
+#: The floor was applied to *every* task, which made effort unusable as a lever. Pulling a
+#: URL's headline out of a news item, or putting one label from a fixed set on it, does
+#: not get better at ``high`` — it gets slower and dearer for an identical answer, and the
+#: money that buys is money not spent on the decision. So the input-side tasks below carry
+#: :data:`EFFORT_FLOOR_INPUT` instead.
+#:
+#: Membership is decided here, in code, and the set is closed: a task named in neither set
+#: gets the HIGH floor (:func:`effort_floor_for` fails closed), so adding a task to
+#: ``models.yaml`` can never quietly buy it a cheap floor, and the tier-1 overlay — which
+#: may not touch ``effort`` at all — certainly cannot.
+AUTHORING_TASKS: frozenset[str] = frozenset({
+    "decide", "validate", "review", "daily_review", "adjudicate", "approve_change",
+    "discover",
+})
+
+#: The input side: every one of these is re-checked by deterministic host code before
+#: anything acts on it — a JSON schema, the cited-feature verification in
+#: ``runs/signals``, the two-source corroboration rule, ``on_all_failed: rule``. A wrong
+#: answer here is caught and discarded, not traded on.
+INPUT_TASKS: frozenset[str] = frozenset({
+    "brief", "brief_short", "flags", "scan", "classify", "extract", "holdings_watch",
+})
+
+#: The floor for :data:`INPUT_TASKS`. Still a floor: a task may sit above it (``brief``
+#: runs at ``medium``), never below.
+EFFORT_FLOOR_INPUT = "low"
+
+
+def effort_floor_for(task: str | None) -> str:
+    """The reasoning-effort floor for one task. Unknown tasks get the HIGH floor."""
+    return EFFORT_FLOOR_INPUT if task in INPUT_TASKS else EFFORT_FLOOR
 
 
 @dataclass(frozen=True)
@@ -69,11 +112,17 @@ class HardCaseFlags:
         return [k for k, v in vars(self).items() if v]
 
 
-def clamp_effort(effort: str | None) -> str:
-    """Never below the floor; unknown values fall back to the floor."""
-    if effort in EFFORT_ORDER and EFFORT_ORDER.index(effort) >= EFFORT_ORDER.index(EFFORT_FLOOR):
+def clamp_effort(effort: str | None, task: str | None = None) -> str:
+    """Never below the task's floor; unknown values fall back to that floor.
+
+    ``task`` is optional and omitting it keeps the original behaviour exactly — the HIGH
+    floor — so a caller that has not been taught about the matrix cannot accidentally
+    obtain a cheap one.
+    """
+    floor = effort_floor_for(task)
+    if effort in EFFORT_ORDER and EFFORT_ORDER.index(effort) >= EFFORT_ORDER.index(floor):
         return effort
-    return EFFORT_FLOOR
+    return floor
 
 
 def _deep_merge(base: dict, overlay: dict) -> dict:
@@ -95,27 +144,68 @@ def _is_local(entry) -> bool:
     return isinstance(entry, dict) and entry.get("provider") == "ollama"
 
 
+#: v1 had no tiers and the overlay pins bare strings; this is the historical ordering.
+_V1_TIERS = {"fable": 5, "opus": 4, "sonnet": 3, "haiku": 2}
+
+
+def _tier_of(alias: str, entry: object) -> int:
+    """The capability tier of one ``models:`` entry, however it is written.
+
+    A v2 entry declares it. An overlay pin is a bare string with no tier — and the only
+    thing auto-promotion ever pins is a Claude model, so the historical table answers
+    those. An alias nobody has heard of scores 1, the bottom, which is the safe end: it
+    fails a floor rather than clearing one.
+    """
+    if isinstance(entry, dict) and entry.get("tier") is not None:
+        try:
+            return int(entry["tier"])
+        except (TypeError, ValueError):
+            return 1
+    return _V1_TIERS.get(alias, 1)
+
+
 def _v1_view(merged: dict) -> dict:
     """Project the merged v2 config onto the v1 shape the legacy callers read.
 
     ``models`` becomes alias → pinned string; each task gains a ``model`` (the first
-    chain entry the SDK path can serve) and a ``fallback`` (v1's key, or the v2
-    ``on_all_failed`` policy name). ``chain`` is left in place for anything that wants it.
+    chain entry the SDK path can serve **and that clears the code tier floor**) and a
+    ``fallback`` (v1's key, or the v2 ``on_all_failed`` policy name). ``chain`` is left in
+    place for anything that wants it, and ``model_tiers`` is added so :func:`resolve` can
+    re-check the floor on the entry it is about to hand to the SDK.
+
+    The floor is applied here and again in :func:`resolve`. It was applied in neither:
+    this module skipped *local* models (they mean nothing to ``decision_core.run_stage``)
+    and stopped there, so ``chain_for``'s guarantee — that no model below tier 4 writes a
+    proposal and none below tier 3 writes a validation — held on the ``run_task`` path and
+    simply did not exist on this one. ``research_run``, ``review_run``, ``daily_review``,
+    ``ingest``, ``maintenance``, ``triggers`` and the replay harness all route through
+    here, so "the floor is code, not config" was true of half the system.
     """
+    from runs.llm.types import MIN_TIER_FLOOR
+
     out = dict(merged)
     raw_models = dict(merged.get("models") or {})
     local = {alias for alias, entry in raw_models.items() if _is_local(entry)}
+    tiers = {alias: _tier_of(alias, entry) for alias, entry in raw_models.items()
+             if entry is not None}
     out["models"] = {
         alias: (entry.get("id") if isinstance(entry, dict) else entry)
         for alias, entry in raw_models.items()
         if entry is not None
     }
+    out["model_tiers"] = tiers
     tasks: dict = {}
     for name, raw in (merged.get("tasks") or {}).items():
         task = dict(raw or {})
         chain = [c for c in (task.get("chain") or []) if c]
+        floor = max(int(task.get("min_tier") or 1), MIN_TIER_FLOOR.get(name, 1))
         if not task.get("model"):
-            servable = [c for c in chain if c not in local] or chain
+            # Local entries are dropped whatever the task allows: this view feeds
+            # `decision_core.run_stage`, where a pinned Claude model id is the only thing
+            # that means anything. Routing to Ollama is `run_task`'s job.
+            servable = [c for c in chain
+                        if c not in local and tiers.get(c, 1) >= floor] or [
+                c for c in chain if c not in local]
             if servable:
                 task["model"] = servable[0]
         if "fallback" not in task:
@@ -181,9 +271,18 @@ def compute_hardcase_flags(cfg: EarnConfig, jdb: sqlite3.Connection,
         row = jdb.execute(
             "SELECT nav_usdt FROM nav_daily WHERE sleeve='b' ORDER BY date_utc DESC LIMIT 1"
         ).fetchone()
-        anchors = {r["key"]: float(r["value"]) for r in jdb.execute(
-            "SELECT key, value FROM risk_state WHERE sleeve='b'"
-            " AND key IN ('day_anchor_nav','month_anchor_nav')")}
+        # The bare keys are the gate's *un-namespaced* fallback. RiskGate stores every key
+        # as ``run:<run_id>:<key>`` whenever the runtime file names a run id, which it
+        # always does for a real run — so this dict was permanently empty, the
+        # ``if row and anchors`` guard swallowed it silently, and ``near_stop`` (the
+        # escalation that is supposed to fire as NAV approaches the daily or monthly stop)
+        # could never be True. ``mode_view.risk_state`` reads the run-scoped rows first.
+        run_id = mode_view.active_run_id(jdb, "b")
+        anchors = {
+            k: float(v) for k, v in mode_view.risk_state(
+                jdb, "b", ("day_anchor_nav", "month_anchor_nav"), run_id=run_id
+            ).items()
+        }
         if row and anchors:
             nav = row["nav_usdt"]
             prox = cfg.escalation.stop_proximity_pct / 100
@@ -191,7 +290,7 @@ def compute_hardcase_flags(cfg: EarnConfig, jdb: sqlite3.Connection,
                 near_stop |= nav / anchors["day_anchor_nav"] - 1 <= -(cfg.risk.daily_loss_stop - prox)
             if "month_anchor_nav" in anchors and anchors["month_anchor_nav"] > 0:
                 near_stop |= nav / anchors["month_anchor_nav"] - 1 <= -(cfg.risk.monthly_loss_stop - prox)
-    except sqlite3.Error:
+    except (sqlite3.Error, TypeError, ValueError):
         pass
 
     regwatch = False
@@ -226,9 +325,22 @@ def compute_hardcase_flags(cfg: EarnConfig, jdb: sqlite3.Connection,
 def resolve(task: str, flags: HardCaseFlags | None = None,
             models_cfg: dict | None = None,
             force_escalation: list[str] | None = None) -> ModelChoice:
+    """The one model this task's SDK-path callers should pin, plus its effort.
+
+    The tier floor is re-checked on the alias that is actually chosen, not only on the
+    chain it came from: :func:`_v1_view` picks the head, but the escalation alias bypasses
+    that pick entirely, and either can be repointed by the tier-1 overlay. A choice below
+    the floor is a :class:`~ops.config.ConfigError`, never a quiet downgrade — the whole
+    point of the floor is that it cannot be configured away, so it must fail loudly rather
+    than serve.
+    """
+    from ops.config import ConfigError
+    from runs.llm.types import MIN_TIER_FLOOR
+
     mc = models_cfg or load_models_cfg()
     t = mc["tasks"][task]
     models = mc["models"]
+    tiers = mc.get("model_tiers") or {}
     reasons: list[str] = []
     escalated = False
     if task == "decide" and t.get("escalation"):
@@ -239,13 +351,20 @@ def resolve(task: str, flags: HardCaseFlags | None = None,
             escalated = True
             reasons += flags.reasons()
     key = t["escalation"] if escalated else t["model"]
+    floor = max(int(t.get("min_tier") or 1), MIN_TIER_FLOOR.get(task, 1))
+    tier = int(tiers.get(key, _V1_TIERS.get(key, 1)))
+    if tier < floor:
+        raise ConfigError(
+            f"models.yaml: task {task!r} resolves to {key!r} (tier {tier}) but the floor "
+            f"is tier {floor} — MIN_TIER_FLOOR is code and no config or overlay lowers it"
+        )
     return ModelChoice(
         task=task, model=models[key], escalated=escalated,
         escalation_reasons=reasons,
         fallback=t.get("fallback"), retry=int(t.get("retry", 0)),
         max_usd=float(t.get("max_usd_per_run") or 0.0),
         max_turns=int(t.get("max_turns") or 1),
-        effort=clamp_effort(t.get("effort")),
+        effort=clamp_effort(t.get("effort"), task),
     )
 
 

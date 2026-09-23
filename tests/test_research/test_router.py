@@ -59,17 +59,20 @@ class TestV2ChainCompatibility:
         assert router.resolve("decide").model == "claude-opus-5"
 
     def test_a_local_head_is_skipped_by_the_legacy_shim(self):
-        """`classify`'s chain starts local, but resolve() feeds the Claude SDK directly.
+        """`scan`'s chain starts local, but resolve() feeds the Claude SDK directly.
 
         `runs.ingest` passes `choice.model` to `decision_core.run_stage`, which can only
         speak to Claude — so the shim returns the first SDK-servable entry. Routing to
         the local model is `runs.llm.chain.run_task`'s job, with a context pack.
         """
         mc = router.load_models_cfg()
-        assert mc["tasks"]["classify"]["chain"][0] == "local_small"
-        assert router.resolve("classify", models_cfg=mc).model == \
-            "claude-haiku-4-5-20251001"
+        assert mc["tasks"]["scan"]["chain"][0] == "local_small"
         assert router.resolve("scan", models_cfg=mc).model == "claude-haiku-4-5-20251001"
+        assert router.resolve("holdings_watch", models_cfg=mc).model == \
+            "claude-haiku-4-5-20251001"
+        # classify leads with haiku now: the tier matrix pays for a reliable label at low
+        # effort rather than a local one the schema rejects.
+        assert mc["tasks"]["classify"]["chain"][0] == "haiku"
 
     def test_on_all_failed_is_exposed_as_the_v1_fallback(self):
         mc = router.load_models_cfg()
@@ -84,9 +87,51 @@ class TestV2ChainCompatibility:
         base = tmp_path / "models.yaml"
         shutil.copy(REPO_ROOT / "config" / "models.yaml", base)
         (tmp_path / "models-auto.yaml").write_text(
+            "tasks: { brief: { chain: [opus, haiku, local_small] } }\n")
+        mc = router.load_models_cfg(base)
+        assert router.resolve("brief", models_cfg=mc).model == "claude-opus-5"
+
+    def test_an_overlay_cannot_put_decide_below_the_tier_floor(self, tmp_path):
+        """The hole this shim had: MIN_TIER_FLOOR was enforced on `run_task`'s path only.
+
+        `runs.router.load_models_cfg` is the LENIENT merge — it does not apply the strict
+        overlay whitelist — so an overlay naming a tier-3 model as decide's chain head was
+        merged and handed straight to `decision_core.run_stage`. Half the system
+        (`research_run`, `review_run`, `daily_review`, `ingest`, `maintenance`, `triggers`,
+        the replay harness) routes through here, so "no proposal is ever authored below
+        tier 4" was true of the other half only. It is a loud failure now, not a downgrade.
+        """
+        import shutil
+
+        import pytest as _pytest
+
+        from ops.config import REPO_ROOT, ConfigError
+
+        base = tmp_path / "models.yaml"
+        shutil.copy(REPO_ROOT / "config" / "models.yaml", base)
+        (tmp_path / "models-auto.yaml").write_text(
             "tasks: { decide: { chain: [sonnet] } }\n")
         mc = router.load_models_cfg(base)
-        assert router.resolve("decide", models_cfg=mc).model == "claude-sonnet-5"
+        with _pytest.raises(ConfigError, match="tier 4"):
+            router.resolve("decide", models_cfg=mc)
+
+    def test_an_undeclared_pin_is_refused_for_decide_not_guessed(self, tmp_path):
+        """A bare-string overlay pin carries no tier. Guessing one for the model that
+        writes proposals is not a thing to guess about — it scores the bottom and fails."""
+        import shutil
+
+        import pytest as _pytest
+
+        from ops.config import REPO_ROOT, ConfigError
+
+        base = tmp_path / "models.yaml"
+        shutil.copy(REPO_ROOT / "config" / "models.yaml", base)
+        (tmp_path / "models-auto.yaml").write_text(
+            "models: { mystery: some-model-7 }\n"
+            "tasks: { decide: { model: mystery } }\n")
+        mc = router.load_models_cfg(base)
+        with _pytest.raises(ConfigError, match="tier 4"):
+            router.resolve("decide", models_cfg=mc)
 
 
 def _run_row(conn, stage, cost, started="2026-09-05T04:30:00Z"):
@@ -152,12 +197,29 @@ class TestEffortAndOverlay:
     def test_effort_floor_and_task_levels(self):
         assert router.resolve("decide", router.HardCaseFlags()).effort == "max"
         assert router.resolve("review").effort == "max"
-        assert router.resolve("brief").effort == "high"
-        assert router.clamp_effort("low") == "high"       # floor
+        assert router.resolve("brief").effort == "medium"
+        assert router.resolve("classify").effort == "low"
+        # No task named: the HIGH floor, exactly as before. A caller that has not been
+        # taught about the matrix cannot accidentally obtain the cheap floor.
+        assert router.clamp_effort("low") == "high"
         assert router.clamp_effort("medium") == "high"
         assert router.clamp_effort(None) == "high"
         assert router.clamp_effort("nonsense") == "high"
         assert router.clamp_effort("xhigh") == "xhigh"
+
+    def test_the_effort_floor_is_high_for_everything_that_authors(self):
+        for task in router.AUTHORING_TASKS:
+            assert router.effort_floor_for(task) == "high"
+            assert router.clamp_effort("low", task) == "high"
+
+    def test_the_input_side_may_go_low_and_an_unknown_task_may_not(self):
+        for task in router.INPUT_TASKS:
+            assert router.clamp_effort("low", task) == "low"
+        # fails closed: a task in neither set gets the high floor, so adding a row to
+        # models.yaml can never quietly buy it a cheap one.
+        assert router.effort_floor_for("some_task_added_later") == "high"
+        assert router.clamp_effort("low", "some_task_added_later") == "high"
+        assert not (router.AUTHORING_TASKS & router.INPUT_TASKS)
 
     def test_overlay_cannot_lower_effort(self, tmp_path):
         import shutil
@@ -179,8 +241,11 @@ class TestEffortAndOverlay:
 
         base = tmp_path / "models.yaml"
         shutil.copy(REPO_ROOT / "config" / "models.yaml", base)
+        # The v2 ModelRef shape with an explicit tier, which is what
+        # `runs.maintenance.start_shadow` actually writes: a promotion to `decide` must
+        # declare the tier it claims, because resolve() now checks it against the floor.
         (tmp_path / "models-auto.yaml").write_text(
-            "models: { nova: claude-nova-6 }\n"
+            "models: { nova: { provider: claude, id: claude-nova-6, tier: 4 } }\n"
             "tasks: { decide: { model: nova } }\n"
             "shadow: { enabled: true, model: sonnet, started: '2026-09-01', days: 30 }\n")
         mc = router.load_models_cfg(base)
@@ -248,6 +313,39 @@ class TestHardCaseComputation:
         conn.commit()
         # -2.1% loss, daily stop 3%, proximity 1% -> within 1% of the stop
         assert router.compute_hardcase_flags(cfg, conn, root=root, now=NOW).near_stop
+
+    def test_near_stop_reads_the_gates_run_scoped_anchor(self, cfg, jdb):
+        """Verified: ``near_stop`` was permanently False. ``RiskGate`` namespaces every
+        key with ``run:<run_id>:`` whenever the runtime file names a run id — always, for
+        a real run — so the bare query returned nothing, the ``if row and anchors`` guard
+        swallowed it silently, and the escalation that is supposed to fire as NAV
+        approaches the daily or monthly stop never fired once."""
+        from ops import modes
+
+        root, conn = jdb
+        modes.open_run(conn, cfg, run_id="live-b-03", sleeve="b", mode="live",
+                       submode="execute", seed_usdt=10000.0,
+                       started_utc="2026-09-01T00:00:00Z")
+        conn.execute("INSERT INTO nav_daily(date_utc, sleeve, nav_usdt)"
+                     " VALUES ('2026-09-22','b',9790)")
+        conn.execute("INSERT INTO risk_state(sleeve, key, value, updated_utc)"
+                     " VALUES ('b','run:live-b-03:day_anchor_nav','10000','x')")
+        conn.commit()
+        assert router.compute_hardcase_flags(cfg, conn, root=root, now=NOW).near_stop
+
+    def test_a_comfortable_run_scoped_anchor_does_not_escalate(self, cfg, jdb):
+        from ops import modes
+
+        root, conn = jdb
+        modes.open_run(conn, cfg, run_id="live-b-03", sleeve="b", mode="live",
+                       submode="execute", seed_usdt=10000.0,
+                       started_utc="2026-09-01T00:00:00Z")
+        conn.execute("INSERT INTO nav_daily(date_utc, sleeve, nav_usdt)"
+                     " VALUES ('2026-09-22','b',10050)")
+        conn.execute("INSERT INTO risk_state(sleeve, key, value, updated_utc)"
+                     " VALUES ('b','run:live-b-03:day_anchor_nav','10000','x')")
+        conn.commit()
+        assert not router.compute_hardcase_flags(cfg, conn, root=root, now=NOW).near_stop
 
     def test_regime_change_and_disagreement(self, cfg, jdb):
         root, conn = jdb

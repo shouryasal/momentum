@@ -1,0 +1,81 @@
+# Eval cases for hypothesis-lab. `evals/skill_eval.py` runs these; the pass rate gates the
+# change (config: skills.eval.min_pass_rate).
+#
+# Every `run:` case is deterministic and touches no filesystem: the refusal paths return
+# before anything is written, and --self-test exercises the audit as pure functions. The
+# eval sandbox has no candle store, no network and no config, and a case that quietly needs
+# them scores the environment instead of the skill.
+cases:
+  - id: the-seal-and-every-refusal-hold
+    run: scripts/hypothesis.py
+    args: ["--self-test"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "seal_mismatch_detected=true"
+        - "one_baseline_refused=true"
+        - "below_hurdle_outcome=inconclusive"
+        - "triggered_falsifier_outcome=refuted"
+        - "self_test: PASS"
+      stdout_not_contains: ["Traceback", "FAIL", "refused_vague_falsifier=False"]
+
+  - id: a-vague-falsifier-is-not-a-falsifier
+    run: scripts/hypothesis.py
+    args: ["open", "--id", "eval-vague",
+           "--statement", "funding predicts forward drawdown at a 7 day horizon",
+           "--falsifier", "if it turns out not to work we will drop the idea",
+           "--params", "2", "--regimes", "bull,bear",
+           "--costs-bps", "10", "--surface", "local-candles"]
+    expect:
+      exit_code: 1
+      stdout_contains:
+        - "REFUSED"
+        - "falsifier names no number"
+      stdout_not_contains: ["Traceback", "preregistered"]
+
+  - id: costs-off-is-refused-before-anything-is-measured
+    run: scripts/hypothesis.py
+    args: ["open", "--id", "eval-free-lunch",
+           "--statement", "funding predicts forward drawdown at a 7 day horizon",
+           "--falsifier", "the top bucket lands within 3pp of the base rate",
+           "--params", "2", "--regimes", "bull,bear",
+           "--costs-bps", "0", "--surface", "local-candles"]
+    expect:
+      exit_code: 1
+      stdout_contains:
+        - "REFUSED"
+        - "costs must be on"
+      stdout_not_contains: ["Traceback", "preregistered"]
+
+  - id: a-single-regime-is-a-regime-bet
+    run: scripts/hypothesis.py
+    args: ["open", "--id", "eval-one-regime",
+           "--statement", "funding predicts forward drawdown at a 7 day horizon",
+           "--falsifier", "the top bucket lands within 3pp of the base rate",
+           "--params", "2", "--regimes", "bull",
+           "--costs-bps", "10", "--surface", "local-candles"]
+    expect:
+      exit_code: 1
+      stdout_contains:
+        - "REFUSED"
+        - "regimes"
+      stdout_not_contains: ["Traceback", "preregistered"]
+
+  - id: five-parameters-exceed-the-cap
+    run: scripts/hypothesis.py
+    args: ["open", "--id", "eval-knobs",
+           "--statement", "funding predicts forward drawdown at a 7 day horizon",
+           "--falsifier", "the top bucket lands within 3pp of the base rate",
+           "--params", "5", "--regimes", "bull,bear",
+           "--costs-bps", "10", "--surface", "local-candles"]
+    expect:
+      exit_code: 1
+      stdout_contains:
+        - "REFUSED"
+        - "exceeds the cap"
+      stdout_not_contains: ["Traceback", "preregistered"]
+
+  - id: states-the-falsifier-before-measuring
+    ask: "I think high funding means we should take profit. Test it."
+    expect:
+      contains: ["falsifier", "baseline"]

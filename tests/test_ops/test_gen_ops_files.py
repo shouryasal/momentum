@@ -43,6 +43,32 @@ class TestCrontabHeader:
         assert gen.PLACEHOLDER_ROOT not in text
         assert f'E="{REPO_ROOT.resolve()}"' in text
 
+    def test_cron_tz_pins_the_schedule_to_gulf_time(self, cfg, rendered):
+        """Nothing in the documented setup set OR checked the distro timezone: the
+        requirement lived in a comment in this generated file and in one prose aside, and
+        ``Environment=TZ`` in the systemd units sets a process environment and pins no
+        schedule at all. cron evaluates every expression in the distro timezone while
+        ops/healthcheck.py forces Gulf before croniter, so on a stock UTC host the
+        watchdog expected nav_job/backup/maintenance/review/daily_review/research four
+        hours early, spawned a detached rerun with an alert, and the real cron fire then
+        ran each one a second time — duplicate LLM spend and duplicate reports, daily.
+        """
+        line = next(ln for ln in rendered.splitlines() if ln.startswith("CRON_TZ="))
+        assert line == f"CRON_TZ={cfg.meta.display_timezone}"
+        # ...and it must come before the first job line, or cron ignores it
+        lines = rendered.splitlines()
+        assert lines.index(line) < min(
+            i for i, ln in enumerate(lines) if ln in _job_lines(rendered))
+
+    def test_cron_tz_follows_the_config_not_a_literal(self, cfg):
+        other = cfg.model_copy(deep=True)
+        other.meta.display_timezone = "Europe/London"
+        assert "CRON_TZ=Europe/London" in gen.render_crontab(other, gen.template_ctx())
+
+    def test_the_committed_crontab_carries_it(self):
+        text = (REPO_ROOT / "ops" / "crontab").read_text(encoding="utf-8")
+        assert "\nCRON_TZ=Asia/Dubai\n" in text
+
 
 class TestCrontabLines:
     def test_every_line_is_a_valid_guarded_job(self, rendered):
@@ -143,6 +169,19 @@ class TestSystemdUnits:
     def test_host_render_has_a_real_user(self, cfg):
         text = gen.render_telegram_unit(cfg, gen.host_ctx(REPO_ROOT))
         assert gen.PLACEHOLDER_USER not in text and gen.PLACEHOLDER_ROOT not in text
+
+    @pytest.mark.parametrize("render", ["render_telegram_unit", "render_console_unit"])
+    def test_environment_tz_says_it_pins_no_schedule(self, cfg, render):
+        """``Environment=TZ=Asia/Dubai`` reads, to an operator auditing the timezone
+        requirement, as the enforcement ops/crontab demands. It is not: it sets the
+        unit's process environment, and cron and any systemd timer still fire on the
+        distro clock. The line stays (a bot printing Gulf time is useful) but it must not
+        look like a guard."""
+        text = getattr(gen, render)(cfg, gen.template_ctx())
+        assert f"Environment=TZ={cfg.meta.display_timezone}" in text
+        header = "\n".join(ln for ln in text.splitlines() if ln.startswith("#"))
+        assert "pins no schedule" in header
+        assert "CRON_TZ" in header
 
 
 class TestDrift:

@@ -6,9 +6,15 @@ be valid. This loader re-checks structurally anyway (defence in depth), walks ba
 anything invalid, and never raises.
 
 Contract (canonical): files proposals/YYYY-MM-DD-HHMM.json, lexicographic order ==
-chronological; run_id format 2026-09-22T08:30+04:00; targets over exactly
-{BTC, ETH, USDT} summing to 1 ± sum_tolerance; abstain=true means hold (still valid,
-resets the drift clock); a file older than max_age_hours is stale.
+chronological; run_id format 2026-09-22T08:30+04:00; **sparse** targets — a subset of
+{*assets, USDT} with the quote always present and an absent asset meaning exactly zero —
+summing to 1 ± sum_tolerance; abstain=true means hold (still valid, resets the drift
+clock); a file older than max_age_hours is stale.
+
+Sparse targets are the v4 shape (docs/design/wide-universe.md §3.3). The dense
+{BTC, ETH, USDT} files this loader used to require are still accepted: under a two-asset
+universe the two shapes coincide, and under a wide one a dense file is simply a proposal
+that named every tradeable asset.
 """
 
 from __future__ import annotations
@@ -25,12 +31,20 @@ from typing import Any
 
 MODULES = ("trend", "dca", "cash", "hold")
 FILENAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-\d{4}\.json$")
+#: Byte-equal to ``schemas.proposal.ASSET_PATTERN``; a test asserts they agree.
+ASSET_PATTERN = r"^[A-Z0-9]{2,12}$"
+ASSET_RE = re.compile(ASSET_PATTERN)
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+#: Byte-equal to ``schemas.proposal.DEFAULT_MAX_ASSETS`` (``risk.max_open_positions``).
+DEFAULT_MAX_ASSETS = 8
+SPARSE_SCHEMA_VERSION = 4
 
 # Optional keys a proposal may carry beyond the required set. These MUST stay in step
 # with ``schemas/proposal.py`` (host side, ``extra="forbid"``): a signal-fired proposal
 # is written by ``schemas.proposal.to_file()`` with ``signal_id`` and ``schema_version``,
 # and a loader that called those "unknown fields" would reject every one of them.
-OPTIONAL_FIELDS = ("plan", "signal_id", "schema_version")
+OPTIONAL_FIELDS = ("plan", "signal_id", "schema_version", "universe_snapshot")
 #: ``schemas.proposal.Plan``'s field set, plus ``urgency``. ``urgency`` is not in the v3
 #: host model, so Earn itself never writes it; it stays accepted here because
 #: :func:`clamp_plan` is what enforces ``trading.plan_bounds.allow_model_urgency`` on a
@@ -48,7 +62,7 @@ class Proposal:
     run_id: str
     prompt_version: str
     module: str
-    targets: dict[str, float]     # BTC/ETH/USDT weights
+    targets: dict[str, float]     # sparse: the quote plus the assets it chose to hold
     exposure_scale: float
     confidence: float
     abstain: bool
@@ -58,6 +72,9 @@ class Proposal:
     path: str
     ts: datetime                  # parsed from run_id
     plan: dict[str, Any] = field(default_factory=dict)   # clamped by clamp_plan()
+    #: ``{date, sha256}`` of the universe snapshot this proposal was authored against,
+    #: or ``{}`` for a pre-v4 file. SleeveB journals it so a decision stays replayable.
+    universe_snapshot: dict[str, Any] = field(default_factory=dict)
 
 
 def _parse_run_id(run_id: str) -> datetime | None:
@@ -68,7 +85,61 @@ def _parse_run_id(run_id: str) -> datetime | None:
     return dt if dt.tzinfo is not None else None
 
 
-def validate_structural(raw: dict, assets: list[str], sum_tolerance: float) -> list[str]:
+def _targets_errors(targets: Any, assets: list[str], quote: str, max_assets: int,
+                    sum_tolerance: float) -> list[str]:
+    """The sparse-targets rules, mirroring ``schemas.proposal`` exactly.
+
+    The loader must never ACCEPT what the host validator rejects; rejecting for a
+    different reason, or for one more reason, is fine and is the point of defence in depth.
+    """
+    if not isinstance(targets, dict) or not targets:
+        return ["targets must be a non-empty object"]
+    errors: list[str] = []
+    allowed = set(assets)
+    if quote not in targets:
+        errors.append(f"targets must name {quote} explicitly")
+    bad_keys = sorted(k for k in targets if not (isinstance(k, str) and ASSET_RE.match(k)))
+    if bad_keys:
+        errors.append(f"target keys must match {ASSET_PATTERN}: {bad_keys[:3]}")
+    named = [k for k in targets if k != quote]
+    unknown = sorted(k for k in named if k not in allowed)
+    if unknown:
+        errors.append(f"targets outside the tradeable universe: {unknown[:5]}")
+    if len(named) > max_assets:
+        errors.append(f"targets name {len(named)} assets, max is {max_assets}")
+    for k, v in targets.items():
+        if not isinstance(v, (int, float)) or isinstance(v, bool) \
+                or not (0.0 <= float(v) <= 1.0):
+            errors.append(f"target {k} out of [0,1]")
+    total = sum(float(v) for v in targets.values()
+                if isinstance(v, (int, float)) and not isinstance(v, bool))
+    if abs(total - 1.0) > sum_tolerance:
+        errors.append(f"targets sum {total:.4f} != 1 +/- {sum_tolerance}")
+    return errors
+
+
+def _snapshot_errors(raw: dict) -> list[str]:
+    """``universe_snapshot`` shape, and the version handshake around it."""
+    errors: list[str] = []
+    version = raw.get("schema_version")
+    snap = raw.get("universe_snapshot")
+    if snap is not None:
+        if not isinstance(snap, dict) or set(snap) != {"date", "sha256"}:
+            return ["universe_snapshot must be {date, sha256}"]
+        if not DATE_RE.match(str(snap.get("date", ""))):
+            errors.append("universe_snapshot.date must be YYYY-MM-DD")
+        if not SHA256_RE.match(str(snap.get("sha256", ""))):
+            errors.append("universe_snapshot.sha256 must be 64 lowercase hex")
+        if isinstance(version, int) and version < SPARSE_SCHEMA_VERSION:
+            errors.append("universe_snapshot requires schema_version 4")
+    elif isinstance(version, int) and version >= SPARSE_SCHEMA_VERSION:
+        errors.append("schema_version 4 requires universe_snapshot")
+    return errors
+
+
+def validate_structural(raw: dict, assets: list[str], sum_tolerance: float, *,
+                        quote: str = "USDT",
+                        max_assets: int = DEFAULT_MAX_ASSETS) -> list[str]:
     """Return a list of problems; empty means structurally valid."""
     errors: list[str] = []
     required = {"run_id", "prompt_version", "module", "targets", "exposure_scale",
@@ -92,17 +163,8 @@ def validate_structural(raw: dict, assets: list[str], sum_tolerance: float) -> l
                 errors.append(f"unknown plan fields: {sorted(unknown)}")
     if raw["module"] not in MODULES:
         errors.append(f"bad module {raw['module']!r}")
-    targets = raw["targets"]
-    expected_keys = {*assets, "USDT"}
-    if not isinstance(targets, dict) or set(targets.keys()) != expected_keys:
-        errors.append(f"targets keys must be exactly {sorted(expected_keys)}")
-    else:
-        for k, v in targets.items():
-            if not isinstance(v, (int, float)) or not (0.0 <= float(v) <= 1.0):
-                errors.append(f"target {k} out of [0,1]")
-        total = sum(float(v) for v in targets.values() if isinstance(v, (int, float)))
-        if abs(total - 1.0) > sum_tolerance:
-            errors.append(f"targets sum {total:.4f} != 1 +/- {sum_tolerance}")
+    errors.extend(_targets_errors(raw["targets"], assets, quote, max_assets, sum_tolerance))
+    errors.extend(_snapshot_errors(raw))
     for name in ("exposure_scale", "confidence"):
         v = raw[name]
         if not isinstance(v, (int, float)) or not (0.0 <= float(v) <= 1.0):
@@ -164,6 +226,7 @@ def load_newest_valid(
                 horizon_days=raw["horizon_days"], rationale=list(raw["rationale"]),
                 invalidation=raw["invalidation"], path=str(f), ts=ts,
                 plan=dict(raw.get("plan") or {}),
+                universe_snapshot=dict(raw.get("universe_snapshot") or {}),
             )
         if on_reject is not None:
             try:
@@ -174,7 +237,12 @@ def load_newest_valid(
 
 
 def effective_targets(p: Proposal, assets: list[str]) -> dict[str, float]:
-    """Crypto target weights after exposure_scale (USDT absorbs the remainder)."""
+    """Crypto target weights after exposure_scale (USDT absorbs the remainder).
+
+    ``assets`` is the sleeve's tradeable set, not the proposal's keys: an asset the
+    proposal did not name gets **0.0**, which is what closes a position the model dropped
+    rather than leaving it to drift.
+    """
     return {a: p.targets.get(a, 0.0) * p.exposure_scale for a in assets}
 
 

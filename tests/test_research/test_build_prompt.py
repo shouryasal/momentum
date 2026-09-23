@@ -1,6 +1,7 @@
 """Prompt assembly: limits byte-equal earn.yaml values, static prefix stable,
 budgets enforced, no P&L, snapshot round-trip byte-identical."""
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -26,7 +27,8 @@ def env(tmp_path):
     (tmp_path / "prompts" / "stages").mkdir(parents=True)
     for p in (REPO_ROOT / "prompts" / "stages").iterdir():
         (tmp_path / "prompts" / "stages" / p.name).write_text(p.read_text())
-    for v in ("research.v1.md", "research.v2.md", "research.v3.md"):
+    for v in ("research.v1.md", "research.v2.md", "research.v3.md",
+              "research.v4.md"):
         (tmp_path / "prompts" / v).write_text(
             (REPO_ROOT / "prompts" / v).read_text())
     (tmp_path / "lessons.md").write_text("## L-1\nlesson text\n")
@@ -81,8 +83,9 @@ def test_truncation_keeps_newest(env):
 
 def test_hard_cap_raises(env):
     cfg, jdb, root = env
-    template = (root / "prompts" / "research.v3.md").read_text()
-    (root / "prompts" / "research.v3.md").write_text(template + "P" * 100000)
+    active = build_prompt.prompt_version_for(cfg, root)
+    template = (root / "prompts" / f"{active}.md").read_text()
+    (root / "prompts" / f"{active}.md").write_text(template + "P" * 100000)
     with pytest.raises(build_prompt.PromptBudgetExceeded):
         _build(cfg, jdb, root)
 
@@ -106,7 +109,7 @@ def test_snapshot_roundtrip_byte_identical(env):
     cfg, jdb, root = env
     bp, inputs, limits, fewshot = _build(cfg, jdb, root)
     meta = snapshotlib.SnapshotMeta(
-        run_id=RUN_ID, created_at="2026-09-22T04:30:00Z", prompt_version="research.v3",
+        run_id=RUN_ID, created_at="2026-09-22T04:30:00Z", prompt_version="research.v4",
         model="claude-opus-5", git_commit="abc", token_budget=20000)
     d = snapshotlib.write_snapshot(RUN_ID, inputs=inputs, limits=limits,
                                    fewshot=fewshot, rendered_prompt=bp.text,
@@ -123,7 +126,7 @@ def test_snapshot_roundtrip_byte_identical(env):
         bpmod.REPO_ROOT = orig
     assert rebuilt.text == bp.text
     row = jdb.execute("SELECT * FROM snapshot_index WHERE run_id=?", (RUN_ID,)).fetchone()
-    assert row is not None and row["prompt_version"] == "research.v3"
+    assert row is not None and row["prompt_version"] == "research.v4"
 
 
 def test_snapshot_write_once_and_tamper_detected(env):
@@ -194,7 +197,7 @@ def test_v2_renders_dossier_summaries_and_event_stats(env):
     (root / "knowledge" / "state" / "event_stats.json").write_text(
         '{"events": {"hack": {"mean_1d_pct": -3.1}}}')
     bp, inputs, *_ = _build(cfg, jdb, root)
-    assert bp.prompt_version == "research.v3"
+    assert bp.prompt_version == "research.v4"
     assert "current vol rank 0.82" in bp.text     # the Summary section is in
     assert "long tail" not in bp.text             # History stays out
     assert '"mean_1d_pct": -3.1' in bp.text
@@ -206,3 +209,83 @@ def test_v2_without_dossiers_degrades(env):
     bp, *_ = _build(cfg, jdb, root)
     assert "(no dossiers yet)" in bp.text and "{{DOSSIERS}}" not in bp.text
     assert "{{EVENT_STATS}}" not in bp.text
+
+
+# ------------------------------------------------------------- v4 (wide universe)
+
+WIDE = ["BTC", "ETH", "SOL", "AVAX", "LINK", "DOT", "ATOM", "NEAR", "OP", "ARB"]
+SNAP = {"date": "2026-09-20", "sha256": "f" * 64}
+
+
+def widen(monkeypatch, cfg, assets=WIDE, snapshot=SNAP):
+    """A wide tradeable tier without a resolver snapshot on disk (they are computed fields)."""
+    u = type(cfg.universe)
+    monkeypatch.setattr(u, "assets", property(lambda self: list(assets)), raising=False)
+    monkeypatch.setattr(u, "pairs",
+                        property(lambda self: [f"{a}/USDT" for a in assets]), raising=False)
+    monkeypatch.setattr(u, "watchlist_pairs",
+                        property(lambda self: [f"{a}/USDT" for a in assets] +
+                                 [f"W{i}/USDT" for i in range(90)]), raising=False)
+    monkeypatch.setattr(u, "snapshot_ref", property(lambda self: dict(snapshot)),
+                        raising=False)
+    monkeypatch.setattr(u, "tier_of",
+                        lambda self, a: "core" if a in ("BTC", "ETH") else "satellite",
+                        raising=False)
+
+
+def test_the_universe_block_names_the_snapshot_and_every_tradeable_tier(env, monkeypatch):
+    cfg, jdb, root = env
+    widen(monkeypatch, cfg)
+    bp, inputs, *_ = _build(cfg, jdb, root)
+    payload = json.loads(inputs["universe"])
+    assert payload["snapshot"] == SNAP          # what the proposal must quote back
+    assert payload["core"] == ["BTC", "ETH"]
+    assert [r["asset"] for r in payload["tradeable"]] == WIDE
+    tiers = {r["asset"]: r["tier"] for r in payload["tradeable"]}
+    assert tiers["BTC"] == "core" and tiers["SOL"] == "satellite"
+    caps = {r["asset"]: r["max_weight"] for r in payload["tradeable"]}
+    assert caps["BTC"] > caps["SOL"]            # a satellite is not a core position
+    assert payload["watchlist_pairs"] == 100    # looked at, not tradeable
+    assert payload["max_assets_per_proposal"] == cfg.risk.max_open_positions
+    assert inputs["universe"] in bp.text and "{{UNIVERSE}}" not in bp.text
+
+
+def test_dossiers_cover_core_and_held_not_the_whole_tradeable_tier(env, monkeypatch):
+    """A dossier is ~300 tokens; ten of them would eat the whole dossier budget."""
+    cfg, jdb, root = env
+    widen(monkeypatch, cfg)
+    assets = root / "knowledge" / "assets"
+    assets.mkdir(parents=True)
+    for a in WIDE:
+        (assets / f"{a}.md").write_text(f"# {a}\n\n## Summary\n{a} summary line\n")
+    jdb.execute("INSERT INTO nav_daily(date_utc, sleeve, nav_usdt, positions_json)"
+                " VALUES ('2026-09-22','b',1000,?)",
+                (json.dumps({"SOL": 4.0, "AVAX": 0.0}),))
+    jdb.commit()
+    _, inputs, *_ = _build(cfg, jdb, root)
+    assert "BTC summary line" in inputs["dossiers"]
+    assert "ETH summary line" in inputs["dossiers"]
+    assert "SOL summary line" in inputs["dossiers"]      # held
+    assert "AVAX summary line" not in inputs["dossiers"]  # zero position
+    assert "LINK summary line" not in inputs["dossiers"]  # tradeable but not held
+
+
+def test_the_limits_block_carries_the_tier_caps_not_a_hundred_names(env, monkeypatch):
+    cfg, jdb, root = env
+    widen(monkeypatch, cfg)
+    _, _, limits, _ = _build(cfg, jdb, root)
+    parsed = yaml.safe_load(limits)
+    assert parsed["universe"]["core"] == ["BTC", "ETH"]
+    assert parsed["universe"]["tradeable_assets"] == len(WIDE)
+    assert "assets" not in parsed["universe"]        # not a ten-line list of names
+    assert parsed["tier_caps"]["satellite"] == cfg.risk.tier_caps.satellite
+    assert parsed["max_open_positions"] == cfg.risk.max_open_positions
+
+
+def test_the_decide_floor_is_untouched_by_the_wide_universe():
+    """U3 widens what a model may say, never who is allowed to say it."""
+    from runs.llm.types import MIN_TIER_FLOOR, ModelRef, chain_for
+
+    assert MIN_TIER_FLOOR["decide"] == 4 and MIN_TIER_FLOOR["validate"] == 3
+    local = ModelRef("local", "ollama", "llama3.1:8b", 4)
+    assert chain_for("decide", [local], min_tier=1, allow_local=True) == []

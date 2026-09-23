@@ -56,8 +56,12 @@ class FakeApi:
 def test_resume_clears_the_lock_reanchors_and_deletes_pair_locks(env):
     cfg, root, journal = env
     _trip(cfg, root)
+    # The third pair is deliberately one the universe snapshot does not carry — under a
+    # wide universe "a pair this bot does not trade" can no longer be spelled SOL/USDT.
+    foreign = "NOTAPAIR/USDT"
+    assert foreign not in cfg.universe.pairs
     api = FakeApi(locks=[{"id": 4, "pair": "BTC/USDT"}, {"id": 5, "pair": "ETH/USDT"},
-                         {"id": 6, "pair": "SOL/USDT"}])
+                         {"id": 6, "pair": foreign}])
     report = risk_resume.resume(cfg, "a", ACTOR, api=api, root=root,
                                 now=NOW + timedelta(hours=13))
     assert report.resumed and report.anchor_nav == pytest.approx(8_900.0)

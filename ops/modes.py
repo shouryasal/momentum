@@ -1,4 +1,24 @@
-"""The per-sleeve mode state machine: TEST ↔ ARMING ↔ LIVE_* ↔ DISARMING.
+"""The per-sleeve mode state machine: TEST ↔ ARMING ↔ DEMO_* / LIVE_* ↔ DISARMING.
+
+Four destinations a human can ask for, in exactly two families:
+
+======================  ==========================  ========================================
+state                   venue                       what it means
+======================  ==========================  ========================================
+``TEST``                none                        dry run; the container holds no key
+``DEMO_PROPOSE``        ``demo-api.binance.com``    real orders, fake money, human approves
+``DEMO_EXECUTE``        ``demo-api.binance.com``    real orders, fake money, no approval
+``LIVE_PROPOSE``        ``api.binance.com``         real money, human approves each proposal
+``LIVE_EXECUTE``        ``api.binance.com``         real money, no per-proposal approval
+======================  ==========================  ========================================
+
+A mode is bound to **one** venue in code (``ops.lib.exchange_endpoints.MODE_VENUE``), and
+the preflight's ``venue_binding`` check refuses a credential that authenticates anywhere
+else. Demo is not a stepping stone *inside* the live ladder: ``ALLOWED`` has no
+``DEMO_* -> LIVE_*`` edge, because the live gates are measured on a TEST run and a demo run
+is not one. Demo is also never "live": ``TransitionRequest.is_live`` stays false for it,
+its runs are filed under the ``demo`` mode word, and its P&L is therefore never mixed into
+live performance.
 
 This is the only code in the repo that can put a sleeve into a live state, and it cannot
 be reached by an automated run: :func:`transition` requires a :class:`HumanActor` (built
@@ -64,19 +84,40 @@ CONFIRM_DERISK = "BACK TO PROPOSE"
 CONFIRM_LEAVE_POSITIONS = "LEAVE POSITIONS UNMANAGED"
 CONFIRM_RESET = "RESET"
 
+#: Demo's phrases are deliberately *different words*, not the live ones with a suffix: a
+#: phrase typed from muscle memory must never move a sleeve to the wrong venue, in either
+#: direction. ``modes.demo.confirm_phrase`` overrides the template when config supplies it.
+DEMO_CONFIRM_TEMPLATE = "GO DEMO {sleeve} {seed} USDT"
+CONFIRM_DEMO_EXECUTE = "EXECUTE ON DEMO WITHOUT APPROVAL"
+CONFIRM_DEMO_DERISK = "BACK TO DEMO PROPOSE"
+
 STEPS: tuple[str, ...] = (
     "lock", "preflight", "mark_transient", "stopentry", "flatten", "close_run",
     "write_mode", "regen", "compose", "verify", "reconcile", "open_run",
 )
 
 #: from -> allowed targets. ARMING/DISARMING are entered by this module, never requested.
+#:
+#: Demo sits beside TEST rather than on the way to live: you cannot walk a sleeve from a
+#: demo state straight into a live one, because the live gates (90 clean test days, the
+#: propose track record, the breach-free streak) are measured on the TEST run and a demo
+#: run is not one. Going live from demo therefore means dropping to TEST first, which
+#: re-runs the whole live preflight from a known state. Every demo state can always go
+#: back to TEST — the way out is never gated.
 ALLOWED: dict[str, frozenset[str]] = {
-    "TEST": frozenset({"TEST", "LIVE_PROPOSE", "LIVE_EXECUTE"}),
+    "TEST": frozenset({"TEST", "DEMO_PROPOSE", "DEMO_EXECUTE", "LIVE_PROPOSE", "LIVE_EXECUTE"}),
+    "DEMO_PROPOSE": frozenset({"DEMO_EXECUTE", "TEST"}),
+    "DEMO_EXECUTE": frozenset({"DEMO_PROPOSE", "TEST"}),
     "LIVE_PROPOSE": frozenset({"LIVE_EXECUTE", "TEST"}),
     "LIVE_EXECUTE": frozenset({"LIVE_PROPOSE", "TEST"}),
     "ARMING": frozenset({"TEST"}),
     "DISARMING": frozenset({"TEST"}),
 }
+
+#: Every state a human may ask for. ARMING/DISARMING are this module's own bookkeeping.
+TARGETS: tuple[str, ...] = (
+    "TEST", "DEMO_PROPOSE", "DEMO_EXECUTE", "LIVE_PROPOSE", "LIVE_EXECUTE",
+)
 
 
 class ModeError(Exception):
@@ -138,7 +179,26 @@ class TransitionRequest:
 
     @property
     def is_live(self) -> bool:
+        """Real money. Stays **false** for the demo states, by construction."""
         return self.target in ms.LIVE_MODES
+
+    @property
+    def is_demo(self) -> bool:
+        return self.target in ms.DEMO_MODES
+
+    @property
+    def is_venue_bound(self) -> bool:
+        """This target reaches a Binance venue, so it needs a key, a preflight that proves
+        the key belongs to that venue, a non-dry-run container and a reconcile."""
+        return self.target in ms.VENUE_MODES
+
+    @property
+    def venue(self) -> Any:
+        """The one venue this target may reach, or ``None`` for TEST. Raises
+        ``VenueBindingError`` for a mode nobody has bound to a venue."""
+        from ops.lib.exchange_endpoints import venue_for_mode
+
+        return venue_for_mode(self.target)
 
 
 @dataclass(frozen=True)
@@ -266,20 +326,46 @@ def _fmt_seed(seed: float) -> str:
     return f"{seed:g}"
 
 
+def demo_confirm_template(cfg: EarnConfig) -> str:
+    """``modes.demo.confirm_phrase`` when config has grown one, else the module default.
+
+    ``config/earn.yaml``'s ``modes.demo:`` block is owned by another package
+    (``docs/design/demo-mode.md`` §6.1). Reading it through ``getattr`` means the mode
+    machine is correct with or without that block, and never silently falls back to the
+    *live* phrase — which is the one substitution that must never happen.
+    """
+    demo = getattr(cfg.modes, "demo", None)
+    phrase = getattr(demo, "confirm_phrase", None) if demo is not None else None
+    return str(phrase) if phrase else DEMO_CONFIRM_TEMPLATE
+
+
 def confirm_phrase_for(
     cfg: EarnConfig, *, sleeve: str, from_state: str, target: str, seed_usdt: float,
     flatten: bool = True,
 ) -> str:
-    """The exact phrase the human must type for this particular transition."""
+    """The exact phrase the human must type for this particular transition.
+
+    Demo and live have disjoint phrases on purpose: typing ``GO LIVE A 1000 USDT`` can
+    never arm a demo sleeve and ``GO DEMO A 1000 USDT`` can never arm a live one, so the
+    typed confirmation is a second, independent statement of which venue was meant.
+    """
     if target in ms.LIVE_MODES and from_state not in ms.LIVE_MODES:
         return cfg.modes.live.confirm_phrase.format(
+            sleeve=sleeve.upper(), seed=_fmt_seed(seed_usdt)
+        )
+    if target in ms.DEMO_MODES and from_state not in ms.DEMO_MODES:
+        return demo_confirm_template(cfg).format(
             sleeve=sleeve.upper(), seed=_fmt_seed(seed_usdt)
         )
     if target == "LIVE_EXECUTE" and from_state == "LIVE_PROPOSE":
         return CONFIRM_EXECUTE
     if target == "LIVE_PROPOSE" and from_state == "LIVE_EXECUTE":
         return CONFIRM_DERISK
-    if target == "TEST" and from_state in ms.LIVE_MODES:
+    if target == "DEMO_EXECUTE" and from_state == "DEMO_PROPOSE":
+        return CONFIRM_DEMO_EXECUTE
+    if target == "DEMO_PROPOSE" and from_state == "DEMO_EXECUTE":
+        return CONFIRM_DEMO_DERISK
+    if target == "TEST" and from_state in ms.VENUE_MODES:
         return "" if flatten else CONFIRM_LEAVE_POSITIONS
     if target == "TEST" and from_state == "TEST":
         return CONFIRM_RESET
@@ -292,6 +378,22 @@ def check_confirmation(expected: str, typed: str) -> None:
 
 
 # --------------------------------------------------------------------------- run ids
+
+
+def mode_word_for(target: str) -> str:
+    """``test`` | ``demo`` | ``live`` — the coarse word a ``sleeve_runs`` row is filed under.
+
+    Demo gets its own word rather than borrowing ``live``. Everything downstream that
+    separates paper from money — NAV rows, the monthly cost calibration, the weekly
+    report, ``mode_view``'s journal evidence — keys on this string, so sharing it with
+    live is exactly how demo P&L would end up presented as live performance.
+    """
+    key = str(target).upper()
+    if key in ms.LIVE_MODES:
+        return "live"
+    if key in ms.DEMO_MODES:
+        return "demo"
+    return "test"
 
 
 def new_run_id(
@@ -451,7 +553,7 @@ def transition(  # noqa: C901 - a 12-step procedure reads better in one place
     if sleeve not in paths.SLEEVES:
         raise ModeError(f"unknown sleeve {request.sleeve!r}")
     target = request.target.upper()
-    if target not in ("TEST", "LIVE_PROPOSE", "LIVE_EXECUTE"):
+    if target not in TARGETS:
         raise ModeError(f"unknown target state {request.target!r}")
 
     conn = deps.jdb
@@ -474,9 +576,9 @@ def transition(  # noqa: C901 - a 12-step procedure reads better in one place
         check_confirmation(expected, request.confirm_phrase)
 
         submode = request.submode
-        if target == "LIVE_PROPOSE":
+        if target in ("LIVE_PROPOSE", "DEMO_PROPOSE"):
             submode = "propose"
-        elif target == "LIVE_EXECUTE":
+        elif target in ("LIVE_EXECUTE", "DEMO_EXECUTE"):
             submode = "execute"
         else:
             submode = None
@@ -500,12 +602,13 @@ def transition(  # noqa: C901 - a 12-step procedure reads better in one place
         steps = _Steps(conn, tid, deps)
         steps.add("lock", "ok", "ops lock held")
 
-        transient = "ARMING" if target in ms.LIVE_MODES else "DISARMING"
+        transient = "ARMING" if target in ms.VENUE_MODES else "DISARMING"
         previous_payload = _read_mode_file(deps)
         run_id = ""
         try:
-            # 2 — preflight must still pass
-            if target in ms.LIVE_MODES:
+            # 2 — preflight must still pass. Demo arms through its OWN preflight: the same
+            # safety items plus the venue binding, without the live-only track record.
+            if target in ms.VENUE_MODES:
                 if deps.preflight is None:
                     raise ModeTransitionError("no preflight runner configured")
                 result = deps.preflight(result.request)
@@ -532,8 +635,11 @@ def transition(  # noqa: C901 - a 12-step procedure reads better in one place
             cancelled = _cancel_entry_orders(bot)
             steps.add("stopentry", "ok", f"entries stopped, {cancelled} open order(s) cancelled")
 
-            # 5 — flatten when leaving live
-            if target == "TEST" and from_state in ms.LIVE_MODES and flatten:
+            # 5 — flatten when leaving a venue. Demo positions are real orders on a real
+            # book: going back to TEST without flattening would orphan them exactly as it
+            # would live ones, because the dry-run container that replaces this one has no
+            # knowledge of them at all.
+            if target == "TEST" and from_state in ms.VENUE_MODES and flatten:
                 left = _flatten(bot, deps)
                 steps.add(
                     "flatten", "ok" if not left else "warn",
@@ -558,8 +664,10 @@ def transition(  # noqa: C901 - a 12-step procedure reads better in one place
             else:
                 steps.add("close_run", "skipped", "no active run")
 
-            # 7 — the new signed mode file
-            mode_word = "live" if target in ms.LIVE_MODES else "test"
+            # 7 — the new signed mode file. The run's ``mode`` word is its own: a demo run
+            # is never filed as ``live``, so no report, NAV row or TCA calibration can
+            # present demo fills as live performance.
+            mode_word = mode_word_for(target)
             run_id = new_run_id(conn, sleeve, mode_word, deps.now())
             state = _write_mode(
                 cfg, deps, state, sleeve, target, submode, run_id, seed, actor, tid
@@ -584,8 +692,10 @@ def transition(  # noqa: C901 - a 12-step procedure reads better in one place
             detail = _verify_bot(cfg, deps, sleeve, target, run_id, seed)
             steps.add("verify", "ok", detail)
 
-            # 11 — ledger vs exchange
-            if target in ms.LIVE_MODES and deps.reconcile is not None:
+            # 11 — ledger vs exchange. Demo has a real book, so it reconciles too; that is
+            # also what takes the balance baseline a demo balance RESET would otherwise
+            # silently invalidate (docs/design/demo-mode.md §8).
+            if target in ms.VENUE_MODES and deps.reconcile is not None:
                 status, recon_detail = deps.reconcile(sleeve, run_id)
                 if status not in ("ok", "warn"):
                     raise ModeTransitionError(f"reconciliation {status}: {recon_detail}")
@@ -719,27 +829,92 @@ def _verify_bot(
 
     conf = bot.show_config()
     live = target in ms.LIVE_MODES
+    demo = target in ms.DEMO_MODES
+    venue_bound = live or demo
+    mode_word = mode_word_for(target)
     problems: list[str] = []
-    if bool(conf.get("dry_run")) is live:
+    # Demo and live are both real exchanges, so both are ``dry_run: false``; freqtrade
+    # refuses ``demo_trading`` together with ``dry_run`` outright (config_validation.py:417).
+    if bool(conf.get("dry_run")) is venue_bound:
         problems.append(f"dry_run={conf.get('dry_run')} for target {target}")
     expected_strategy = getattr(cfg.sleeves, sleeve).strategy
     if conf.get("strategy") not in (None, expected_strategy):
         problems.append(f"strategy {conf.get('strategy')} != {expected_strategy}")
-    expected_name = f"earn-{sleeve}-{'live' if live else 'test'}"
+    expected_name = f"earn-{sleeve}-{mode_word}"
     if conf.get("bot_name") not in (None, expected_name):
-        problems.append(f"bot_name {conf.get('bot_name')} != {expected_name}")
+        problems.append(
+            f"bot_name {conf.get('bot_name')} != {expected_name} (the mode overlay must "
+            f"name the bot after ops.modes.mode_word_for(target), not after dry-run-ness)"
+        )
     db_url = str(conf.get("db_url") or "")
     if db_url and run_id not in db_url:
         problems.append(f"db_url {db_url} does not belong to run {run_id}")
-    if live:
+    problems.extend(_venue_problems(conf, target))
+    if venue_bound:
+        # Demo's BTC/ETH order types are byte-identical to live, STOP_LOSS_LIMIT and OCO
+        # included (docs/design/demo-mode.md §4a), so the exchange-side stop requirement is
+        # the same requirement on both — there is nothing to relax.
         order_types = conf.get("order_types") or {}
-        if cfg.modes.live.require_stoploss_on_exchange and not order_types.get(
+        if require_stoploss_on_exchange(cfg, target) and not order_types.get(
             "stoploss_on_exchange"
         ):
-            problems.append("stoploss_on_exchange is not enabled on a live bot")
+            problems.append(
+                f"stoploss_on_exchange is not enabled on a {mode_word} bot"
+            )
     if problems:
         raise ModeTransitionError("show_config mismatch: " + "; ".join(problems))
-    return f"show_config verified (dry_run={conf.get('dry_run')}, db {run_id})"
+    return (
+        f"show_config verified (exchange={conf.get('exchange') or 'n/a'}, "
+        f"dry_run={conf.get('dry_run')}, db {run_id})"
+    )
+
+
+def require_stoploss_on_exchange(cfg: EarnConfig, target: str) -> bool:
+    """Is an exchange-side stop mandatory for this target?
+
+    Live reads ``modes.live.require_stoploss_on_exchange``. Demo reads ``modes.demo``'s own
+    flag when config has one and otherwise inherits the live requirement — demo supports
+    exactly the same stop order types, so inheriting is the honest default and silently
+    dropping the requirement on demo would rehearse a book with no resting stop.
+    """
+    if str(target).upper() in ms.DEMO_MODES:
+        demo = getattr(cfg.modes, "demo", None)
+        flag = getattr(demo, "require_stoploss_on_exchange", None) if demo else None
+        if flag is not None:
+            return bool(flag)
+    return bool(cfg.modes.live.require_stoploss_on_exchange)
+
+
+#: What freqtrade 2026.8 renames the exchange to when ``enable_demo_trading`` actually
+#: fired (``freqtrade/exchange/exchange.py:453``). Independent of anything Earn renders:
+#: the bot is reporting what ccxt did, which is why it is worth asserting.
+DEMO_EXCHANGE_NAME = "binance_demo"
+
+
+def _venue_problems(conf: Mapping[str, Any], target: str) -> list[str]:
+    """``/show_config``'s own statement of which Binance the container reached.
+
+    This is the step-10 half of the venue binding, and the only half that is not our own
+    code marking its own homework: freqtrade suffixes the exchange id with ``_demo`` itself
+    once ccxt's ``enable_demo_trading(True)`` has replaced ``urls['api']`` wholesale. A
+    demo sleeve whose bot still calls itself ``binance`` is talking to **production** and
+    must never be declared open.
+    """
+    name = str(conf.get("exchange") or "").strip().lower()
+    if not name:
+        return []
+    key = str(target).upper()
+    if key in ms.DEMO_MODES:
+        if name != DEMO_EXCHANGE_NAME:
+            return [
+                f"exchange is {name!r}, not {DEMO_EXCHANGE_NAME!r} — the bot is NOT on "
+                f"Binance Spot Demo Mode (exchange.demo_trading did not take effect, so "
+                f"it is pointed at production)"
+            ]
+        return []
+    if key in ms.LIVE_MODES and name != "binance":
+        return [f"exchange is {name!r}, not 'binance' — a live sleeve must be on the live venue"]
+    return []
 
 
 def _rollback(
@@ -796,9 +971,29 @@ def recover(cfg: EarnConfig, *, deps: TransitionDeps) -> list[Recovery]:
     A sleeve left in ``ARMING``/``DISARMING`` is stopped from entering, forced back to
     ``TEST`` and its dangling ``mode_transitions`` row is failed. A ``running`` row with a
     settled sleeve is failed too — the process that owned it is gone.
+
+    **Under the ops lock, and the mode file is read inside it.** This function is a
+    read-modify-write of the signed ``var/state/mode.json`` and a full regeneration of
+    ``var/runtime`` — exactly what :func:`transition` does, and :func:`transition` holds
+    the lock for the whole 12 steps. Recover used to take no lock at all, and both are
+    reachable concurrently from one console (``GET /api/mode/recover`` and
+    ``POST /api/mode/transition`` are both sync routes, so Starlette runs them in the
+    anyio threadpool in parallel). Worse, it did its read-modify-write across a blocking
+    ``bot.stopentry()``, so its snapshot was stale by construction: two unsynchronised
+    writers could leave the signed authority and the rendered runtime describing
+    different states while ``transition()`` reported "completed" to the operator.
     """
+    with oplock.acquire("mode.recover", timeout_s=deps.lock_timeout_s,
+                        path=deps.lock_path):
+        return _recover_locked(cfg, deps=deps)
+
+
+def _recover_locked(cfg: EarnConfig, *, deps: TransitionDeps) -> list[Recovery]:
+    """The body of :func:`recover`. Callers must hold the ops lock."""
     out: list[Recovery] = []
     conn = deps.jdb
+    # Inside the lock: a snapshot taken before we waited for our turn may describe a
+    # state another writer has already replaced.
     state = ms.load(deps.mode_path, secret=deps.secret, env=deps.env)
     stuck = [s for s in paths.SLEEVES if state.sleeve(s).state in ms.TRANSIENT_MODES]
     dangling = conn.execute(
@@ -998,11 +1193,16 @@ def sleeve_runs(
 
 __all__ = [
     "ALLOWED",
+    "CONFIRM_DEMO_DERISK",
+    "CONFIRM_DEMO_EXECUTE",
     "CONFIRM_DERISK",
     "CONFIRM_EXECUTE",
     "CONFIRM_LEAVE_POSITIONS",
     "CONFIRM_RESET",
+    "DEMO_CONFIRM_TEMPLATE",
+    "DEMO_EXCHANGE_NAME",
     "STEPS",
+    "TARGETS",
     "BotControl",
     "HumanActor",
     "ModeError",
@@ -1016,10 +1216,13 @@ __all__ = [
     "check_confirmation",
     "close_run",
     "confirm_phrase_for",
+    "demo_confirm_template",
+    "mode_word_for",
     "new_run_id",
     "open_run",
     "recover",
     "reset_test_run",
+    "require_stoploss_on_exchange",
     "run_state_snapshot",
     "sleeve_runs",
     "transition",

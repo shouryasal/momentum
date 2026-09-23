@@ -276,6 +276,7 @@ export const SSE_TOPICS = [
   'job',
   'reconcile',
   'backtest',
+  'claude_auth',
 ] as const;
 
 export type SseTopic = (typeof SSE_TOPICS)[number] | `log:${string}`;

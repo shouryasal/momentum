@@ -21,20 +21,31 @@ import {
   Table,
   Tabs,
   Text,
-  Title,
+  Textarea,
   Tooltip,
 } from '@mantine/core';
 import { IconPlayerPlay, IconRefresh } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useMemo, useState } from 'react';
 
+import { shellKeys } from '@/api';
 import { useApi } from '@/app/ApiContext';
 import { usePageCommands } from '@/app/commandRegistry';
+import { useDetailSelection } from '@/app/detailParam';
 import { useTopicEvents } from '@/app/EventStreamContext';
-import { DataTable, EmptyState, type DataTableColumn } from '@/components';
+import {
+  ConfirmDialog,
+  DataTable,
+  DetailPane,
+  EmptyState,
+  MasterDetail,
+  PageIntro,
+  type DataTableColumn,
+} from '@/components';
 import { formatNumber, formatRelative, formatUsd, formatUtcStamp } from '@/lib/format';
+import { routeBlurb } from '@/routes';
 
-import { RunDrawer } from './components/RunDrawer';
+import { RunDetailBody } from './components/RunDrawer';
 import { TargetsTimeline } from './components/TargetsTimeline';
 import { STATUS_COLOR, decisionKeys, decisionsApi, type PendingApproval, type RunSummary } from './api';
 
@@ -49,7 +60,11 @@ export default function DecisionsPage() {
   const queryClient = useQueryClient();
   const api = useMemo(() => decisionsApi(client), [client]);
   const [days, setDays] = useState('30');
-  const [selected, setSelected] = useState<string | null>(null);
+  // The open row lives in `?detail=run:<id>`, so a refresh, the back button and a pasted
+  // link all land on the same decision.
+  const selection = useDetailSelection('run');
+  const selected = selection.id;
+  const setSelected = selection.open;
   const [tab, setTab] = useState<string | null>('runs');
 
   const windowDays = Number(days);
@@ -71,12 +86,31 @@ export default function DecisionsPage() {
 
   const runNow = useMutation({ mutationFn: () => api.runResearch(), onSuccess: invalidate });
 
+  /**
+   * Approve / reject.
+   *
+   * The queue used to be read-only, so `LIVE_PROPOSE` had no console path at all: the
+   * badge in the header was "a call to action" with nothing behind it. Both keys are
+   * invalidated on success — the page's own `pending` query and the shell's badge.
+   */
+  const decide = useMutation({
+    mutationFn: (vars: { runId: string; decision: 'approve' | 'reject'; note: string }) =>
+      vars.decision === 'approve'
+        ? api.approve(vars.runId, vars.note)
+        : api.reject(vars.runId, vars.note),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: decisionKeys.pending });
+      void queryClient.invalidateQueries({ queryKey: shellKeys.approvals });
+      invalidate();
+    },
+  });
+
   usePageCommands('decisions', [
     {
       id: 'run-research',
-      title: 'Run research now',
-      subtitle: 'Start an off-schedule research run',
-      keywords: ['proposal', 'decide'],
+      title: 'Think about it now',
+      subtitle: 'Make a decision now instead of waiting for the next scheduled one',
+      keywords: ['proposal', 'decide', 'research'],
       run: (ctx) => {
         runNow.mutate();
         ctx.close();
@@ -84,8 +118,8 @@ export default function DecisionsPage() {
     },
     {
       id: 'approvals',
-      title: 'Show the approvals queue',
-      subtitle: 'Proposals waiting on you, with their countdowns',
+      title: 'Show what is waiting on you',
+      subtitle: "Plans the AI has made that need your yes or no, with how long is left",
       run: (ctx) => {
         setTab('approvals');
         ctx.close();
@@ -116,7 +150,7 @@ export default function DecisionsPage() {
       },
       {
         key: 'run_id',
-        header: 'Run',
+        header: 'Reference',
         render: (r) => (
           <Text size="sm" ff="monospace">
             {r.run_id}
@@ -125,7 +159,7 @@ export default function DecisionsPage() {
       },
       {
         key: 'models',
-        header: 'Requested → served',
+        header: 'Model asked for → model that answered',
         render: (r) => {
           const decide = r.stages.find((s) => s.stage === 'decide');
           if (!decide) return <Text size="sm">—</Text>;
@@ -151,7 +185,7 @@ export default function DecisionsPage() {
       },
       {
         key: 'trigger',
-        header: 'Trigger',
+        header: 'Why it ran',
         width: 190,
         render: (r) => (
           <Group gap={4} wrap="nowrap">
@@ -168,7 +202,7 @@ export default function DecisionsPage() {
       },
       {
         key: 'escalated',
-        header: 'Escalated',
+        header: 'Retried on a stronger model',
         width: 100,
         render: (r) =>
           r.escalated ? (
@@ -208,38 +242,56 @@ export default function DecisionsPage() {
   );
 
   return (
-    <Stack gap="md">
-      <Group justify="space-between" align="flex-end">
-        <div>
-          <Title order={2}>Decisions</Title>
-          <Text c="dimmed" size="sm">
-            What was asked, which model actually answered, and what it proposed. The gate decides
-            whether a proposal may be executed — this page only records how it was reached.
-          </Text>
-        </div>
-        <Group gap="sm">
-          <Select data={WINDOWS} value={days} onChange={(v) => setDays(v ?? '30')} w={160} />
-          <Button
-            leftSection={runNow.isPending ? <Loader size={14} /> : <IconPlayerPlay size={16} />}
-            onClick={() => runNow.mutate()}
-            disabled={runNow.isPending}
+    <MasterDetail
+      detail={
+        selected ? (
+          <DetailPane
+            title={`Decision of ${formatRelative(
+              runs.data?.runs.find((r) => r.run_id === selected)?.started_utc ?? null,
+            )}`}
+            subtitle="What was noticed, what Claude concluded, and what the safety check did about it."
+            rawId={selected}
+            onClose={selection.close}
           >
-            Run research now
-          </Button>
-          <Tooltip label="Refresh" withArrow>
-            <ActionIcon variant="default" size="lg" aria-label="refresh" onClick={invalidate}>
-              <IconRefresh size={18} />
-            </ActionIcon>
-          </Tooltip>
-        </Group>
-      </Group>
+            <RunDetailBody runId={selected} />
+          </DetailPane>
+        ) : null
+      }
+    >
+    <Stack gap="md">
+      <PageIntro
+        title="Decisions"
+        blurb={routeBlurb('decisions')}
+        actions={
+          <>
+            <Select data={WINDOWS} value={days} onChange={(v) => setDays(v ?? '30')} w={160} />
+            <Button
+              leftSection={runNow.isPending ? <Loader size={14} /> : <IconPlayerPlay size={16} />}
+              onClick={() => runNow.mutate()}
+              disabled={runNow.isPending}
+            >
+              Think about it now
+            </Button>
+            <Tooltip label="Refresh" withArrow>
+              <ActionIcon variant="default" size="lg" aria-label="refresh" onClick={invalidate}>
+                <IconRefresh size={18} />
+              </ActionIcon>
+            </Tooltip>
+          </>
+        }
+      >
+        <Text size="xs" c="dimmed">
+          Click any row to open the whole story beside it — nothing here can place an order on
+          its own.
+        </Text>
+      </PageIntro>
 
       <Tabs value={tab} onChange={setTab} keepMounted={false}>
         <Tabs.List>
-          <Tabs.Tab value="runs">Research runs</Tabs.Tab>
-          <Tabs.Tab value="proposals">Proposals</Tabs.Tab>
+          <Tabs.Tab value="runs">Every decision</Tabs.Tab>
+          <Tabs.Tab value="proposals">What it planned to hold</Tabs.Tab>
           <Tabs.Tab value="approvals">
-            Approvals
+            Waiting on you
             {pending.data?.pending.length ? (
               <Badge ml={6} size="xs" color="orange" circle>
                 {pending.data.pending.length}
@@ -255,8 +307,8 @@ export default function DecisionsPage() {
             rowKey={(r) => r.run_id}
             loading={runs.isLoading}
             onRowClick={(r) => setSelected(r.run_id)}
-            emptyTitle="No research runs in this window"
-            emptyDescription="Runs fire at the configured slots and whenever a validated signal passes the guards."
+            emptyTitle="No decisions in this window"
+            emptyDescription="The system thinks at the scheduled times, and whenever an idea it spotted survives a second look."
             maxHeight={640}
           />
         </Tabs.Panel>
@@ -270,12 +322,19 @@ export default function DecisionsPage() {
         </Tabs.Panel>
 
         <Tabs.Panel value="approvals" pt="sm">
-          <ApprovalsQueue rows={pending.data?.pending ?? []} loading={pending.isLoading} onSelect={setSelected} />
+          <ApprovalsQueue
+            rows={pending.data?.pending ?? []}
+            loading={pending.isLoading}
+            onSelect={setSelected}
+            onDecide={(runId, decision, note) =>
+              decide.mutateAsync({ runId, decision, note })
+            }
+            deciding={decide.isPending}
+          />
         </Tabs.Panel>
       </Tabs>
-
-      <RunDrawer runId={selected} onClose={() => setSelected(null)} />
     </Stack>
+    </MasterDetail>
   );
 }
 
@@ -283,11 +342,21 @@ function ApprovalsQueue({
   rows,
   loading,
   onSelect,
+  onDecide,
+  deciding,
 }: {
   rows: PendingApproval[];
   loading: boolean;
   onSelect: (runId: string) => void;
+  onDecide: (runId: string, decision: 'approve' | 'reject', note: string) => Promise<unknown>;
+  deciding: boolean;
 }) {
+  const [pendingDecision, setPendingDecision] = useState<{
+    runId: string;
+    decision: 'approve' | 'reject';
+  } | null>(null);
+  const [note, setNote] = useState('');
+
   if (loading) return <Loader />;
   if (rows.length === 0) {
     return (
@@ -298,7 +367,8 @@ function ApprovalsQueue({
     );
   }
   return (
-    <Table striped highlightOnHover withTableBorder>
+    <>
+      <Table striped highlightOnHover withTableBorder>
       <Table.Thead>
         <Table.Tr>
           <Table.Th>Run</Table.Th>
@@ -306,6 +376,7 @@ function ApprovalsQueue({
           <Table.Th>Module</Table.Th>
           <Table.Th>Confidence</Table.Th>
           <Table.Th>Expires in</Table.Th>
+          <Table.Th>Decision</Table.Th>
         </Table.Tr>
       </Table.Thead>
       <Table.Tbody>
@@ -337,10 +408,72 @@ function ApprovalsQueue({
                   <Progress value={Math.min(100, (left / (6 * 3600)) * 100)} size="xs" />
                 </Stack>
               </Table.Td>
+              <Table.Td onClick={(event) => event.stopPropagation()}>
+                <Group gap="xs" wrap="nowrap">
+                  <Button
+                    size="compact-xs"
+                    disabled={deciding || left <= 0}
+                    onClick={() =>
+                      setPendingDecision({ runId: row.run_id, decision: 'approve' })
+                    }
+                    data-testid={`approve-${row.run_id}`}
+                  >
+                    Approve
+                  </Button>
+                  <Button
+                    size="compact-xs"
+                    variant="default"
+                    disabled={deciding}
+                    onClick={() =>
+                      setPendingDecision({ runId: row.run_id, decision: 'reject' })
+                    }
+                    data-testid={`reject-${row.run_id}`}
+                  >
+                    Reject
+                  </Button>
+                </Group>
+              </Table.Td>
             </Table.Tr>
           );
         })}
       </Table.Tbody>
-    </Table>
+      </Table>
+
+      <ConfirmDialog
+        opened={pendingDecision !== null}
+        onClose={() => {
+          setPendingDecision(null);
+          setNote('');
+        }}
+        title={
+          pendingDecision?.decision === 'approve'
+            ? `Approve ${pendingDecision.runId}?`
+            : `Reject ${pendingDecision?.runId ?? ''}?`
+        }
+        confirmLabel={pendingDecision?.decision === 'approve' ? 'Approve' : 'Reject'}
+        danger={pendingDecision?.decision === 'approve'}
+        description={
+          pendingDecision?.decision === 'approve'
+            ? 'Writes an HMAC-signed approval file the bot verifies before it acts on this proposal. It expires with the proposal.'
+            : 'Removes any approval file for this run. The proposal is recorded rejected and the bot will not act on it.'
+        }
+        onConfirm={async () => {
+          if (!pendingDecision) return;
+          await onDecide(pendingDecision.runId, pendingDecision.decision, note);
+          setPendingDecision(null);
+          setNote('');
+        }}
+      >
+        <Textarea
+          label="Note"
+          description="Why, for the audit trail. Optional."
+          value={note}
+          onChange={(event) => setNote(event.currentTarget.value)}
+          autosize
+          minRows={2}
+          data-testid="approval-note"
+        />
+      </ConfirmDialog>
+    </>
   );
 }

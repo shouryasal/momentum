@@ -166,7 +166,7 @@ export default function SelfImprovementPage() {
           matrix={autonomy.data}
           saving={saveAutonomy.isPending}
           error={saveAutonomy.error ? String(saveAutonomy.error) : null}
-          onSave={(body) => saveAutonomy.mutate(body)}
+          onSave={(body) => saveAutonomy.mutateAsync(body)}
         />
       ) : null}
 

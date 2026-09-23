@@ -8,6 +8,13 @@
 # What it guarantees, in this order:
 #   1. the checkout is on ext4 — a /mnt/c (drvfs/9p) copy corrupts SQLite WAL and git
 #      worktrees, which is exactly how this project is edited from Windows;
+#   1b. the distro timezone is the configured one (Asia/Dubai). Every schedule in this
+#      repo is Gulf time and ops/healthcheck.py forces Gulf before croniter, so a stock
+#      UTC host makes the watchdog expect every daily job four hours early: it reruns
+#      them detached and alerts, then the real cron fire runs them again. The generated
+#      crontab now carries CRON_TZ so the SCHEDULE is right regardless, but logs, the
+#      console and every `date` on this box still read the distro clock, so this is
+#      blocking;
 #   2. every runtime directory exists and is owned by the invoking user — a missing
 #      logs/ or ops/locks/ used to make EVERY cron line fail before its job started,
 #      silently, because MAILTO was empty. They are created under $EARN_STATE_ROOT (the
@@ -46,7 +53,7 @@ for arg in "$@"; do
   case "$arg" in
     --check)      CHECK_ONLY=1 ;;
     --force-ext4) FORCE_EXT4=1 ;;
-    -h|--help)    sed -n '2,26p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)    sed -n '2,33p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -75,6 +82,54 @@ case "$FSTYPE" in
     ;;
   *) warn "could not determine the filesystem of $REPO_ROOT (findmnt said '$FSTYPE')" ;;
 esac
+
+# ---------------------------------------------------------------- 1b. timezone
+#
+# ops/crontab requires the Gulf clock and, until now, NOTHING in the documented setup
+# either set it or checked it: the requirement lived in a comment in the generated file
+# and in one prose aside in CLAUDE.md, while `Environment=TZ=Asia/Dubai` in the systemd
+# units sets a process environment and pins no schedule at all — a guard that only looks
+# like one. cron and any systemd timer evaluate their expressions in the distro
+# timezone, and ops/healthcheck.py forces Gulf before croniter, so a UTC host makes the
+# watchdog expect nav_job/backup/maintenance/review/daily_review/research four hours
+# early, rerun each one detached with an alert, and then run it again when cron really
+# fires. Blocking, because it is silent and it duplicates LLM spend every single day.
+
+step "1b. timezone"
+
+# config/earn.yaml meta.display_timezone is the single source; the literal is only the
+# answer for a checkout with no venv yet (ops/gen_ops_files.py reads the same key).
+configured_tz() {
+  local py="$REPO_ROOT/.venv/bin/python"
+  if [ -x "$py" ] && "$py" -c 'from ops.config import load_config
+print(load_config().meta.display_timezone)' 2>/dev/null; then
+    return 0
+  fi
+  echo "Asia/Dubai"
+}
+
+host_tz() {
+  local tz=""
+  tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  if [ -z "$tz" ] && [ -L /etc/localtime ]; then
+    tz="$(readlink -f /etc/localtime | sed 's#.*/zoneinfo/##')"
+  fi
+  printf '%s' "$tz"
+}
+
+WANT_TZ="$(configured_tz)"
+WANT_TZ="${WANT_TZ:-Asia/Dubai}"
+HOST_TZ="$(host_tz)"
+if [ -z "$HOST_TZ" ]; then
+  warn "could not read the distro timezone (no timedatectl, no /etc/localtime symlink)"
+  warn "  it must be $WANT_TZ — every schedule in this repo is Gulf time"
+elif [ "$HOST_TZ" = "$WANT_TZ" ]; then
+  ok "distro timezone is $HOST_TZ"
+else
+  fail "distro timezone is '$HOST_TZ', config/earn.yaml meta.display_timezone is '$WANT_TZ'."
+  fail "  Fix it with:  sudo timedatectl set-timezone $WANT_TZ"
+  fail "  (then: .venv/bin/python -m ops.gen_ops_files --install --yes)"
+fi
 
 # ---------------------------------------------------------------- 2. directories
 

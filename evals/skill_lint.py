@@ -11,18 +11,29 @@ frontmatter  ``name`` matches the directory, ``description`` is at least
              :data:`MIN_DESCRIPTION` characters, ``allowed-tools`` is a subset of
              :data:`ALLOWED_TOOLS`, no ``WebFetch``/``WebSearch``, no wildcard ``Bash``
 shadowing    the name may not collide with another skill or with a tool name
-tests        a skill must ship ``tests/test_*.py``
+tests        a skill must ship ``tests/test_*.py``, **and every one of them is linted**
+             (the wider ``profile="tests"`` rule set)
 scripts      AST denylist: ``subprocess``, ``socket``, ``httpx``/``requests``/``urllib``,
              ``os.system``/``os.popen``, ``eval``/``exec``/``compile``/``__import__``, and
              writes to a literal path outside ``knowledge/`` or ``reports/``
+evals        ``evals/cases.yaml``'s ``run:`` targets must resolve *inside* the skill folder
 
 ``lint_skill()`` returns every finding rather than the first, so the UI can show the whole
 list. ``ok`` is "no finding of severity ``error``".
+
+Why ``tests/**`` and ``evals/cases.yaml`` are in here
+-----------------------------------------------------
+Both are **tier 1** — a review session may write them — and both are **executed**: the
+skill's pytest suite by :func:`evals.skill_eval.run_tests` and the Test button, a case's
+``run:`` script by :func:`evals.skill_eval.run_case`. The lint used to walk ``scripts/``
+only, so the two files a model could actually write were the two nobody inspected. That is
+the write half of the containment story; :mod:`evals.skill_eval` owns the execute half.
 """
 
 from __future__ import annotations
 
 import ast
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,10 +58,36 @@ BANNED_MODULES = frozenset({
     "subprocess", "socket", "httpx", "requests", "urllib", "http", "ftplib", "telnetlib",
     "smtplib", "asyncio", "multiprocessing", "ctypes", "pty", "shutil",
 })
+
+#: The tests/ profile. A skill's pytest suite legitimately shells out to the skill's own
+#: script and copies fixtures around, so ``subprocess``/``shutil`` are allowed there — but
+#: reaching the network, loading code at runtime and poking at the process table are not,
+#: in either profile.
+BANNED_MODULES_TESTS = BANNED_MODULES - {"subprocess", "shutil", "asyncio",
+                                         "multiprocessing"}
 BANNED_CALLS = frozenset({"eval", "exec", "compile", "__import__", "breakpoint"})
 BANNED_ATTR_CALLS = frozenset({"system", "popen", "execv", "execve", "spawnv", "fork"})
+
+#: ``module.func`` pairs that destroy or relocate a file. Judged by their *first argument*
+#: against the same knowledge/ + reports/ allowlist as a write — ``os.remove`` was not a
+#: "write" by any of the old rules, which is what made deleting the kill switch invisible.
+DESTRUCTIVE_FUNCS = frozenset({
+    ("os", "remove"), ("os", "unlink"), ("os", "rmdir"), ("os", "removedirs"),
+    ("os", "rename"), ("os", "replace"), ("os", "truncate"),
+    ("shutil", "rmtree"), ("shutil", "move"), ("shutil", "copy"), ("shutil", "copy2"),
+})
 WRITE_METHODS = frozenset({"write_text", "write_bytes", "mkdir", "touch", "unlink",
                            "rename", "replace"})
+
+#: Literals that name something a skill has no business naming, in a script or a test:
+#: the secret files, the signed state, the runtime overlays and the kill switch. The
+#: demonstrated payloads were exactly this shape — ``open('.../.env').read()`` and
+#: ``os.remove('.../ops/killdir/KILL')`` — and neither the frontmatter checks nor the
+#: write-destination check saw them, because one is a *read* and the other a *delete*.
+PROTECTED_LITERAL_RE = re.compile(
+    r"(^|[/\\])\.env($|[./\\])|var/state|var/runtime|\.credentials|killdir"
+    r"|config/earn\.yaml|\.claude/(settings\.json|hooks)|/etc/(passwd|shadow|sudoers)",
+    re.IGNORECASE)
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,48}$")
 TOOL_NAMES = frozenset({"read", "write", "edit", "bash", "glob", "grep", "skill", "task",
@@ -189,24 +226,37 @@ def _write_target_ok(raw: str) -> bool:
     return any(cleaned == r or cleaned.startswith(r + "/") for r in ALLOWED_WRITE_ROOTS)
 
 
-def lint_script(path: Path, rel: str) -> list[Finding]:
-    """AST denylist over one script. A syntax error is itself a finding."""
+def lint_script(path: Path, rel: str, *, profile: str = "scripts") -> list[Finding]:
+    """AST denylist over one script. A syntax error is itself a finding.
+
+    ``profile="tests"`` is the slightly wider rule set a skill's own pytest suite needs
+    (see :data:`BANNED_MODULES_TESTS`). Both profiles refuse to let a file *name* a
+    protected path (:data:`PROTECTED_LITERAL_RE`) — the two demonstrated payloads were a
+    read of ``.env`` and a delete of the kill switch, neither of which the
+    write-destination check can see.
+    """
     findings: list[Finding] = []
+    banned = BANNED_MODULES_TESTS if profile == "tests" else BANNED_MODULES
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (SyntaxError, UnicodeDecodeError) as exc:
         return [Finding("script.syntax", f"cannot parse: {exc}", rel)]
 
     for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if PROTECTED_LITERAL_RE.search(node.value):
+                findings.append(Finding(
+                    "script.protected_path",
+                    f"names the protected path {node.value!r}", rel))
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".")[0]
-                if root in BANNED_MODULES:
+                if root in banned:
                     findings.append(Finding(
                         "script.import", f"banned import '{alias.name}'", rel))
         elif isinstance(node, ast.ImportFrom):
             root = (node.module or "").split(".")[0]
-            if root in BANNED_MODULES:
+            if root in banned:
                 findings.append(Finding(
                     "script.import", f"banned import '{node.module}'", rel))
         elif isinstance(node, ast.Call):
@@ -214,9 +264,12 @@ def lint_script(path: Path, rel: str) -> list[Finding]:
             if isinstance(func, ast.Name) and func.id in BANNED_CALLS:
                 findings.append(Finding("script.call", f"banned call '{func.id}()'", rel))
             elif isinstance(func, ast.Attribute):
+                owner = func.value.id if isinstance(func.value, ast.Name) else ""
                 if func.attr in BANNED_ATTR_CALLS:
                     findings.append(Finding(
                         "script.call", f"banned call '.{func.attr}()'", rel))
+                elif (owner, func.attr) in DESTRUCTIVE_FUNCS:
+                    findings.extend(_check_write(node, rel, receiver=None))
                 elif func.attr in WRITE_METHODS:
                     findings.extend(_check_write(node, rel, receiver=func.value))
             elif isinstance(func, ast.Name) and func.id == "open":
@@ -263,6 +316,52 @@ def _path_literal(node: ast.AST) -> str | None:
     return None
 
 
+# --------------------------------------------------------------------------- eval cases
+
+
+def lint_cases(skill_dir: Path | str) -> list[Finding]:
+    """``evals/cases.yaml``: every ``run:`` must stay inside the skill folder.
+
+    This file was read by the eval runner, written by the model and inspected by nobody —
+    the string ``cases`` did not appear in this module at all. ``run: ../../../ops/x.py``,
+    or any absolute path, made it the quieter of the two remote-code-execution paths. The
+    containment rule itself lives in :func:`evals.skill_eval.resolve_case_script`, so the
+    lint and the runner cannot drift; a *missing* script is a warning (a case may name a
+    script the same change is still writing), an **escape** is an error.
+    """
+    from evals.skill_eval import CASES_FILES, resolve_case_script
+
+    d = Path(skill_dir)
+    out: list[Finding] = []
+    for rel in CASES_FILES:
+        p = d / rel
+        if not p.is_file():
+            continue
+        where = f"{d.name}/{rel}"
+        try:
+            raw = p.read_text(encoding="utf-8")
+            data = json.loads(raw) if p.suffix == ".json" else yaml.safe_load(raw)
+        except (OSError, UnicodeDecodeError, ValueError, yaml.YAMLError) as exc:
+            out.append(Finding("cases.unreadable", f"cannot parse: {exc}", where))
+            continue
+        if isinstance(data, dict):
+            data = data.get("cases") or []
+        if not isinstance(data, list):
+            out.append(Finding("cases.shape", "cases must be a list", where))
+            continue
+        for case in data:
+            if not isinstance(case, dict) or not case.get("run"):
+                continue
+            script = str(case.get("run"))
+            target, problem = resolve_case_script(d, script)
+            if target is not None:
+                continue
+            severity = "warn" if problem.endswith("not found") else "error"
+            out.append(Finding("cases.run", f"{case.get('id') or 'case'}: {problem}",
+                               where, severity=severity))
+    return out
+
+
 # --------------------------------------------------------------------------- entry point
 
 
@@ -302,6 +401,14 @@ def lint_skill(skill_dir: Path | str, *, existing_names: set[str] | None = None,
     if scripts_dir.is_dir():
         for script in sorted(scripts_dir.rglob("*.py")):
             findings.extend(lint_script(script, f"{d.name}/{script.relative_to(d).as_posix()}"))
+    # tests/** is tier 1 and it is *executed*. Linting it is the only thing standing
+    # between "a session may write this file" and "something runs it".
+    tests_dir = d / "tests"
+    if tests_dir.is_dir():
+        for test in sorted(tests_dir.rglob("*.py")):
+            findings.extend(lint_script(test, f"{d.name}/{test.relative_to(d).as_posix()}",
+                                        profile="tests"))
+    findings.extend(lint_cases(d))
     return result
 
 

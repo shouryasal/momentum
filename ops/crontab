@@ -2,28 +2,44 @@
 #   render/check:  python -m ops.gen_ops_files --check
 #   install:       python -m ops.gen_ops_files --install --yes
 #
-# Distro timezone MUST be Asia/Dubai (Gulf, UTC+4, no DST): the expressions below
-# are Gulf time verbatim and come from config/earn.yaml ops.schedules, with the
-# research lines derived from research.slots (one line per slot). Every job runs
-# under flock (no overlap), timeout (its deadline_s) and envwrap (per-job secret
-# allowlist), after a mkdir guard so a missing logs/ or ops/locks/ cannot make the
-# line fail before the job starts. E must point at the checkout on ext4.
+# The expressions below are Gulf time verbatim and come from config/earn.yaml
+# ops.schedules, with the research lines derived from research.slots (one line per
+# slot). CRON_TZ below is what MAKES them Gulf time: cron evaluates an expression
+# in the distro timezone, and ops/healthcheck.py forces Gulf before croniter, so
+# on a stock UTC WSL the watchdog expected every daily job four hours early, found
+# no artifact, spawned a detached rerun and alerted — then the real cron fire ran
+# it a second time. Setting CRON_TZ keeps the schedule right whatever the distro
+# clock says (ops/setup.sh checks the clock too, because everything else on the
+# host still reads it). Every job runs under flock (no overlap), timeout (its
+# deadline_s) and envwrap (per-job secret allowlist), after a mkdir guard so a
+# missing logs/ or ops/locks/ cannot make the line fail before the job starts.
+#
+# Every line then runs `python -m ops.autonomy run <job> --` before the real
+# command. That is the ONE autonomy gate: it reads the signed per-bot level in
+# var/state/autonomy.json, checks the spend caps, writes the job's heartbeat and
+# either execs the job or exits 0 having recorded why it did not. No runner has
+# to know autonomy exists, and no runner can forget to ask. Installing this file
+# is what gives the system a heartbeat at all: `python -m ops.autonomy start <bot>`
+# installs it and then READS IT BACK to prove it.
+# E must point at the checkout on ext4.
 SHELL=/bin/bash
+CRON_TZ=Asia/Dubai
 PATH=__EARN_ROOT__/.venv/bin:/usr/local/bin:/usr/bin:/bin
 MAILTO=""
 E="__EARN_ROOT__"
 
-*/15 * * * *   mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-ingest.lock" timeout -k 30 600 bash "$E/ops/envwrap.sh" ingest -- "$E/.venv/bin/python" -m runs.ingest >> "$E/logs/ingest.log" 2>&1
-*/5 * * * *    mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-scanner.lock" timeout -k 30 240 bash "$E/ops/envwrap.sh" scanner -- "$E/.venv/bin/python" -m runs.signals scan >> "$E/logs/scanner.log" 2>&1
-*/15 * * * *   mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-navtick.lock" timeout -k 30 120 bash "$E/ops/envwrap.sh" nav_tick -- "$E/.venv/bin/python" -m runs.nav_tick >> "$E/logs/nav_tick.log" 2>&1
-*/15 * * * *   mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-reconcile.lock" timeout -k 30 120 bash "$E/ops/envwrap.sh" reconcile -- "$E/.venv/bin/python" -m runs.reconcile_job >> "$E/logs/reconcile.log" 2>&1
-*/5 * * * *    mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-health.lock" timeout -k 30 240 bash "$E/ops/envwrap.sh" healthcheck -- "$E/.venv/bin/python" -m ops.healthcheck >> "$E/logs/health.log" 2>&1
-5 * * * *      mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-tca.lock" timeout -k 30 1500 bash "$E/ops/envwrap.sh" tca -- "$E/.venv/bin/python" -m runs.tca_job >> "$E/logs/tca.log" 2>&1
-10 0 * * *     mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-nav.lock" timeout -k 30 300 bash "$E/ops/envwrap.sh" nav -- "$E/.venv/bin/python" -m runs.nav_job >> "$E/logs/nav.log" 2>&1
-30 8 * * *     mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-research.lock" timeout -k 30 2700 bash "$E/ops/envwrap.sh" research -- "$E/.venv/bin/python" -m runs.research_run 0830 >> "$E/logs/research.log" 2>&1
-0 16 * * *     mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-research.lock" timeout -k 30 2700 bash "$E/ops/envwrap.sh" research -- "$E/.venv/bin/python" -m runs.research_run 1600 >> "$E/logs/research.log" 2>&1
-30 21 * * *    mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-daily.lock" timeout -k 30 3300 bash "$E/ops/envwrap.sh" daily_review -- "$E/.venv/bin/python" -m runs.daily_review >> "$E/logs/daily_review.log" 2>&1
-0 20 * * 0     mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-review.lock" timeout -k 30 6600 bash "$E/ops/envwrap.sh" review -- "$E/.venv/bin/python" -m runs.review_run >> "$E/logs/review.log" 2>&1
-0 18 * * 0     mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-dldata.lock" timeout -k 30 1800 bash "$E/ops/envwrap.sh" ingest -- bash "$E/ops/refresh_backtest_data.sh" >> "$E/logs/dldata.log" 2>&1
-0 3 * * *      mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-backup.lock" timeout -k 30 2700 bash "$E/ops/envwrap.sh" backup -- bash "$E/ops/backup.sh" >> "$E/logs/backup.log" 2>&1
-0 2 * * 1      mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-maint.lock" timeout -k 30 3600 bash "$E/ops/envwrap.sh" maintenance -- "$E/.venv/bin/python" -m runs.maintenance >> "$E/logs/maintenance.log" 2>&1
+*/15 * * * *   mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-ingest.lock" timeout -k 30 600 bash "$E/ops/envwrap.sh" ingest -- "$E/.venv/bin/python" -m ops.autonomy run ingest -- "$E/.venv/bin/python" -m runs.ingest >> "$E/logs/ingest.log" 2>&1
+*/5 * * * *    mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-scanner.lock" timeout -k 30 240 bash "$E/ops/envwrap.sh" scanner -- "$E/.venv/bin/python" -m ops.autonomy run scanner -- "$E/.venv/bin/python" -m runs.signals scan >> "$E/logs/scanner.log" 2>&1
+*/7 * * * *    mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-watch.lock" timeout -k 30 120 bash "$E/ops/envwrap.sh" signals -- "$E/.venv/bin/python" -m ops.autonomy run watch -- "$E/.venv/bin/python" -m runs.watch once >> "$E/logs/watch.log" 2>&1
+*/15 * * * *   mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-navtick.lock" timeout -k 30 120 bash "$E/ops/envwrap.sh" nav_tick -- "$E/.venv/bin/python" -m ops.autonomy run nav_tick -- "$E/.venv/bin/python" -m runs.nav_tick >> "$E/logs/nav_tick.log" 2>&1
+*/15 * * * *   mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-reconcile.lock" timeout -k 30 120 bash "$E/ops/envwrap.sh" reconcile -- "$E/.venv/bin/python" -m ops.autonomy run reconcile -- "$E/.venv/bin/python" -m runs.reconcile_job >> "$E/logs/reconcile.log" 2>&1
+*/5 * * * *    mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-health.lock" timeout -k 30 240 bash "$E/ops/envwrap.sh" healthcheck -- "$E/.venv/bin/python" -m ops.autonomy run healthcheck -- "$E/.venv/bin/python" -m ops.healthcheck >> "$E/logs/health.log" 2>&1
+5 * * * *      mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-tca.lock" timeout -k 30 1500 bash "$E/ops/envwrap.sh" tca -- "$E/.venv/bin/python" -m ops.autonomy run tca_job -- "$E/.venv/bin/python" -m runs.tca_job >> "$E/logs/tca.log" 2>&1
+10 0 * * *     mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-nav.lock" timeout -k 30 300 bash "$E/ops/envwrap.sh" nav -- "$E/.venv/bin/python" -m ops.autonomy run nav_job -- "$E/.venv/bin/python" -m runs.nav_job >> "$E/logs/nav.log" 2>&1
+30 8 * * *     mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-research.lock" timeout -k 30 2700 bash "$E/ops/envwrap.sh" research -- "$E/.venv/bin/python" -m ops.autonomy run research_run -- "$E/.venv/bin/python" -m runs.research_run 0830 >> "$E/logs/research.log" 2>&1
+0 16 * * *     mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-research.lock" timeout -k 30 2700 bash "$E/ops/envwrap.sh" research -- "$E/.venv/bin/python" -m ops.autonomy run research_run -- "$E/.venv/bin/python" -m runs.research_run 1600 >> "$E/logs/research.log" 2>&1
+30 21 * * *    mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-daily.lock" timeout -k 30 3300 bash "$E/ops/envwrap.sh" daily_review -- "$E/.venv/bin/python" -m ops.autonomy run daily_review -- "$E/.venv/bin/python" -m runs.daily_review >> "$E/logs/daily_review.log" 2>&1
+0 20 * * 0     mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-review.lock" timeout -k 30 6600 bash "$E/ops/envwrap.sh" review -- "$E/.venv/bin/python" -m ops.autonomy run review_run -- "$E/.venv/bin/python" -m runs.review_run >> "$E/logs/review.log" 2>&1
+0 18 * * 0     mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-dldata.lock" timeout -k 30 1800 bash "$E/ops/envwrap.sh" ingest -- "$E/.venv/bin/python" -m ops.autonomy run backtest_data -- bash "$E/ops/refresh_backtest_data.sh" >> "$E/logs/dldata.log" 2>&1
+0 3 * * *      mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-backup.lock" timeout -k 30 2700 bash "$E/ops/envwrap.sh" backup -- "$E/.venv/bin/python" -m ops.autonomy run backup -- bash "$E/ops/backup.sh" >> "$E/logs/backup.log" 2>&1
+0 2 * * 1      mkdir -p "$E/logs" "$E/ops/locks" && flock -n "$E/ops/locks/cron-maint.lock" timeout -k 30 3600 bash "$E/ops/envwrap.sh" maintenance -- "$E/.venv/bin/python" -m ops.autonomy run maintenance -- "$E/.venv/bin/python" -m runs.maintenance >> "$E/logs/maintenance.log" 2>&1

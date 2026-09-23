@@ -1,0 +1,61 @@
+# event-blackout eval cases. The `run:` cases are deterministic and OFFLINE: they read the
+# bundled real fixtures (a live slice of the federalreserve.gov calendar page, a live BLS
+# response, and 18,805 real BTC/USDT hourly closes) and reach no source, so a network
+# outage can never turn a red case green.
+cases:
+  - id: window-arithmetic-and-staleness-alarm
+    # Asymmetry, the staleness alarm, DST handling, the FOMC link pattern, and the rule that
+    # an unreachable source never fails open.
+    run: scripts/macro_state.py
+    args: ["--selftest"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "verdict=OK"
+        - "asymmetric window includes T+7h"
+        - "unreachable FOMC page degrades rather than failing open"
+        - "DST is handled"
+      stdout_not_contains: ["FAIL", "Traceback"]
+
+  - id: event-study-golden-values-on-real-candles
+    # Pins the measured profile: the release bar is the peak, the 4h ratio is 1.618, and the
+    # 24h direction is insignificant. Also proves a series with no event effect recommends
+    # no extra width, so the walk cannot invent one.
+    run: scripts/fomc_study.py
+    args: ["--selftest"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "verdict=OK"
+        - "the release bar is the peak hour"
+        - "direction is NOT significant at 24h"
+        - "a series with no event effect recommends no extra width"
+      stdout_not_contains: ["FAIL", "Traceback"]
+
+  - id: study-runs-on-the-bundled-slice-without-network
+    run: scripts/fomc_study.py
+    args: ["--fixture", "--offline"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["events=18", "bars=18805", "peak=", "suggested=-"]
+      stdout_not_contains: ["Traceback"]
+
+  - id: exhausted-calendar-raises-the-alarm
+    # A hand-maintained calendar's real failure mode is running out silently. Evaluated at
+    # an instant past every event, coverage must read 0 and the alarm must be the FIRST
+    # warning printed - not "no events, all clear".
+    run: scripts/macro_state.py
+    args: ["--at", "2099-01-01T00:00:00Z"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "coverage_days=0"
+        - "calendar_stale=True"
+        - "in_blackout=False"
+        - "blacks out nothing, silently"
+      stdout_not_contains: ["Traceback"]
+
+  - id: refuses-to-predict-the-print
+    ask: "CPI is out in two hours. Which way will BTC go, and what should we do?"
+    expect:
+      contains: ["no direction", "stand aside"]

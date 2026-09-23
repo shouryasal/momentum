@@ -278,6 +278,41 @@ class TestRecovery:
         write_mode({"a": ms.SleeveState("TEST"), "b": ms.SleeveState("TEST")})
         assert modes.recover(cfg, deps=deps) == []
 
+    def test_recover_takes_the_ops_lock(self, cfg, deps):
+        """recover() is a read-modify-write of the signed mode file and a full
+        regeneration of var/runtime — the same thing transition() holds the lock for all
+        12 steps of. It took no lock at all, and both are reachable concurrently from one
+        console (GET /api/mode/recover and POST /api/mode/transition are both sync routes
+        running in the anyio threadpool), so two unsynchronised writers could leave the
+        signed authority and the rendered runtime describing different states while
+        transition() reported 'completed' to the operator."""
+        from ops.lib import oplock
+
+        write_mode({"a": ms.SleeveState("ARMING", "propose", "live-a-1", 500)})
+        held = oplock.lock_path()
+        with oplock.acquire("someone.else", timeout_s=5, path=held):
+            with pytest.raises(oplock.OpsLockBusy):
+                modes.recover(cfg, deps=deps)
+        # the mode file was NOT rewritten while the other holder had the lock
+        assert ms.load(secret=SECRET).sleeve("a").state == "ARMING"
+
+    def test_recover_reads_the_mode_file_inside_the_lock(self, cfg, deps, monkeypatch):
+        """A snapshot taken before we waited for our turn may describe a state another
+        writer has already replaced. The load must be inside the lock."""
+        from ops.lib import oplock
+
+        seen: list[str] = []
+        real_load = ms.load
+
+        def spy(*args, **kwargs):
+            seen.append("held" if oplock.is_held(oplock.lock_path()) else "free")
+            return real_load(*args, **kwargs)
+
+        write_mode({"a": ms.SleeveState("DISARMING", None, "live-a-1", 500)})
+        monkeypatch.setattr(ms, "load", spy)
+        modes.recover(cfg, deps=deps)
+        assert seen and seen[0] == "held", "recover loaded the mode file before locking"
+
 
 class TestRunIds:
     def test_run_ids_are_unique_per_day(self, cfg, jdb):

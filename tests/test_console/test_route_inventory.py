@@ -54,13 +54,20 @@ STEP_UP: frozenset[str] = frozenset(
         "POST /api/bots/{sleeve}/restart",
         "POST /api/changes/{change_id}/attach",
         "POST /api/changes/{change_id}/revert",
+        # The control surface. Arming and resuming raise how much the system does by
+        # itself, and flatten sells — so all three step up. Pause and stop deliberately do
+        # not: the brake is never behind a door.
+        "PUT /api/control/level",
+        "POST /api/control/resume",
+        "POST /api/control/flatten",
         "DELETE /api/kill",
-        "GET /api/mode/recover",
+        "POST /api/mode/recover",
         "POST /api/mode/transition",
         "POST /api/mode/transitions/{transition_id}/rollback",
         "POST /api/ops/containers/{service}/restart",
         "POST /api/ops/schedules/install",
         "POST /api/portfolio/{sleeve}/orders/{trade_id}/cancel",
+        "POST /api/llm/claude/signin",
         "PUT /api/prompts/active",
         "POST /api/risk/{sleeve}/resume-monthly",
         "PUT /api/secrets/auth-mode",
@@ -269,6 +276,7 @@ def test_every_sse_topic_has_a_publisher():
     published_in_process = {
         "job": "console.services.jobs.JobRunner._emit, on every status change",
         "backtest": "console.services.backtest_service.BacktestQueue._emit",
+        "claude_auth": "console.services.claude_signin_service.SignInManager._emit",
     }
     uncovered = sorted(sse.TOPICS - from_pollers - set(published_in_process))
     assert not uncovered, (

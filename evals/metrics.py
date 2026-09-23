@@ -26,13 +26,20 @@ class Scores:
 def violates_limits(targets: dict[str, float], limits_yaml_text: str) -> list[str]:
     lim = yaml.safe_load(limits_yaml_text)
     caps = lim["max_weight"]
+    # `tier_caps` and a per-asset `tiers` map arrive with a wide universe; an asset with
+    # neither an explicit cap nor a tier caps at ZERO, never at a default. An old snapshot
+    # that still carries `max_weight.default` keeps replaying against the cap it was
+    # judged under — that is the point of replaying a snapshot's own limits.
+    tier_caps = lim.get("tier_caps") or {}
+    tiers = lim.get("tiers") or {}
     problems = []
     crypto = 0.0
     for asset, w in targets.items():
         if asset == "USDT":
             continue
         crypto += w
-        cap = caps.get(asset, caps.get("default", 0.0))
+        cap = caps.get(asset, caps.get("default",
+                                       tier_caps.get(tiers.get(asset, ""), 0.0)))
         if w > cap + 1e-9:
             problems.append(f"weight {asset} {w} > cap {cap}")
     if crypto > lim["max_gross_exposure"] + 1e-9:

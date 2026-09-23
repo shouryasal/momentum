@@ -100,19 +100,32 @@ def cmd_unfreeze(cfg: EarnConfig, now: datetime) -> str:
     return "tier1_freeze cleared" if ok else "tier1_freeze was not active"
 
 
-def cmd_mode(cfg: EarnConfig) -> str:
-    """Per-sleeve mode, straight from the signed file (unverified reads as TEST)."""
+def cmd_mode(cfg: EarnConfig, jdb=None) -> str:
+    """Per-sleeve mode — from what this process can actually prove.
+
+    The bot's allowlist (``ops/envwrap.sh telegram``) has no ``EARN_CONSOLE_SECRET``, so
+    ``mode_state.load()`` here always returned unverified all-TEST and ``/mode`` cheerfully
+    reported ``a=TEST b=TEST`` to the operator while sleeve b traded real money. It now
+    reports :mod:`ops.lib.mode_view`'s tri-state, and says ``unknown`` — with the reason —
+    rather than guessing TEST.
+    """
     from ops.lib import mode_state as ms
+    from ops.lib import mode_view
 
     state = ms.load()
-    lines = [f"mode: {ms.describe(state)}"]
+    view = mode_view.load(jdb=jdb, state=state)
+    lines = [f"mode: {view.describe()}"]
+    lines[0] += ("  [signed state verified]" if state.verified
+                 else f"  [signed state unverified here: {state.reason}]")
     for sleeve in ("a", "b"):
-        sl = state.sleeve(sleeve)
-        seed = f"{sl.seed_usdt:g}" if sl.seed_usdt is not None else "?"
+        mv = view.sleeve(sleeve)
+        seed = f"{mv.seed_usdt:g}" if mv.seed_usdt is not None else "?"
+        label = mv.state or mv.liveness.upper()
         lines.append(
-            f"  {sleeve}: {sl.state}"
-            + (f"·{sl.submode}" if sl.submode else "")
-            + f" seed {seed} run {sl.run_id or '-'}"
+            f"  {sleeve}: {label}"
+            + (f"·{mv.submode}" if mv.submode else "")
+            + (f" ({mode_view.UNKNOWN}: {mv.reason})" if mv.unknown else "")
+            + f" seed {seed} run {mv.run_id or '-'}"
         )
     return "\n".join(lines)
 
@@ -225,7 +238,7 @@ def run_bot() -> int:  # pragma: no cover — needs a live token; logic is teste
     app.add_handler(CommandHandler("kill", guard(
         lambda u, c: cmd_kill(cfg, " ".join(c.args)))))
     app.add_handler(CommandHandler("unfreeze", guard(lambda u, c: cmd_unfreeze(cfg, now()))))
-    app.add_handler(CommandHandler("mode", guard(lambda u, c: cmd_mode(cfg))))
+    app.add_handler(CommandHandler("mode", guard(lambda u, c: cmd_mode(cfg, jdb))))
     app.add_handler(CommandHandler("pending", guard(
         lambda u, c: cmd_pending(cfg, jdb, now()))))
     app.add_handler(CommandHandler("approve", guard(

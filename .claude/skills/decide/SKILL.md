@@ -7,12 +7,31 @@ allowed-tools: Read, Grep, Glob
 # Decide
 
 <!-- TIER 1: this body changes only through a changes/*.json proposal with replay
-scores (runs/apply_changes.py). The checklist here mirrors prompts/research.v1.md —
+scores (runs/apply_changes.py). The checklist here mirrors prompts/research.v4.md —
 keep them in sync (strategy-lab owns the sync check). -->
 
 You produce EXACTLY one JSON proposal object (schemas/proposal.json). The prompt's
-LIMITS block is authoritative — the risk gate enforces it deterministically, and a
-proposal outside it is discarded.
+LIMITS and UNIVERSE blocks are authoritative — the risk gate enforces both
+deterministically, and a proposal outside them is discarded.
+
+## The universe is dynamic
+
+BTC and ETH are the permanent core. Everything else tradeable comes from the
+point-in-time universe snapshot in the run's UNIVERSE block, which also carries each
+asset's tier and its `max_weight`. Three rules follow, and none of them is negotiable:
+
+- **Targets are sparse. An asset you do not name is ZERO.** That is how a position is
+  closed. `USDT` is always named, even at 0.
+- **Only assets in UNIVERSE `tradeable` may be named**, at most
+  `max_assets_per_proposal` of them. Anything else rejects the whole proposal — it is
+  not clamped, and the attempt is journalled.
+- **Copy `snapshot` into `universe_snapshot` and set `schema_version: 4`.** Without it
+  the decision cannot be replayed once the universe rotates, so it is refused.
+
+A `satellite` asset carries a much smaller cap than a core one. That is measured, not
+timid: across 2019-2026 the median quality-filtered coin returned −37.6% over a year and
+only 12.6% beat BTC, so the non-core sleeve is an option on finding an edge and its size
+is the premium. Widen nothing by argument.
 
 ## Checklist (in order — do not skip steps)
 
@@ -25,8 +44,11 @@ proposal outside it is discarded.
    `dca` or `hold`; `trend_down`/`high_vol` favor `cash` or `hold`.
 5. **Cost.** Rebalances smaller than the rebalance band or with expected edge below
    the 7d cost bps are not taken — prefer `hold`.
-6. **Module + weights.** Per `references/modules.md`. Respect every limit. USDT is
-   the remainder; weights sum to 1 ± 0.001.
+6. **Module + weights.** Per `references/modules.md`. Respect every limit, including
+   the per-asset `max_weight` in UNIVERSE and `max_satellite_gross`. USDT is the
+   remainder; weights sum to 1 ± 0.001. Name the fewest assets that express the view:
+   a twenty-alt book is worth about two independent bets (measured average pairwise
+   correlation 0.41-0.49), and on crash days it behaves as one levered BTC position.
 7. **exposure_scale** from vol regime: low 1.0, med 0.8, high 0.5. Deviate only
    with a stated reason.
 8. **Reasons not to trade.** Name at least one rejected alternative.
@@ -36,7 +58,9 @@ proposal outside it is discarded.
 
 ## Prohibitions
 
-No prices, no order types, no leverage, no assets outside BTC/ETH/USDT, never a
-number that is not in the inputs, never the P&L of recent trades (it is withheld
-deliberately). Same inputs must give the same proposal — if two modules feel equally
-right, take the LOWER-turnover one.
+No prices, no order types, no leverage, **no asset outside UNIVERSE `tradeable`**,
+never a number that is not in the inputs, never the P&L of recent trades (it is
+withheld deliberately). No leveraged tokens, no stablecoin-to-stablecoin pairs, no
+margin — the resolver excludes them and naming one is a refusal, not a near miss.
+Same inputs must give the same proposal — if two modules feel equally right, take the
+LOWER-turnover one.

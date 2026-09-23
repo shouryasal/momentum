@@ -34,13 +34,34 @@ from ops.lib import paths, signing
 
 VERSION = 1
 
-SleeveMode = Literal["TEST", "ARMING", "LIVE_PROPOSE", "LIVE_EXECUTE", "DISARMING"]
+SleeveMode = Literal[
+    "TEST", "ARMING", "DEMO_PROPOSE", "DEMO_EXECUTE",
+    "LIVE_PROPOSE", "LIVE_EXECUTE", "DISARMING",
+]
 Submode = Literal["propose", "execute"]
 Phase = Literal["paper", "live_propose", "live_execute"]
 
-MODES: tuple[str, ...] = ("TEST", "ARMING", "LIVE_PROPOSE", "LIVE_EXECUTE", "DISARMING")
+MODES: tuple[str, ...] = (
+    "TEST", "ARMING", "DEMO_PROPOSE", "DEMO_EXECUTE",
+    "LIVE_PROPOSE", "LIVE_EXECUTE", "DISARMING",
+)
+#: Real money. ``LIVE_MODES`` must **never** grow: every real-money guard in the repo
+#: (``ModeState.any_live``, the healthcheck's KILL branch, ``autonomy.live_forces_human``,
+#: ``config._validate_strategies``) keys on it, and demo is not real money.
 LIVE_MODES: frozenset[str] = frozenset({"LIVE_PROPOSE", "LIVE_EXECUTE"})
+#: Real orders against Binance Spot Demo Mode (``demo-api.binance.com``) with fake money.
+#: Deliberately a *separate* set from :data:`LIVE_MODES`: a demo sleeve places genuine
+#: orders on a genuine matching engine, so it is not TEST either, and its P&L is never
+#: live performance (``docs/design/demo-mode.md`` §4).
+DEMO_MODES: frozenset[str] = frozenset({"DEMO_PROPOSE", "DEMO_EXECUTE"})
+#: Modes that reach an exchange at all — the predicate for "this needs a credential, a
+#: venue binding, a reconcile and a non-dry-run container".
+VENUE_MODES: frozenset[str] = LIVE_MODES | DEMO_MODES
 TRANSIENT_MODES: frozenset[str] = frozenset({"ARMING", "DISARMING"})
+#: Modes that place orders without a per-proposal human approval.
+EXECUTE_MODES: frozenset[str] = frozenset({"LIVE_EXECUTE", "DEMO_EXECUTE"})
+#: Modes where every proposal waits for a signed human approval.
+PROPOSE_MODES: frozenset[str] = frozenset({"LIVE_PROPOSE", "DEMO_PROPOSE"})
 SUBMODES: tuple[str, ...] = ("propose", "execute")
 
 #: reasons returned with ``verified=False`` — stable strings, safe to log and to test on.
@@ -69,21 +90,32 @@ class SleeveState:
 
     @property
     def is_live(self) -> bool:
+        """Real money. Never true for a demo sleeve — demo P&L is not live performance."""
         return self.state in LIVE_MODES
+
+    @property
+    def is_demo(self) -> bool:
+        """Real orders on ``demo-api.binance.com`` with fake money."""
+        return self.state in DEMO_MODES
 
     @property
     def is_test(self) -> bool:
         return self.state == "TEST"
 
     @property
+    def needs_exchange(self) -> bool:
+        """This sleeve talks to a real venue: demo or live. TEST talks to nobody."""
+        return self.state in VENUE_MODES
+
+    @property
     def executes(self) -> bool:
         """True only when this sleeve may place orders without per-proposal approval."""
-        return self.state == "LIVE_EXECUTE"
+        return self.state in EXECUTE_MODES
 
     @property
     def requires_approval(self) -> bool:
-        """LIVE_PROPOSE needs a signed human approval before any proposal is executed."""
-        return self.state == "LIVE_PROPOSE"
+        """A *_PROPOSE state needs a signed human approval before anything is executed."""
+        return self.state in PROPOSE_MODES
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -121,15 +153,34 @@ class ModeState:
     def is_live(self, sleeve: str) -> bool:
         return self.verified and self.sleeve(sleeve).is_live
 
+    def is_demo(self, sleeve: str) -> bool:
+        return self.verified and self.sleeve(sleeve).is_demo
+
+    def needs_exchange(self, sleeve: str) -> bool:
+        """Verified demo **or** live: the sleeve is bound to a venue and holds a key."""
+        return self.verified and self.sleeve(sleeve).needs_exchange
+
     def any_live(self) -> bool:
         return any(self.is_live(s) for s in self.sleeves)
+
+    def any_demo(self) -> bool:
+        return any(self.is_demo(s) for s in self.sleeves)
 
     def live_sleeves(self) -> list[str]:
         return sorted(s for s in self.sleeves if self.is_live(s))
 
+    def demo_sleeves(self) -> list[str]:
+        return sorted(s for s in self.sleeves if self.is_demo(s))
+
     @property
     def phase(self) -> Phase:
-        """The legacy three-valued phase, computed — never stored in earn.yaml."""
+        """The legacy three-valued phase, computed — never stored in earn.yaml.
+
+        A demo sleeve is **not** a live phase: demo money is free, and anything that reads
+        ``phase`` is reading it to decide how much real capital is at stake. Demo is
+        surfaced through :meth:`any_demo` and the sleeve ``state`` word instead, so a demo
+        run can never be reported as live performance.
+        """
         if not self.verified:
             return "paper"
         states = {self.sleeve(s).state for s in self.sleeves}

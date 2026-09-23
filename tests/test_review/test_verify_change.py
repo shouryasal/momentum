@@ -375,6 +375,104 @@ def test_a_skill_edit_gates_on_lint_tests_and_eval_pass_rate(live_repo):
     assert res.verified["skill_evidence"]["eval_pass_rate"] == 1.0
 
 
+def test_a_commit_that_rewrites_its_own_tests_is_held(live_repo):
+    """The load-bearing evidence for a skill change is a pytest the same commit may have
+    authored: ``.claude/skills/<name>/tests/**`` is tier 1 and inside the declared target,
+    so one commit could replace the body *and* replace the assertions with ``assert True``
+    — and ``skill_tests`` would report PASS. Evidence and the thing being judged cannot
+    have the same author."""
+    cfg, root, jdb = live_repo
+    _seed_run(jdb, "review-2026-W39", "claude-fable-5-1")
+    target = root / ".claude" / "skills" / "demo"
+    (target / "tests").mkdir(parents=True, exist_ok=True)
+    (target / "SKILL.md").write_text("---\nname: demo\n---\nbody\n")
+    (target / "tests" / "test_x.py").write_text(
+        "def test_x():\n    assert compute() == 3\n")
+    commit_all(root, "demo skill")
+    git(root, "checkout", "-b", "review/self-evidence")
+    (target / "SKILL.md").write_text("---\nname: demo\n---\nrewritten body\n")
+    (target / "tests" / "test_x.py").write_text("def test_x():\n    assert True\n")
+    sha = commit_all(root, "body plus weaker assertions")
+    git(root, "checkout", "-")
+    change = _change(sha, kind="skill", target=".claude/skills/demo",
+                     what={"summary": "improve", "commit": sha, "op": "edit"})
+
+    res = verify_change.verify(change, cfg, jdb, live_root=root, worktree=root,
+                               runners=_runners(
+                                   replay=lambda *a, **k: _replay_result(),
+                                   skill_lint=lambda d, existing: SimpleNamespace(
+                                       ok=True, findings=[]),
+                                   skill_tests=lambda d, cwd, t: (True, ""),
+                                   skill_eval=lambda d, cwd, t: SimpleNamespace(
+                                       pass_rate=1.0, as_dict=lambda: {"pass_rate": 1.0})),
+                               now=NOW)
+
+    assert res.verdict == "hold", res.reason
+    assert "its own evidence" in res.reason
+
+
+def test_a_case_file_the_same_commit_wrote_is_self_evidence_too(live_repo):
+    files = [".claude/skills/demo/SKILL.md", ".claude/skills/demo/evals/cases.yaml"]
+    assert verify_change.self_authored_evidence(".claude/skills/demo", files) == [
+        ".claude/skills/demo/evals/cases.yaml"]
+    assert verify_change.self_authored_evidence(
+        ".claude/skills/demo", [".claude/skills/demo/SKILL.md"]) == []
+
+
+@pytest.mark.parametrize(("runner", "refusal"), [
+    ("skill_tests", "refused"),
+    ("skill_eval", "refused"),
+])
+def test_a_refused_runner_holds_it_never_rejects_and_never_passes(live_repo, runner,
+                                                                  refusal):
+    """A refusal means the suite was never run — the host has nothing that can contain
+    model-authored code. Rejecting would throw a good change away; passing would merge on
+    evidence nobody gathered."""
+    from evals.skill_eval import REFUSED
+
+    cfg, root, jdb = live_repo
+    _seed_run(jdb, "review-2026-W39", "claude-fable-5-1")
+    sha = _demo_skill_edit(root, f"review/{runner}-refused")
+    change = _change(sha, kind="skill", target=".claude/skills/demo",
+                     what={"summary": "tighten the body", "commit": sha, "op": "edit"})
+    overrides = {
+        "replay": lambda *a, **k: _replay_result(),
+        "skill_lint": lambda d, existing: SimpleNamespace(ok=True, findings=[]),
+        "skill_tests": lambda d, cwd, t: (True, ""),
+        "skill_eval": lambda d, cwd, t: SimpleNamespace(
+            pass_rate=1.0, refused="", as_dict=lambda: {"pass_rate": 1.0}),
+    }
+    if runner == "skill_tests":
+        overrides["skill_tests"] = lambda d, cwd, t: (False, f"{REFUSED}no agent_user")
+    else:
+        overrides["skill_eval"] = lambda d, cwd, t: SimpleNamespace(
+            pass_rate=0.0, refused=f"{REFUSED}no trusted eval fixtures",
+            as_dict=lambda: {"pass_rate": 0.0})
+
+    res = verify_change.verify(change, cfg, jdb, live_root=root, worktree=root,
+                               runners=_runners(**overrides), now=NOW)
+
+    assert res.verdict == "hold", res.reason
+    assert refusal in res.reason
+
+
+def test_the_production_runners_refuse_on_a_host_with_no_agent_user(tmp_path):
+    """``Runners.default`` is where the gate would otherwise run the candidate's own tests
+    as the owner, in the live checkout, under the ops lock, in order to decide whether to
+    trust the candidate."""
+    from ops.config import load_config
+
+    skill = tmp_path / ".claude" / "skills" / "demo"
+    (skill / "tests").mkdir(parents=True)
+    (skill / "tests" / "test_x.py").write_text("def test_x():\n    assert True\n")
+    runners = verify_change.Runners.default(live_root=tmp_path, cfg=load_config())
+
+    ok, log = runners.skill_tests(skill, tmp_path, 30)
+    assert ok is False and log.startswith("refused: ")
+    result = runners.skill_eval(skill, tmp_path, 30)
+    assert str(result.refused).startswith("refused: ")
+
+
 @pytest.mark.parametrize("field", ["skill_lint", "skill_tests"])
 def test_a_failing_skill_lint_or_test_rejects(live_repo, field):
     cfg, root, jdb = live_repo

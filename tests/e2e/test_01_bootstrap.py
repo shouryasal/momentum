@@ -76,16 +76,23 @@ class TestDatabases:
         # ...and nowhere near the checkout.
         assert not (sandbox.repo / "journal" / "journal.db").exists()
 
-    def test_the_schema_is_at_version_three(self, sandbox: Sandbox) -> None:
+    def test_the_schema_is_at_the_head_version(self, sandbox: Sandbox) -> None:
+        from ops import db as opsdb
+
         sandbox.py("-m", "ops.init_dbs")
         conn = sqlite3.connect(sandbox.state / "journal" / "journal.db")
         try:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             tables = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
+            statuses = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name='llm_calls'").fetchone()[0]
         finally:
             conn.close()
-        assert version == 3, f"journal user_version is {version}"
+        # The head, read from the code rather than restated — a version bump is a
+        # migration, and this assertion should follow it rather than block it.
+        assert version == opsdb.SCHEMA_VERSION, f"journal user_version is {version}"
+        assert "provider_down" in statuses, "v4: llm_calls must accept provider_down"
         for table in ("audit_log", "config_audit", "mode_transitions", "sleeve_runs",
                       "nav_points", "signals"):
             assert table in tables, f"{table} missing from a freshly initialised journal"

@@ -184,6 +184,32 @@ class TestScoring:
                          screen_fn=screen)
         assert seen == [1]
 
+    def test_the_cycle_budget_is_spent_on_the_core_asset_first(self, env, provider,
+                                                               monkeypatch):
+        """With 100 pairs watched, WHICH candidate gets screened is the token decision."""
+        from tests.test_signals.test_features import widen
+
+        cfg, jdb, kdb, root, spawns = env
+        cfg.signals.scanner.max_candidates_per_cycle = 1
+        pairs = [f"ALT{i}/USDT" for i in range(8)] + ["BTC/USDT"]
+        widen(monkeypatch, cfg, pairs)
+        for p in pairs:
+            seed_candles(kdb, pair=p, tf="1d", n=40, start=100.0, step=0.0)
+            # every alt moves harder than BTC, so strength alone would bury the core one
+            seed_candle(kdb, p, "1d", open_=100.0,
+                        close=180.0 if p != "BTC/USDT" else 120.0)
+        screened: list[str] = []
+
+        def screen(cfg_, candidates, features, **_kw):
+            screened.extend(c["pair"] for c in candidates)
+            return _screen_ok()(cfg_, candidates, features)
+
+        report = pipelinelib.scan(cfg, jdb, kdb, root=root, now=NOW,
+                                  spawn=_spawn(spawns), screen_fn=screen)
+        assert screened == ["BTC/USDT"]
+        assert report.watchlist >= len(pairs) and report.rich >= 1
+        assert report.capped.get("move")            # the alt flood was capped, not screened
+
 
 class TestValidationSpawn:
     def test_a_screened_signal_spawns_a_detached_validation(self, env, provider):

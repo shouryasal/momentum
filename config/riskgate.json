@@ -58,18 +58,24 @@
     "daily_stop_lock_hours": 24,
     "kill_file": "ops/killdir/KILL",
     "market_entries_allowed": false,
+    "max_avg_pairwise_corr": 0.7,
+    "max_beta_to_btc": 1.3,
     "max_entries_per_trade": 4,
     "max_fee_pct_per_month": 0.01,
     "max_gross_exposure": 0.8,
+    "max_open_positions": 8,
     "max_order_notional_pct": 0.2,
-    "max_orders_per_day": 12,
+    "max_orders_per_day": 16,
+    "max_satellite_gross": 0.1,
+    "max_satellite_positions": 4,
     "max_trades_per_day": 4,
     "max_turnover_pct_per_day": 0.5,
     "max_weight": {
       "BTC": 0.4,
-      "default": 0.3
+      "ETH": 0.3
     },
     "min_notional_usdt": 25.0,
+    "min_position_pct_nav": 0.02,
     "monthly_loss_stop": 0.1,
     "protections": {
       "max_drawdown": {
@@ -89,12 +95,17 @@
       "window_hours": 48
     },
     "stoploss_per_trade": 0.15,
+    "tier_caps": {
+      "core": 0.4,
+      "major": 0.15,
+      "satellite": 0.05
+    },
     "usdt_floor": 0.2
   },
   "sleeve_b": {
     "drift_to_a_after_h": 48
   },
-  "source_sha256": "df00663d5867a7213701980ce07dc592503d19716cfd118ad8eabaa76b91f89d",
+  "source_sha256": "6edeb7f1f8c919af1c0972cc3a248283529489ca1492e1fd6e15d170eefa8ebc",
   "trading": {
     "plan_bounds": {
       "allow_model_urgency": false,
@@ -263,15 +274,1120 @@
   "universe": {
     "assets": [
       "BTC",
+      "ETH",
+      "ZEC",
+      "NEAR",
+      "XRP",
+      "SOL",
+      "DOGE",
+      "TRX",
+      "UNI",
+      "TAO",
+      "PUMP",
+      "LINK",
+      "AAVE",
+      "LTC",
+      "XLM",
+      "PEPE",
+      "BCH",
+      "INJ",
+      "ONDO",
+      "ENA",
+      "WLD",
+      "ADA",
+      "SUI",
+      "HBAR",
+      "FIL",
+      "AVAX",
+      "FET",
+      "PENGU",
+      "TRUMP",
+      "DOT",
+      "XPL"
+    ],
+    "core": [
+      "BTC",
       "ETH"
+    ],
+    "crypto_allowlist": [
+      "ARB",
+      "BNB",
+      "CKB",
+      "DGB",
+      "SHIB",
+      "TRB"
     ],
     "data_only_symbols": [
       "BNB/USDT"
     ],
+    "excluded_bases": [
+      "XAUT",
+      "PAXG"
+    ],
     "pairs": [
       "BTC/USDT",
-      "ETH/USDT"
+      "ETH/USDT",
+      "ZEC/USDT",
+      "NEAR/USDT",
+      "XRP/USDT",
+      "SOL/USDT",
+      "DOGE/USDT",
+      "TRX/USDT",
+      "UNI/USDT",
+      "TAO/USDT",
+      "PUMP/USDT",
+      "LINK/USDT",
+      "AAVE/USDT",
+      "LTC/USDT",
+      "XLM/USDT",
+      "PEPE/USDT",
+      "BCH/USDT",
+      "INJ/USDT",
+      "ONDO/USDT",
+      "ENA/USDT",
+      "WLD/USDT",
+      "ADA/USDT",
+      "SUI/USDT",
+      "HBAR/USDT",
+      "FIL/USDT",
+      "AVAX/USDT",
+      "FET/USDT",
+      "PENGU/USDT",
+      "TRUMP/USDT",
+      "DOT/USDT",
+      "XPL/USDT"
     ],
-    "quote": "USDT"
+    "quote": "USDT",
+    "refresh": {
+      "cron": "0 18 * * 0",
+      "deadline_s": 1800,
+      "exit_only_weeks": 4,
+      "history_days": 1000,
+      "max_tradeable_shrink": 0.5,
+      "max_workers": 6,
+      "snapshot_dir": "knowledge/universe"
+    },
+    "rules": {
+      "equity_token_pattern": "^[A-Z]{2,6}B$",
+      "leveraged_suffixes": [
+        "UP",
+        "DOWN",
+        "BULL",
+        "BEAR"
+      ],
+      "max_tick_bps": 50.0,
+      "min_ann_vol_120d": 0.2,
+      "min_listing_age_days": 180,
+      "min_median_quote_volume_usdt": 1000000.0,
+      "min_weekend_volume_ratio": 0.35,
+      "require_ascii_base": true,
+      "vol_window_days": 120,
+      "volume_window_days": 90,
+      "weekend_window_days": 120
+    },
+    "score": {
+      "liquidity_weight": 0.4,
+      "long_trend_days": 365,
+      "long_trend_weight": 0.25,
+      "ma_days": 200,
+      "trend_quality_weight": 0.35,
+      "vol_band": [
+        0.4,
+        1.5
+      ],
+      "vol_lookback_days": 60
+    },
+    "snapshot": {
+      "caps": {
+        "0G": 0.0,
+        "AAVE": 0.05,
+        "ACE": 0.0,
+        "ADA": 0.05,
+        "ALGO": 0.0,
+        "ALLO": 0.0,
+        "APT": 0.0,
+        "AR": 0.0,
+        "ARB": 0.0,
+        "ASTER": 0.0,
+        "ATOM": 0.0,
+        "AVAX": 0.05,
+        "BANK": 0.0,
+        "BCH": 0.05,
+        "BICO": 0.0,
+        "BIO": 0.0,
+        "BOME": 0.0,
+        "BONK": 0.0,
+        "BTC": 0.4,
+        "CAKE": 0.0,
+        "CFG": 0.0,
+        "CHZ": 0.0,
+        "COTI": 0.0,
+        "CRV": 0.0,
+        "DASH": 0.0,
+        "DEXE": 0.0,
+        "DODO": 0.0,
+        "DOGE": 0.15,
+        "DOT": 0.05,
+        "EIGEN": 0.0,
+        "ENA": 0.05,
+        "ENSO": 0.0,
+        "EPIC": 0.0,
+        "ETC": 0.0,
+        "ETH": 0.3,
+        "ETHFI": 0.0,
+        "FET": 0.05,
+        "FF": 0.0,
+        "FIL": 0.05,
+        "FLOKI": 0.0,
+        "GALA": 0.0,
+        "GIGGLE": 0.0,
+        "HBAR": 0.05,
+        "HEI": 0.0,
+        "HEMI": 0.0,
+        "HOME": 0.0,
+        "ICP": 0.0,
+        "INJ": 0.05,
+        "JST": 0.0,
+        "JTO": 0.0,
+        "JUP": 0.0,
+        "KAITO": 0.0,
+        "KITE": 0.0,
+        "LDO": 0.0,
+        "LINK": 0.05,
+        "LTC": 0.05,
+        "LUNC": 0.0,
+        "MMT": 0.0,
+        "MORPHO": 0.0,
+        "MUBARAK": 0.0,
+        "NEAR": 0.15,
+        "NEIRO": 0.0,
+        "NIGHT": 0.0,
+        "NIL": 0.0,
+        "ONDO": 0.05,
+        "OP": 0.0,
+        "ORDI": 0.0,
+        "PENDLE": 0.0,
+        "PENGU": 0.05,
+        "PEPE": 0.05,
+        "PLUME": 0.0,
+        "POL": 0.0,
+        "PROM": 0.0,
+        "PUMP": 0.05,
+        "PYTH": 0.0,
+        "RENDER": 0.0,
+        "RIF": 0.0,
+        "ROBO": 0.0,
+        "RUNE": 0.0,
+        "SEI": 0.0,
+        "SHIB": 0.0,
+        "SKY": 0.0,
+        "SOL": 0.15,
+        "SPK": 0.0,
+        "STRK": 0.0,
+        "SUI": 0.05,
+        "SYN": 0.0,
+        "TAO": 0.05,
+        "TIA": 0.0,
+        "TRUMP": 0.05,
+        "TRX": 0.15,
+        "TST": 0.0,
+        "TUT": 0.0,
+        "UNI": 0.05,
+        "VIRTUAL": 0.0,
+        "WBTC": 0.0,
+        "WIF": 0.0,
+        "WLD": 0.05,
+        "WLFI": 0.0,
+        "XLM": 0.05,
+        "XPL": 0.05,
+        "XRP": 0.15,
+        "ZAMA": 0.0,
+        "ZBT": 0.0,
+        "ZEC": 0.15,
+        "ZEN": 0.0,
+        "ZRO": 0.0
+      },
+      "date": "2026-09-23",
+      "exit_only": [],
+      "filters": {
+        "0G": {
+          "min_notional": 5.0,
+          "step_notional": 0.002453
+        },
+        "AAVE": {
+          "min_notional": 5.0,
+          "step_notional": 0.14806
+        },
+        "ACE": {
+          "min_notional": 5.0,
+          "step_notional": 0.01739
+        },
+        "ADA": {
+          "min_notional": 5.0,
+          "step_notional": 0.02543
+        },
+        "ALGO": {
+          "min_notional": 5.0,
+          "step_notional": 0.1121
+        },
+        "ALLO": {
+          "min_notional": 5.0,
+          "step_notional": 0.03011
+        },
+        "APT": {
+          "min_notional": 5.0,
+          "step_notional": 0.00829
+        },
+        "AR": {
+          "min_notional": 5.0,
+          "step_notional": 0.04523
+        },
+        "ARB": {
+          "min_notional": 5.0,
+          "step_notional": 0.02353
+        },
+        "ASTER": {
+          "min_notional": 5.0,
+          "step_notional": 0.0073
+        },
+        "ATOM": {
+          "min_notional": 5.0,
+          "step_notional": 0.01846
+        },
+        "AVAX": {
+          "min_notional": 5.0,
+          "step_notional": 0.11313
+        },
+        "BANK": {
+          "min_notional": 5.0,
+          "step_notional": 0.00343
+        },
+        "BCH": {
+          "min_notional": 5.0,
+          "step_notional": 0.3451
+        },
+        "BICO": {
+          "min_notional": 5.0,
+          "step_notional": 0.0002283
+        },
+        "BIO": {
+          "min_notional": 5.0,
+          "step_notional": 0.003006
+        },
+        "BOME": {
+          "min_notional": 1.0,
+          "step_notional": 0.0011059
+        },
+        "BONK": {
+          "min_notional": 1.0,
+          "step_notional": 3.62e-06
+        },
+        "BTC": {
+          "min_notional": 5.0,
+          "step_notional": 0.8620856
+        },
+        "CAKE": {
+          "min_notional": 5.0,
+          "step_notional": 0.02569
+        },
+        "CFG": {
+          "min_notional": 5.0,
+          "step_notional": 0.0139
+        },
+        "CHZ": {
+          "min_notional": 5.0,
+          "step_notional": 0.01714
+        },
+        "COTI": {
+          "min_notional": 5.0,
+          "step_notional": 0.01543
+        },
+        "CRV": {
+          "min_notional": 5.0,
+          "step_notional": 0.03625
+        },
+        "DASH": {
+          "min_notional": 5.0,
+          "step_notional": 0.06418
+        },
+        "DEXE": {
+          "min_notional": 5.0,
+          "step_notional": 0.01982
+        },
+        "DODO": {
+          "min_notional": 5.0,
+          "step_notional": 0.001844
+        },
+        "DOGE": {
+          "min_notional": 1.0,
+          "step_notional": 0.10044
+        },
+        "DOT": {
+          "min_notional": 5.0,
+          "step_notional": 0.01219
+        },
+        "EIGEN": {
+          "min_notional": 5.0,
+          "step_notional": 0.002521
+        },
+        "ENA": {
+          "min_notional": 5.0,
+          "step_notional": 0.002165
+        },
+        "ENSO": {
+          "min_notional": 5.0,
+          "step_notional": 0.0102
+        },
+        "EPIC": {
+          "min_notional": 5.0,
+          "step_notional": 0.05571
+        },
+        "ETC": {
+          "min_notional": 5.0,
+          "step_notional": 0.0944
+        },
+        "ETH": {
+          "min_notional": 5.0,
+          "step_notional": 0.275363
+        },
+        "ETHFI": {
+          "min_notional": 5.0,
+          "step_notional": 0.07091
+        },
+        "FET": {
+          "min_notional": 5.0,
+          "step_notional": 0.02097
+        },
+        "FF": {
+          "min_notional": 5.0,
+          "step_notional": 0.012875
+        },
+        "FIL": {
+          "min_notional": 5.0,
+          "step_notional": 0.01044
+        },
+        "FLOKI": {
+          "min_notional": 1.0,
+          "step_notional": 3.032e-05
+        },
+        "GALA": {
+          "min_notional": 5.0,
+          "step_notional": 0.002157
+        },
+        "GIGGLE": {
+          "min_notional": 1.0,
+          "step_notional": 0.04207
+        },
+        "HBAR": {
+          "min_notional": 5.0,
+          "step_notional": 0.0991
+        },
+        "HEI": {
+          "min_notional": 5.0,
+          "step_notional": 0.01549
+        },
+        "HEMI": {
+          "min_notional": 5.0,
+          "step_notional": 0.000652
+        },
+        "HOME": {
+          "min_notional": 5.0,
+          "step_notional": 0.00656
+        },
+        "ICP": {
+          "min_notional": 5.0,
+          "step_notional": 0.03022
+        },
+        "INJ": {
+          "min_notional": 5.0,
+          "step_notional": 0.07903
+        },
+        "JST": {
+          "min_notional": 5.0,
+          "step_notional": 0.011259
+        },
+        "JTO": {
+          "min_notional": 5.0,
+          "step_notional": 0.0523
+        },
+        "JUP": {
+          "min_notional": 5.0,
+          "step_notional": 0.03023
+        },
+        "KAITO": {
+          "min_notional": 5.0,
+          "step_notional": 0.03679
+        },
+        "KITE": {
+          "min_notional": 5.0,
+          "step_notional": 0.01381
+        },
+        "LDO": {
+          "min_notional": 5.0,
+          "step_notional": 0.004336
+        },
+        "LINK": {
+          "min_notional": 5.0,
+          "step_notional": 0.13046
+        },
+        "LTC": {
+          "min_notional": 5.0,
+          "step_notional": 0.06298
+        },
+        "LUNC": {
+          "min_notional": 5.0,
+          "step_notional": 5.7e-07
+        },
+        "MMT": {
+          "min_notional": 5.0,
+          "step_notional": 0.01729
+        },
+        "MORPHO": {
+          "min_notional": 5.0,
+          "step_notional": 0.02632
+        },
+        "MUBARAK": {
+          "min_notional": 1.0,
+          "step_notional": 0.007866
+        },
+        "NEAR": {
+          "min_notional": 5.0,
+          "step_notional": 0.4426
+        },
+        "NEIRO": {
+          "min_notional": 1.0,
+          "step_notional": 9.944e-05
+        },
+        "NIGHT": {
+          "min_notional": 5.0,
+          "step_notional": 0.02425
+        },
+        "NIL": {
+          "min_notional": 5.0,
+          "step_notional": 0.008184
+        },
+        "ONDO": {
+          "min_notional": 5.0,
+          "step_notional": 0.04413
+        },
+        "OP": {
+          "min_notional": 5.0,
+          "step_notional": 0.001353
+        },
+        "ORDI": {
+          "min_notional": 5.0,
+          "step_notional": 0.04952
+        },
+        "PENDLE": {
+          "min_notional": 5.0,
+          "step_notional": 0.2513
+        },
+        "PENGU": {
+          "min_notional": 1.0,
+          "step_notional": 0.010055
+        },
+        "PEPE": {
+          "min_notional": 1.0,
+          "step_notional": 4.99e-06
+        },
+        "PLUME": {
+          "min_notional": 5.0,
+          "step_notional": 0.01635
+        },
+        "POL": {
+          "min_notional": 5.0,
+          "step_notional": 0.010962
+        },
+        "PROM": {
+          "min_notional": 5.0,
+          "step_notional": 0.04975
+        },
+        "PUMP": {
+          "min_notional": 5.0,
+          "step_notional": 0.004484
+        },
+        "PYTH": {
+          "min_notional": 5.0,
+          "step_notional": 0.00673
+        },
+        "RENDER": {
+          "min_notional": 5.0,
+          "step_notional": 0.01852
+        },
+        "RIF": {
+          "min_notional": 5.0,
+          "step_notional": 0.0918
+        },
+        "ROBO": {
+          "min_notional": 5.0,
+          "step_notional": 0.00994
+        },
+        "RUNE": {
+          "min_notional": 5.0,
+          "step_notional": 0.0641
+        },
+        "SEI": {
+          "min_notional": 5.0,
+          "step_notional": 0.006157
+        },
+        "SHIB": {
+          "min_notional": 1.0,
+          "step_notional": 6.11e-06
+        },
+        "SKY": {
+          "min_notional": 5.0,
+          "step_notional": 0.06929
+        },
+        "SOL": {
+          "min_notional": 5.0,
+          "step_notional": 0.11857
+        },
+        "SPK": {
+          "min_notional": 5.0,
+          "step_notional": 0.022186
+        },
+        "STRK": {
+          "min_notional": 5.0,
+          "step_notional": 0.000425
+        },
+        "SUI": {
+          "min_notional": 5.0,
+          "step_notional": 0.10236
+        },
+        "SYN": {
+          "min_notional": 5.0,
+          "step_notional": 0.023448
+        },
+        "TAO": {
+          "min_notional": 5.0,
+          "step_notional": 0.0315
+        },
+        "TIA": {
+          "min_notional": 5.0,
+          "step_notional": 0.005207
+        },
+        "TRUMP": {
+          "min_notional": 1.0,
+          "step_notional": 0.002244
+        },
+        "TRX": {
+          "min_notional": 5.0,
+          "step_notional": 0.03421
+        },
+        "TST": {
+          "min_notional": 1.0,
+          "step_notional": 0.001889
+        },
+        "TUT": {
+          "min_notional": 1.0,
+          "step_notional": 0.02617
+        },
+        "UNI": {
+          "min_notional": 5.0,
+          "step_notional": 0.10226
+        },
+        "VIRTUAL": {
+          "min_notional": 5.0,
+          "step_notional": 0.07515
+        },
+        "WBTC": {
+          "min_notional": 5.0,
+          "step_notional": 0.8611993
+        },
+        "WIF": {
+          "min_notional": 1.0,
+          "step_notional": 0.002554
+        },
+        "WLD": {
+          "min_notional": 5.0,
+          "step_notional": 0.04714
+        },
+        "WLFI": {
+          "min_notional": 5.0,
+          "step_notional": 0.00584
+        },
+        "XLM": {
+          "min_notional": 5.0,
+          "step_notional": 0.2162
+        },
+        "XPL": {
+          "min_notional": 5.0,
+          "step_notional": 0.009637
+        },
+        "XRP": {
+          "min_notional": 5.0,
+          "step_notional": 0.15727
+        },
+        "ZAMA": {
+          "min_notional": 5.0,
+          "step_notional": 0.1017
+        },
+        "ZBT": {
+          "min_notional": 5.0,
+          "step_notional": 0.00922
+        },
+        "ZEC": {
+          "min_notional": 5.0,
+          "step_notional": 1.63005
+        },
+        "ZEN": {
+          "min_notional": 5.0,
+          "step_notional": 0.08167
+        },
+        "ZRO": {
+          "min_notional": 5.0,
+          "step_notional": 0.0139
+        }
+      },
+      "scores": {
+        "0G": 0.175,
+        "AAVE": 0.867614,
+        "ACE": 0.443007,
+        "ADA": 0.7809,
+        "ALGO": 0.634178,
+        "ALLO": 0.615385,
+        "APT": 0.623733,
+        "AR": 0.56993,
+        "ARB": 0.796547,
+        "ASTER": 0.638462,
+        "ATOM": 0.579021,
+        "AVAX": 0.752797,
+        "BANK": 0.238462,
+        "BCH": 0.846198,
+        "BICO": 0.340865,
+        "BIO": 0.398645,
+        "BOME": 0.575962,
+        "BONK": 0.397902,
+        "CAKE": 0.666914,
+        "CFG": 0.194231,
+        "CHZ": 0.355026,
+        "COTI": 0.363418,
+        "CRV": 0.682343,
+        "DASH": 0.871241,
+        "DEXE": 0.287281,
+        "DODO": 0.555114,
+        "DOGE": 0.840734,
+        "DOT": 0.687762,
+        "EIGEN": 0.498995,
+        "ENA": 0.797596,
+        "ENSO": 0.353846,
+        "EPIC": 0.356075,
+        "ETC": 0.597902,
+        "ETHFI": 0.726836,
+        "FET": 0.747771,
+        "FF": 0.457692,
+        "FIL": 0.768313,
+        "FLOKI": 0.465997,
+        "GALA": 0.269143,
+        "GIGGLE": 0.405769,
+        "HBAR": 0.770323,
+        "HEI": 0.482124,
+        "HEMI": 0.180769,
+        "HOME": 0.359266,
+        "ICP": 0.810402,
+        "INJ": 0.840341,
+        "JST": 0.614467,
+        "JTO": 0.602972,
+        "JUP": 0.708566,
+        "KAITO": 0.500524,
+        "KITE": 0.344231,
+        "LDO": 0.661976,
+        "LINK": 0.88951,
+        "LTC": 0.867439,
+        "LUNC": 0.47736,
+        "MMT": 0.407692,
+        "MORPHO": 0.507692,
+        "MUBARAK": 0.4934,
+        "NEAR": 0.963724,
+        "NEIRO": 0.470017,
+        "NIGHT": 0.240385,
+        "NIL": 0.236014,
+        "ONDO": 0.801923,
+        "OP": 0.543969,
+        "ORDI": 0.677142,
+        "PENDLE": 0.642045,
+        "PENGU": 0.720192,
+        "PEPE": 0.856425,
+        "PLUME": 0.45083,
+        "POL": 0.700918,
+        "PROM": 0.452491,
+        "PUMP": 0.906381,
+        "PYTH": 0.588549,
+        "RENDER": 0.662281,
+        "RIF": 0.647334,
+        "ROBO": 0.186538,
+        "RUNE": 0.568619,
+        "SEI": 0.520717,
+        "SHIB": 0.733523,
+        "SKY": 0.624432,
+        "SOL": 0.909091,
+        "SPK": 0.465647,
+        "STRK": 0.522684,
+        "SUI": 0.771372,
+        "SYN": 0.671329,
+        "TAO": 0.908217,
+        "TIA": 0.630551,
+        "TRUMP": 0.709003,
+        "TRX": 0.778365,
+        "TST": 0.373558,
+        "TUT": 0.506906,
+        "UNI": 0.949344,
+        "VIRTUAL": 0.772946,
+        "WBTC": 0.757386,
+        "WIF": 0.505813,
+        "WLD": 0.786407,
+        "WLFI": 0.306163,
+        "XLM": 0.856906,
+        "XPL": 0.673077,
+        "XRP": 0.912762,
+        "ZAMA": 0.592308,
+        "ZBT": 0.034615,
+        "ZEC": 0.996154,
+        "ZEN": 0.65035,
+        "ZRO": 0.770935
+      },
+      "sha256": "8a0016a32b15b795e9cb9750de74de19a7a8fa077865a4240dff567defc821b8",
+      "tiers": {
+        "0G": "watchlist",
+        "AAVE": "satellite",
+        "ACE": "watchlist",
+        "ADA": "satellite",
+        "ALGO": "watchlist",
+        "ALLO": "watchlist",
+        "APT": "watchlist",
+        "AR": "watchlist",
+        "ARB": "watchlist",
+        "ASTER": "watchlist",
+        "ATOM": "watchlist",
+        "AVAX": "satellite",
+        "BANK": "watchlist",
+        "BCH": "satellite",
+        "BICO": "watchlist",
+        "BIO": "watchlist",
+        "BOME": "watchlist",
+        "BONK": "watchlist",
+        "BTC": "core",
+        "CAKE": "watchlist",
+        "CFG": "watchlist",
+        "CHZ": "watchlist",
+        "COTI": "watchlist",
+        "CRV": "watchlist",
+        "DASH": "watchlist",
+        "DEXE": "watchlist",
+        "DODO": "watchlist",
+        "DOGE": "major",
+        "DOT": "satellite",
+        "EIGEN": "watchlist",
+        "ENA": "satellite",
+        "ENSO": "watchlist",
+        "EPIC": "watchlist",
+        "ETC": "watchlist",
+        "ETH": "core",
+        "ETHFI": "watchlist",
+        "FET": "satellite",
+        "FF": "watchlist",
+        "FIL": "satellite",
+        "FLOKI": "watchlist",
+        "GALA": "watchlist",
+        "GIGGLE": "watchlist",
+        "HBAR": "satellite",
+        "HEI": "watchlist",
+        "HEMI": "watchlist",
+        "HOME": "watchlist",
+        "ICP": "watchlist",
+        "INJ": "satellite",
+        "JST": "watchlist",
+        "JTO": "watchlist",
+        "JUP": "watchlist",
+        "KAITO": "watchlist",
+        "KITE": "watchlist",
+        "LDO": "watchlist",
+        "LINK": "satellite",
+        "LTC": "satellite",
+        "LUNC": "watchlist",
+        "MMT": "watchlist",
+        "MORPHO": "watchlist",
+        "MUBARAK": "watchlist",
+        "NEAR": "major",
+        "NEIRO": "watchlist",
+        "NIGHT": "watchlist",
+        "NIL": "watchlist",
+        "ONDO": "satellite",
+        "OP": "watchlist",
+        "ORDI": "watchlist",
+        "PENDLE": "watchlist",
+        "PENGU": "satellite",
+        "PEPE": "satellite",
+        "PLUME": "watchlist",
+        "POL": "watchlist",
+        "PROM": "watchlist",
+        "PUMP": "satellite",
+        "PYTH": "watchlist",
+        "RENDER": "watchlist",
+        "RIF": "watchlist",
+        "ROBO": "watchlist",
+        "RUNE": "watchlist",
+        "SEI": "watchlist",
+        "SHIB": "watchlist",
+        "SKY": "watchlist",
+        "SOL": "major",
+        "SPK": "watchlist",
+        "STRK": "watchlist",
+        "SUI": "satellite",
+        "SYN": "watchlist",
+        "TAO": "satellite",
+        "TIA": "watchlist",
+        "TRUMP": "satellite",
+        "TRX": "major",
+        "TST": "watchlist",
+        "TUT": "watchlist",
+        "UNI": "satellite",
+        "VIRTUAL": "watchlist",
+        "WBTC": "watchlist",
+        "WIF": "watchlist",
+        "WLD": "satellite",
+        "WLFI": "watchlist",
+        "XLM": "satellite",
+        "XPL": "satellite",
+        "XRP": "major",
+        "ZAMA": "watchlist",
+        "ZBT": "watchlist",
+        "ZEC": "major",
+        "ZEN": "watchlist",
+        "ZRO": "watchlist"
+      }
+    },
+    "snapshot_ref": {
+      "date": "2026-09-23",
+      "sha256": "8a0016a32b15b795e9cb9750de74de19a7a8fa077865a4240dff567defc821b8"
+    },
+    "tiers": {
+      "major": {
+        "min_listing_age_days": 730,
+        "min_median_quote_volume_usdt": 25000000.0
+      },
+      "satellite": {
+        "min_listing_age_days": 0,
+        "min_median_quote_volume_usdt": 5000000.0
+      }
+    },
+    "watchlist_assets": [
+      "BTC",
+      "ETH",
+      "ZEC",
+      "NEAR",
+      "XRP",
+      "SOL",
+      "DOGE",
+      "TRX",
+      "UNI",
+      "TAO",
+      "PUMP",
+      "LINK",
+      "AAVE",
+      "LTC",
+      "XLM",
+      "PEPE",
+      "BCH",
+      "INJ",
+      "ONDO",
+      "ENA",
+      "WLD",
+      "ADA",
+      "SUI",
+      "HBAR",
+      "FIL",
+      "AVAX",
+      "FET",
+      "PENGU",
+      "TRUMP",
+      "DOT",
+      "XPL",
+      "DASH",
+      "ICP",
+      "ARB",
+      "VIRTUAL",
+      "ZRO",
+      "WBTC",
+      "SHIB",
+      "ETHFI",
+      "JUP",
+      "POL",
+      "CRV",
+      "ORDI",
+      "SYN",
+      "CAKE",
+      "RENDER",
+      "LDO",
+      "ZEN",
+      "RIF",
+      "PENDLE",
+      "ASTER",
+      "ALGO",
+      "TIA",
+      "SKY",
+      "APT",
+      "ALLO",
+      "JST",
+      "JTO",
+      "ETC",
+      "ZAMA",
+      "PYTH",
+      "ATOM",
+      "BOME",
+      "AR",
+      "RUNE",
+      "DODO",
+      "OP",
+      "STRK",
+      "SEI",
+      "MORPHO",
+      "TUT",
+      "WIF",
+      "KAITO",
+      "EIGEN",
+      "MUBARAK",
+      "HEI",
+      "LUNC",
+      "NEIRO",
+      "FLOKI",
+      "SPK",
+      "FF",
+      "PROM",
+      "PLUME",
+      "ACE",
+      "MMT",
+      "GIGGLE",
+      "BIO",
+      "BONK",
+      "TST",
+      "COTI",
+      "HOME",
+      "EPIC",
+      "CHZ",
+      "ENSO",
+      "KITE",
+      "BICO",
+      "WLFI",
+      "DEXE",
+      "GALA",
+      "NIGHT",
+      "BANK",
+      "NIL",
+      "CFG",
+      "ROBO",
+      "HEMI",
+      "0G",
+      "ZBT"
+    ],
+    "watchlist_pairs": [
+      "BTC/USDT",
+      "ETH/USDT",
+      "ZEC/USDT",
+      "NEAR/USDT",
+      "XRP/USDT",
+      "SOL/USDT",
+      "DOGE/USDT",
+      "TRX/USDT",
+      "UNI/USDT",
+      "TAO/USDT",
+      "PUMP/USDT",
+      "LINK/USDT",
+      "AAVE/USDT",
+      "LTC/USDT",
+      "XLM/USDT",
+      "PEPE/USDT",
+      "BCH/USDT",
+      "INJ/USDT",
+      "ONDO/USDT",
+      "ENA/USDT",
+      "WLD/USDT",
+      "ADA/USDT",
+      "SUI/USDT",
+      "HBAR/USDT",
+      "FIL/USDT",
+      "AVAX/USDT",
+      "FET/USDT",
+      "PENGU/USDT",
+      "TRUMP/USDT",
+      "DOT/USDT",
+      "XPL/USDT",
+      "DASH/USDT",
+      "ICP/USDT",
+      "ARB/USDT",
+      "VIRTUAL/USDT",
+      "ZRO/USDT",
+      "WBTC/USDT",
+      "SHIB/USDT",
+      "ETHFI/USDT",
+      "JUP/USDT",
+      "POL/USDT",
+      "CRV/USDT",
+      "ORDI/USDT",
+      "SYN/USDT",
+      "CAKE/USDT",
+      "RENDER/USDT",
+      "LDO/USDT",
+      "ZEN/USDT",
+      "RIF/USDT",
+      "PENDLE/USDT",
+      "ASTER/USDT",
+      "ALGO/USDT",
+      "TIA/USDT",
+      "SKY/USDT",
+      "APT/USDT",
+      "ALLO/USDT",
+      "JST/USDT",
+      "JTO/USDT",
+      "ETC/USDT",
+      "ZAMA/USDT",
+      "PYTH/USDT",
+      "ATOM/USDT",
+      "BOME/USDT",
+      "AR/USDT",
+      "RUNE/USDT",
+      "DODO/USDT",
+      "OP/USDT",
+      "STRK/USDT",
+      "SEI/USDT",
+      "MORPHO/USDT",
+      "TUT/USDT",
+      "WIF/USDT",
+      "KAITO/USDT",
+      "EIGEN/USDT",
+      "MUBARAK/USDT",
+      "HEI/USDT",
+      "LUNC/USDT",
+      "NEIRO/USDT",
+      "FLOKI/USDT",
+      "SPK/USDT",
+      "FF/USDT",
+      "PROM/USDT",
+      "PLUME/USDT",
+      "ACE/USDT",
+      "MMT/USDT",
+      "GIGGLE/USDT",
+      "BIO/USDT",
+      "BONK/USDT",
+      "TST/USDT",
+      "COTI/USDT",
+      "HOME/USDT",
+      "EPIC/USDT",
+      "CHZ/USDT",
+      "ENSO/USDT",
+      "KITE/USDT",
+      "BICO/USDT",
+      "WLFI/USDT",
+      "DEXE/USDT",
+      "GALA/USDT",
+      "NIGHT/USDT",
+      "BANK/USDT",
+      "NIL/USDT",
+      "CFG/USDT",
+      "ROBO/USDT",
+      "HEMI/USDT",
+      "0G/USDT",
+      "ZBT/USDT"
+    ]
   }
 }

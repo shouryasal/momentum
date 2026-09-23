@@ -29,13 +29,19 @@ export interface MeterBarProps {
   /** A floor (usdt_floor) is healthy ABOVE its limit, so "used" is read the other way. */
   floor?: boolean;
   help?: string;
+  /** Shown instead of the headroom line when `meter.valid === false`. */
+  unknownReason?: string;
 }
 
-export function MeterBar({ label, meter, unit = 'fraction', floor = false, help }:
-MeterBarProps) {
+export function MeterBar({ label, meter, unit = 'fraction', floor = false, help,
+  unknownReason }: MeterBarProps) {
+  // `valid === false` means the server could not compute this one (no NAV). Drawing 0%
+  // would claim the sleeve is flat, and a floor whose headroom is `0 - limit` would claim
+  // a breach; both are worse than saying nothing.
+  const unknown = meter.valid === false;
   const raw = Number.isFinite(meter.pct) ? meter.pct : 0;
-  const pct = Math.max(0, Math.min(raw, 1));
-  const breached = floor ? meter.headroom < 0 : meter.used > meter.limit;
+  const pct = unknown ? 0 : Math.max(0, Math.min(raw, 1));
+  const breached = !unknown && (floor ? meter.headroom < 0 : meter.used > meter.limit);
   return (
     <Stack gap={4} data-testid={`meter-${label}`}>
       <Group justify="space-between" gap="xs">
@@ -44,18 +50,19 @@ MeterBarProps) {
             {label}
           </Text>
         </Tooltip>
-        <Text size="sm" c={breached ? 'red' : undefined} ff="monospace">
-          {fmt(meter.used, unit)} / {fmt(meter.limit, unit)}
+        <Text size="sm" c={breached ? 'red' : unknown ? 'dimmed' : undefined} ff="monospace">
+          {unknown ? `— / ${fmt(meter.limit, unit)}` : `${fmt(meter.used, unit)} / ${fmt(meter.limit, unit)}`}
         </Text>
       </Group>
       <Progress
         value={pct * 100}
-        color={breached ? 'red' : tone(pct)}
+        color={breached ? 'red' : unknown ? 'gray' : tone(pct)}
         aria-label={`${label} utilisation`}
       />
       <Text size="xs" c="dimmed">
-        {floor ? 'above the floor by ' : 'headroom '}
-        {fmt(meter.headroom, unit)}
+        {unknown
+          ? (unknownReason ?? 'unknown — NAV could not be read')
+          : `${floor ? 'above the floor by ' : 'headroom '}${fmt(meter.headroom, unit)}`}
       </Text>
     </Stack>
   );

@@ -1,10 +1,16 @@
-"""Resume a sleeve after the monthly stop. TIER 2, HUMAN-ONLY.
+"""Resume a sleeve after the monthly stop, EARLY. TIER 2, HUMAN-ONLY.
 
-The monthly stop is the one limit code may never clear by itself. This module is the
-single supported way a human does it, and it exists because clearing the flag alone
-never worked (verified HIGH #10): the next ``loop_tick`` compared the reduced NAV with
-the pre-drawdown anchor and re-locked within seconds, while ten-year freqtrade pair
-locks from the old flatten stayed behind.
+The monthly stop is a drawdown measured from the Gulf-month anchor, so it has one
+natural expiry: the end of that month. ``RiskGate.loop_tick`` re-anchors and releases
+the lock at the boundary in every mode (``GateConfig.monthly_lock_release`` —
+``month_end`` in TEST/backtest, ``human_or_month_end`` in LIVE). This module is the
+LIVE-only early exit: the human gate that lets an operator resume *before* the month
+turns. Nothing here is required for the lock to end; without it the sleeve resumes on
+the first tick of the next Gulf month.
+
+It exists because clearing the flag alone never worked (verified HIGH #10): the next
+``loop_tick`` compared the reduced NAV with the pre-drawdown anchor and re-locked within
+seconds, while ten-year freqtrade pair locks from the old flatten stayed behind.
 
 ``resume()`` therefore does three things atomically from the operator's point of view:
 
@@ -198,13 +204,27 @@ def resume(cfg: EarnConfig, sleeve: str, actor: str, *, api: Any = None,
     return report
 
 
-def status(cfg: EarnConfig, sleeve: str, *, root: Path | None = None) -> dict[str, Any]:
-    """Read-only view for the console's Risk page (no writes, no actor needed)."""
+def status(cfg: EarnConfig, sleeve: str, *, root: Path | None = None,
+           now: datetime | None = None) -> dict[str, Any]:
+    """Read-only view for the console's Risk page (no writes, no actor needed).
+
+    ``monthly_locked`` is the EFFECTIVE state: a lock whose Gulf month has already
+    ended reads as clear here even if the bot has not ticked since, because that is
+    what the gate will enforce on the next entry. ``monthly_lock_flag_set`` is the raw
+    stored flag and ``monthly_lock_expires_after`` the month it dies with, so the page
+    can say "paused for 2026-09, ends 2026-10-01 Gulf" instead of just "locked".
+    """
     gate = gate_for(cfg, sleeve, root=root)
     store = gate.store
+    moment = (now or datetime.now(UTC)).astimezone(UTC)
+    lock = gate.monthly_lock_status(moment)
     return {
         "sleeve": sleeve,
-        "monthly_locked": store.get("monthly_locked") == "1",
+        "monthly_locked": lock["locked"],
+        "monthly_lock_flag_set": lock["flag_set"],
+        "monthly_lock_expires_after": lock["expires_at_month_end"],
+        "monthly_lock_release": lock["release"],
+        "monthly_unlocked_utc": lock["unlocked_utc"],
         "monthly_locked_month": store.get("monthly_locked_month") or "",
         "monthly_resumed_utc": store.get("monthly_resumed_utc") or "",
         "month_anchor_nav": _f(store.get("month_anchor_nav")),

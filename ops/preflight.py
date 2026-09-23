@@ -1,4 +1,17 @@
-"""The 13-item live preflight (spec §8.3).
+"""The live preflight (spec §8.3), and the shorter one demo arms through.
+
+Fourteen items now. The new one is ``venue_binding``, and it is the item that makes "a mode
+is bound to exactly one venue" true in code rather than in a comment: the credential must
+authenticate at the venue this target may reach, and be **refused** by every other one. A
+probe that could not be completed is ``cannot_verify``, and ``cannot_verify`` FAILS — a
+network that was down looks exactly like a key that was rejected, and only one of those is
+safe to proceed on.
+
+Three regimes (:func:`_applies`): live runs everything; **demo** runs
+:data:`DEMO_CHECKS` — every item that protects the order path, none of the items that exist
+to earn confidence before risking money (no 90-day test track record, no propose track
+record, no host-awake requirement, and Telegram is advisory); back to TEST runs only the
+safety items, because the way out is never gated.
 
 A preflight is a *snapshot of evidence*, not an opinion: every item names what it looked
 at and what it saw, so the Mode page can show the operator the same facts the transition
@@ -18,6 +31,7 @@ suite opens a socket or shells out.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -27,10 +41,20 @@ from pathlib import Path
 from typing import Any
 
 from ops.config import REPO_ROOT, EarnConfig
-from ops.lib import binance_check, config_guard, paths, signing
+from ops.lib import binance_check, config_guard, mode_view, paths, signing
 from ops.lib import flags as flagslib
 from ops.lib import kill as killlib
 from ops.lib import mode_state as ms
+from ops.lib.exchange_endpoints import (
+    Credential,
+    Prober,
+    Venue,
+    VenueBindingError,
+    endpoints_for,
+    resolve_binding,
+    venue_for_mode,
+    verify_credential_venue,
+)
 
 PREFLIGHT_TTL_MINUTES = 10
 BACKUP_MAX_AGE_HOURS = 26
@@ -46,13 +70,16 @@ SKIP = "skip"
 #: the only item a human may override, and only with a typed reason
 OVERRIDABLE: frozenset[str] = frozenset({"track_record"})
 
-LIVE_TARGETS: frozenset[str] = frozenset({"LIVE_PROPOSE", "LIVE_EXECUTE"})
+LIVE_TARGETS: frozenset[str] = frozenset(ms.LIVE_MODES)
+DEMO_TARGETS: frozenset[str] = frozenset(ms.DEMO_MODES)
+VENUE_TARGETS: frozenset[str] = LIVE_TARGETS | DEMO_TARGETS
 
 #: item id -> (title, blocking) in the order the UI shows them
 CHECK_ORDER: tuple[tuple[str, str, bool], ...] = (
     ("kill_clear", "Kill switch clear, no blocking flags, data fresh", True),
     ("bots_healthy", "Both bots healthy on a real strategy, gate active", True),
     ("config_blessed", "Config blessed, git clean, generated files in sync", True),
+    ("venue_binding", "The key belongs to this mode's venue, and to no other", True),
     ("exchange_keys", "Exchange key present, spot-only, account not already live", True),
     ("seed_ok", "Seed within ceiling and covered by free balance", True),
     ("track_record", "Test track record and breach-free streak", True),
@@ -64,6 +91,24 @@ CHECK_ORDER: tuple[tuple[str, str, bool], ...] = (
     ("strategy_tests", "strategies test suite green", False),
     ("propose_track_record", "Time in LIVE_PROPOSE with a high approval rate", True),
 )
+
+#: Which items a **demo** arming runs. Demo is a real venue, so every item that protects
+#: the *order path* applies unchanged; the items it omits are the ones that exist to buy
+#: confidence before risking money, and demo risks none:
+#:
+#: * ``track_record`` — 90 clean TEST days; that evidence is for the live decision, and
+#:   demanding it before demo would make demo unreachable, which defeats its purpose.
+#: * ``propose_track_record`` — 30 days in LIVE_PROPOSE with an 80% approval rate. Demo
+#:   has not been there and does not need to have been.
+#:
+#: Everything else — kill switch clear, containers healthy, config blessed, the venue
+#: binding, the key, the seed, exchange-side stops (demo's order types are byte-identical
+#: to live), the host and automation isolation — is required exactly as it is for live.
+DEMO_CHECKS: frozenset[str] = frozenset({
+    "kill_clear", "bots_healthy", "config_blessed", "venue_binding", "exchange_keys",
+    "seed_ok", "telegram", "stoploss_on_exchange", "host_ready", "automation_isolation",
+    "backups", "strategy_tests",
+})
 
 
 class PreflightError(Exception):
@@ -113,19 +158,51 @@ class PreflightRequest:
 
     @property
     def is_live(self) -> bool:
+        """Real money. Never true for a demo target."""
         return self.target in LIVE_TARGETS
 
     @property
+    def is_demo(self) -> bool:
+        return self.target in DEMO_TARGETS
+
+    @property
+    def is_venue_bound(self) -> bool:
+        """Demo or live: this arming needs a credential bound to exactly one venue."""
+        return self.target in VENUE_TARGETS
+
+    @property
+    def venue(self) -> Venue | None:
+        """The single venue this target may reach, or ``None`` for TEST.
+
+        Raises :class:`~ops.lib.exchange_endpoints.VenueBindingError` for a mode nobody
+        has bound to a venue — a new mode is a hard error here, never a default.
+        """
+        return venue_for_mode(self.target)
+
+    @property
     def is_execute(self) -> bool:
+        """This target places orders without a per-proposal approval (live **or** demo)."""
+        return self.target in ms.EXECUTE_MODES
+
+    @property
+    def is_live_execute(self) -> bool:
+        """LIVE_EXECUTE only — the gates that exist because real money moves unattended."""
         return self.target == "LIVE_EXECUTE"
 
     def to_json(self) -> dict[str, Any]:
+        venue: str | None
+        try:
+            v = self.venue
+            venue = v.value if v is not None else None
+        except VenueBindingError:
+            venue = None
         return {
             "sleeve": self.sleeve,
             "target": self.target,
             "submode": self.submode,
             "seed_usdt": self.seed_usdt,
             "override_reason": self.override_reason,
+            "venue": venue,
         }
 
 
@@ -194,6 +271,19 @@ class PreflightDeps:
     state: ms.ModeState | None = None
     now: datetime | None = None
 
+    #: The venue every exchange probe below is bound to. ``None`` means "these probes were
+    #: built without a venue", which is only ever right for a TEST arming. A mismatch
+    #: against the request's own venue is a blocking failure, not a silent re-point: the
+    #: probes carry a base URL and a key, and running live-shaped probes for a demo
+    #: transition is precisely the mistake this whole design exists to make impossible.
+    venue: Venue | None = None
+    #: The credential the probes were built from, labelled with its venue. Never carries
+    #: key material into a check's evidence — only ``describe()``.
+    credential: Credential | None = None
+    #: ``(venue, credential) -> authenticated | rejected | unreachable``. Used by
+    #: ``venue_binding`` to prove the key works where it claims **and nowhere else**.
+    venue_probe: Prober | None = None
+
     bot_status: Callable[[str], dict[str, Any]] | None = None
     exchange_account: Callable[[str], dict[str, Any]] | None = None
     exchange_restrictions: Callable[[str], dict[str, Any]] | None = None
@@ -236,11 +326,22 @@ def new_preflight_id() -> str:
 
 
 def _applies(check_id: str, request: PreflightRequest) -> bool:
-    """Disarming (back to TEST) only needs the safety items, not the go-live gauntlet."""
+    """Which items this particular arming runs.
+
+    Three regimes, and the difference between them is the whole point of demo mode:
+
+    * **live** — everything, including the 90-day track record and (for ``LIVE_EXECUTE``)
+      the propose track record;
+    * **demo** — :data:`DEMO_CHECKS`: every item that protects the order path, none of the
+      items that exist to earn confidence before risking money;
+    * **back to TEST** — only the safety items. The way out is never gated.
+    """
     if check_id == "propose_track_record":
-        return request.is_execute
+        return request.is_live_execute
     if request.is_live:
         return True
+    if request.is_demo:
+        return check_id in DEMO_CHECKS
     return check_id in {"kill_clear", "bots_healthy", "config_blessed"}
 
 
@@ -263,13 +364,37 @@ def _check_kill_clear(cfg: EarnConfig, req: PreflightRequest, d: PreflightDeps) 
     if blocked:
         problems.append(f"entries blocked by {why}")
 
+    # Arming starts from a state this preflight must be able to *name*. ``mode_view``'s own
+    # table has always said ``ops.preflight``: "refuse to arm (a lock it cannot rule out is
+    # a lock)" — and no such check existed, so a sleeve whose current mode could not be
+    # proven at all could still be walked into LIVE. The console holds
+    # ``$EARN_CONSOLE_SECRET``, so in the normal case the signed authority answers here and
+    # this never fires; when it does fire, the machine genuinely cannot say what the sleeve
+    # is doing right now, and that is not a state to transition *out of* blind. Disarming
+    # is deliberately exempt: the way back to TEST must never be blocked by not knowing.
+    view = mode_view.load(jdb=d.jdb, state=d.state, root=d.root, env=d.env)
+    mode = view.sleeve(req.sleeve)
+    evidence["mode_liveness"] = mode.liveness
+    evidence["mode_reason"] = mode.reason
+    evidence["mode_source"] = mode.source
+    if req.is_venue_bound and mode.unknown:
+        problems.append(
+            f"cannot prove sleeve {req.sleeve}'s current mode ({mode.reason}; mode state "
+            f"{mode.state_reason}) — refusing to arm from an unprovable state"
+        )
+
     if d.jdb is not None:
-        row = d.jdb.execute(
-            "SELECT value FROM risk_state WHERE sleeve=? AND key='monthly_locked'",
-            (req.sleeve,),
-        ).fetchone()
-        locked = bool(row and str(row["value"]).lower() in ("1", "true"))
+        # This blocking check was INERT. It queried the bare ``monthly_locked`` key, but
+        # ``RiskGate`` wraps its store in ``NamespacedStateStore`` whenever the runtime file
+        # names a run id (always, for a real run), so the gate writes
+        # ``run:<run_id>:monthly_locked``. The row was never found, the evidence read
+        # ``false``, the check passed, and a human was cleared to arm a sleeve sitting
+        # under its own monthly loss lock. ``mode_view.risk_flag`` reads the run-scoped key
+        # AND the bare one, and a lock it cannot rule out is a lock.
+        run_id = mode_view.active_run_id(d.jdb, req.sleeve, view=view)
+        locked = mode_view.risk_flag(d.jdb, req.sleeve, "monthly_locked", run_id=run_id)
         evidence["monthly_locked"] = locked
+        evidence["risk_state_run_id"] = run_id
         if locked:
             problems.append("sleeve is under a monthly loss lock")
 
@@ -391,19 +516,177 @@ def _check_config_blessed(cfg: EarnConfig, req: PreflightRequest, d: PreflightDe
     )
 
 
+#: Where each venue's credential lives in ``.env``. Demo has **its own names** on purpose,
+#: never the live ones with a flag beside them: the live key and the demo key are one edit
+#: apart in the owner's hands, and a shared name is how one becomes the other by accident.
+#: ``{S}`` is the upper-case sleeve id where a venue has a key per sleeve. Demo does not:
+#: there is one demo account, and both sleeves read the one key that
+#: ``add-demo-key.sh``/the console secrets page writes.
+VENUE_ENV_NAMES: dict[Venue, tuple[str, str]] = {
+    Venue.LIVE: ("BINANCE_KEY_{S}", "BINANCE_SECRET_{S}"),
+    Venue.DEMO: ("BINANCE_DEMO_KEY", "BINANCE_DEMO_SECRET"),
+    Venue.TESTNET: ("BINANCE_TESTNET_KEY", "BINANCE_TESTNET_SECRET"),
+}
+
+
+def credential_env_names(sleeve: str, venue: Venue) -> tuple[str, str]:
+    """``(key_env, secret_env)`` for one sleeve at one venue."""
+    key_tpl, secret_tpl = VENUE_ENV_NAMES[venue]
+    up = sleeve.upper()
+    return key_tpl.format(S=up), secret_tpl.format(S=up)
+
+
+def credential_for(
+    sleeve: str, venue: Venue, env: Mapping[str, str] | None = None
+) -> Credential:
+    """Read one sleeve's credential for one venue out of the environment.
+
+    The returned :class:`~ops.lib.exchange_endpoints.Credential` is *labelled* with the
+    venue it was read for — a claim, not proof. ``venue_binding`` is what turns the claim
+    into evidence, by checking the key against every venue and requiring it to be refused
+    by all but one.
+    """
+    e = env if env is not None else os.environ
+    key_env, secret_env = credential_env_names(sleeve, venue)
+    return Credential(
+        label=key_env,
+        venue=venue,
+        key=(e.get(key_env) or "").strip(),
+        secret=(e.get(secret_env) or "").strip(),
+    )
+
+
+def _check_venue_binding(cfg: EarnConfig, req: PreflightRequest, d: PreflightDeps) -> Check:
+    """The key belongs to this mode's venue — and is refused by every other one.
+
+    Two independent halves, both blocking:
+
+    1. :func:`~ops.lib.exchange_endpoints.resolve_binding` refuses on the *labels*: a mode
+       reaches exactly one venue, a TEST sleeve carries no key at all, and a credential
+       read for the wrong venue is a typed refusal before any config is built.
+    2. :func:`~ops.lib.exchange_endpoints.verify_credential_venue` refuses on the *facts*:
+       the key must authenticate where it claims **and be rejected everywhere else**.
+       ``cannot_verify`` — no key, or a venue that could not be reached — **fails**. That
+       is the whole reason the verdict is tri-state: a probe that could not be completed
+       looks exactly like a probe that found nothing, and only one of those is safe.
+    """
+    evidence: dict[str, Any] = {"target": req.target}
+    try:
+        venue = req.venue
+    except VenueBindingError as e:
+        return Check("venue_binding", CHECK_TITLES["venue_binding"], True, FAIL, str(e), evidence)
+    evidence["venue"] = venue.value if venue else None
+    if venue is not None:
+        ep = endpoints_for(venue)
+        evidence["rest_host"] = ep.rest_host
+        evidence["ws_stream"] = ep.ws_stream
+        evidence["supports_sapi"] = ep.supports_sapi
+
+    if d.venue is not None and venue is not None and d.venue is not venue:
+        return Check(
+            "venue_binding", CHECK_TITLES["venue_binding"], True, FAIL,
+            f"REFUSED: this preflight's exchange probes are bound to "
+            f"{d.venue.value} ({endpoints_for(d.venue).rest_host}) but target {req.target} "
+            f"may only reach {venue.value} ({endpoints_for(venue).rest_host}). The probes "
+            f"carry a base URL and a key; re-run the preflight for the right target rather "
+            f"than re-pointing them.",
+            evidence,
+        )
+
+    credential = d.credential
+    if credential is None and venue is not None:
+        credential = credential_for(req.sleeve, venue, d.env)
+    if credential is not None:
+        evidence["credential"] = credential.describe()
+
+    try:
+        binding = resolve_binding(req.target, credential)
+    except VenueBindingError as e:
+        return Check(
+            "venue_binding", CHECK_TITLES["venue_binding"], True, FAIL, str(e), evidence
+        )
+    evidence["binding"] = binding.describe()
+
+    if venue is None:
+        return Check(
+            "venue_binding", CHECK_TITLES["venue_binding"], True, PASS,
+            "TEST is bound to no venue and carries no exchange credential", evidence,
+        )
+
+    if d.venue_probe is None:
+        return Check(
+            "venue_binding", CHECK_TITLES["venue_binding"], True, FAIL,
+            "no venue probe available, so it is unproven that this key belongs to "
+            f"{venue.value} and is refused by every other venue. A label is a claim; "
+            "this check exists to turn it into evidence.",
+            evidence,
+        )
+
+    proof = verify_credential_venue(credential, probe=d.venue_probe)
+    evidence["proof"] = proof.to_json()
+    return Check(
+        "venue_binding", CHECK_TITLES["venue_binding"], True,
+        PASS if proof.ok else FAIL, proof.detail, evidence,
+    )
+
+
 def _check_exchange_keys(cfg: EarnConfig, req: PreflightRequest, d: PreflightDeps) -> Check:
     problems: list[str] = []
     warnings: list[str] = []
     evidence: dict[str, Any] = {}
 
-    keys = binance_check.keys_for(req.sleeve, d.env)
-    evidence["keys"] = keys.describe()
-    if not keys.present:
-        problems.append(f"{keys.key_env}/{keys.secret_env} not set")
+    try:
+        venue = req.venue
+    except VenueBindingError as e:
+        return Check(
+            "exchange_keys", CHECK_TITLES["exchange_keys"], True, FAIL, str(e), evidence
+        )
+    venue = venue or Venue.LIVE
+    ep = endpoints_for(venue)
+    evidence["venue"] = venue.value
+    evidence["rest_host"] = ep.rest_host
 
-    if d.exchange_restrictions is None:
+    credential = d.credential or credential_for(req.sleeve, venue, d.env)
+    evidence["keys"] = credential.describe()
+    if not credential.present:
+        key_env, secret_env = credential_env_names(req.sleeve, venue)
+        problems.append(
+            f"{key_env}/{secret_env} not set — mint a {venue.value} key at {ep.key_console}, "
+            f"enable spot trading, disable withdrawals, and put it in .env under those "
+            f"names (never in a config file, a prompt or chat)"
+        )
+
+    if not ep.supports_sapi:
+        # Demo genuinely has no ``/sapi`` tier: ``apiRestrictions`` is a sapi path and
+        # demo answers HTTP 404 from nginx where production answers a Binance error code
+        # (docs/design/demo-mode.md §4b). The 404 must NOT be read as "no restrictions" —
+        # that is a silent pass on the one permission (withdrawals) that cannot be undone.
+        # So the permission read is recorded as an explicit WARNING with the reason, and
+        # the blocking half that demo CAN answer stays: /api/v3/account authenticates, and
+        # ``venue_binding`` proves the key is demo-only. Minting the key
+        # withdrawal-disabled is a recorded manual step (§7).
+        evidence["permissions_readable"] = False
+        warnings.append(
+            f"{venue.value} has no /sapi tier, so key permissions cannot be read back "
+            f"({ep.rest_host}{binance_check.RESTRICTIONS_PATH} returns 404). Withdrawals "
+            f"being disabled is a MANUAL guarantee here — check it in "
+            f"{ep.key_console}. Not treated as a pass."
+        )
+        if d.exchange_account is None:
+            problems.append("no exchange account probe available")
+        else:
+            try:
+                account = d.exchange_account(req.sleeve) or {}
+                evidence["can_trade"] = account.get("canTrade")
+                evidence["account_type"] = account.get("accountType")
+                if account.get("canTrade") is False:
+                    problems.append(f"the {venue.value} key cannot trade (canTrade=false)")
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"{venue.value} account probe failed: {e}")
+    elif d.exchange_restrictions is None:
         problems.append("no exchange probe available")
     else:
+        evidence["permissions_readable"] = True
         try:
             report = binance_check.check_restrictions(d.exchange_restrictions(req.sleeve) or {})
             evidence["permissions"] = report.permissions
@@ -412,7 +695,9 @@ def _check_exchange_keys(cfg: EarnConfig, req: PreflightRequest, d: PreflightDep
         except Exception as e:  # noqa: BLE001
             problems.append(f"apiRestrictions probe failed: {e}")
 
-    if cfg.modes.live.one_live_sleeve_per_account:
+    # One-live-sleeve-per-account is a real-money rule: it exists so two sleeves cannot
+    # net each other out on one Binance account. Demo accounts are free and disposable.
+    if req.is_live and cfg.modes.live.one_live_sleeve_per_account:
         other_live = [
             s
             for s in paths.SLEEVES
@@ -447,16 +732,35 @@ def _check_exchange_keys(cfg: EarnConfig, req: PreflightRequest, d: PreflightDep
     )
 
 
+def max_seed_for(cfg: EarnConfig, sleeve: str, target: str) -> tuple[float, str]:
+    """``(ceiling, the config key it came from)`` for one sleeve at one target.
+
+    A demo run should be sized like the live run it is rehearsing, so ``modes.demo`` gets
+    its **own** ceiling rather than borrowing ``modes.live.max_seed_usdt``: demo money is
+    free, and a 50-USDT rehearsal of a 1000-USDT book rehearses nothing (every notional
+    clamp, every ``min_notional`` rejection and every fee ratio differs). Until
+    ``config/earn.yaml`` grows a ``modes.demo`` block the live ceiling is inherited, which
+    is the conservative direction — never a *wider* limit than live by default.
+    """
+    if str(target).upper() in DEMO_TARGETS:
+        demo = getattr(cfg.modes, "demo", None)
+        caps = getattr(demo, "max_seed_usdt", None) if demo is not None else None
+        if isinstance(caps, Mapping) and sleeve in caps:
+            return float(caps[sleeve]), "modes.demo.max_seed_usdt"
+    return float(cfg.modes.live.max_seed_usdt.get(sleeve, 0.0)), "modes.live.max_seed_usdt"
+
+
 def _check_seed_ok(cfg: EarnConfig, req: PreflightRequest, d: PreflightDeps) -> Check:
     problems: list[str] = []
     evidence: dict[str, Any] = {"seed_usdt": req.seed_usdt}
-    ceiling = float(cfg.modes.live.max_seed_usdt.get(req.sleeve, 0.0))
+    ceiling, ceiling_key = max_seed_for(cfg, req.sleeve, req.target)
     floor = MIN_SEED_NOTIONAL_MULTIPLE * cfg.risk.min_notional_usdt
     evidence["max_seed_usdt"] = ceiling
+    evidence["max_seed_source"] = ceiling_key
     evidence["min_seed_usdt"] = floor
 
     if req.seed_usdt > ceiling:
-        problems.append(f"seed {req.seed_usdt:g} exceeds modes.live.max_seed_usdt {ceiling:g}")
+        problems.append(f"seed {req.seed_usdt:g} exceeds {ceiling_key} {ceiling:g}")
     if req.seed_usdt < floor:
         problems.append(
             f"seed {req.seed_usdt:g} is below {MIN_SEED_NOTIONAL_MULTIPLE} x"
@@ -540,18 +844,22 @@ def breach_count(
 
 
 def _check_telegram(cfg: EarnConfig, req: PreflightRequest, d: PreflightDeps) -> Check:
+    # Blocking for live, advisory for demo. Telegram carries the approval prompts and the
+    # alerts; on demo an unanswered alert costs a rehearsal, on live it costs money.
+    blocking = req.is_live
     evidence: dict[str, Any] = {
         "chat_id_configured": cfg.telegram.chat_id != 0,
         "user_id_configured": cfg.telegram.user_id != 0,
+        "blocking": blocking,
     }
     if cfg.telegram.chat_id == 0 or cfg.telegram.user_id == 0:
         return Check(
-            "telegram", CHECK_TITLES["telegram"], True, FAIL,
+            "telegram", CHECK_TITLES["telegram"], blocking, FAIL if blocking else WARN,
             "telegram.chat_id/user_id not configured", evidence,
         )
     if d.telegram_probe is None:
         return Check(
-            "telegram", CHECK_TITLES["telegram"], True, FAIL,
+            "telegram", CHECK_TITLES["telegram"], blocking, FAIL if blocking else WARN,
             "no telegram probe available", evidence,
         )
     try:
@@ -560,7 +868,7 @@ def _check_telegram(cfg: EarnConfig, req: PreflightRequest, d: PreflightDeps) ->
         ok, detail = False, str(e)
     evidence["probe"] = detail
     return Check(
-        "telegram", CHECK_TITLES["telegram"], True, _verdict(ok),
+        "telegram", CHECK_TITLES["telegram"], blocking, _verdict(ok, blocking=blocking),
         detail or ("test message delivered" if ok else "test message not delivered"), evidence,
     )
 
@@ -569,16 +877,25 @@ def _check_stoploss_on_exchange(
     cfg: EarnConfig, req: PreflightRequest, d: PreflightDeps
 ) -> Check:
     from ops.config import stoploss_on_exchange as resolve_soe
+    from ops.modes import require_stoploss_on_exchange as soe_required
 
     problems: list[str] = []
     enabled = resolve_soe(cfg, req.sleeve, live=True)
+    required = soe_required(cfg, req.target)
+    # Demo's ``orderTypes`` for BTCUSDT and ETHUSDT are byte-identical to live —
+    # STOP_LOSS_LIMIT, OCO (``ocoAllowed``) and MAX_NUM_ALGO_ORDERS all present
+    # (docs/design/demo-mode.md §4a) — so this is the same check on the same evidence, run
+    # against the demo host. There is nothing here to relax for demo, and relaxing it would
+    # rehearse a book whose stop does not sit on the exchange.
     evidence: dict[str, Any] = {
-        "required": cfg.modes.live.require_stoploss_on_exchange,
+        "required": required,
         "enabled_in_overlay": enabled,
         "pairs": list(cfg.universe.pairs),
     }
-    if cfg.modes.live.require_stoploss_on_exchange and not enabled:
-        problems.append("trading.*.stoploss.on_exchange resolves to false for a live sleeve")
+    if required and not enabled:
+        problems.append(
+            f"trading.*.stoploss.on_exchange resolves to false for a {req.target} sleeve"
+        )
     if d.exchange_info is None:
         problems.append("no exchange-info probe available")
     else:
@@ -614,9 +931,17 @@ def _check_host_ready(cfg: EarnConfig, req: PreflightRequest, d: PreflightDeps) 
     evidence = facts.to_json()
     if facts.filesystem is not None and facts.filesystem not in ("ext4", "btrfs", "xfs"):
         problems.append(f"repo filesystem is {facts.filesystem}, not a native Linux one")
-    if cfg.runtime.require_host_awake_for_live and facts.sleep_on_ac_disabled is not True:
+    # ``*_for_live`` means what it says: these two exist so a real-money book is never left
+    # unattended by a sleeping laptop. A demo book left unattended costs nothing, so they
+    # are recorded but not enforced for demo.
+    evidence["host_awake_enforced"] = req.is_live
+    if req.is_live and cfg.runtime.require_host_awake_for_live and (
+        facts.sleep_on_ac_disabled is not True
+    ):
         problems.append("Windows may sleep on AC (powercfg standby-timeout-ac != 0)")
-    if cfg.runtime.require_keepalive_task_for_live and facts.keepalive_task is not True:
+    if req.is_live and cfg.runtime.require_keepalive_task_for_live and (
+        facts.keepalive_task is not True
+    ):
         problems.append("WSL keep-alive scheduled task is missing")
     if facts.docker_running is not True:
         problems.append("docker is not running")
@@ -660,7 +985,7 @@ def _check_automation_isolation(
     if not hook.exists():
         problems.append("the tier-2 PreToolUse hook is not installed")
 
-    if req.is_execute and cfg.modes.live.require_agent_user_for_execute:
+    if req.is_live_execute and cfg.modes.live.require_agent_user_for_execute:
         evidence["agent_user"] = cfg.security.agent_user
         if not cfg.security.agent_user or not cfg.security.agent_cli_wrapper:
             problems.append("security.agent_user / agent_cli_wrapper are required for EXECUTE")
@@ -713,7 +1038,7 @@ def _check_backups(cfg: EarnConfig, req: PreflightRequest, d: PreflightDeps) -> 
 
 
 def _check_strategy_tests(cfg: EarnConfig, req: PreflightRequest, d: PreflightDeps) -> Check:
-    blocking = req.is_execute
+    blocking = req.is_live_execute
     if d.strategy_tests is None:
         return Check(
             "strategy_tests", CHECK_TITLES["strategy_tests"], blocking,
@@ -791,6 +1116,7 @@ _CHECKS: dict[str, Callable[[EarnConfig, PreflightRequest, PreflightDeps], Check
     "kill_clear": _check_kill_clear,
     "bots_healthy": _check_bots_healthy,
     "config_blessed": _check_config_blessed,
+    "venue_binding": _check_venue_binding,
     "exchange_keys": _check_exchange_keys,
     "seed_ok": _check_seed_ok,
     "track_record": _check_track_record,
@@ -906,6 +1232,8 @@ def preflight_to_json(result: PreflightResult) -> str:
 __all__ = [
     "BACKUP_MAX_AGE_HOURS",
     "CHECK_ORDER",
+    "DEMO_CHECKS",
+    "DEMO_TARGETS",
     "FAIL",
     "MIN_APPROVAL_RATE",
     "MIN_SEED_NOTIONAL_MULTIPLE",
@@ -913,6 +1241,8 @@ __all__ = [
     "PASS",
     "PREFLIGHT_TTL_MINUTES",
     "SKIP",
+    "VENUE_ENV_NAMES",
+    "VENUE_TARGETS",
     "WARN",
     "Check",
     "HostFacts",
@@ -923,6 +1253,9 @@ __all__ = [
     "active_run",
     "approval_rate",
     "breach_count",
+    "credential_env_names",
+    "credential_for",
+    "max_seed_for",
     "new_preflight_id",
     "preflight_to_json",
     "run_preflight",

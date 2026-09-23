@@ -29,7 +29,7 @@ from typing import Any
 
 from ops.config import REPO_ROOT, EarnConfig
 from runs.common import atomic_write_json, utc_iso
-from runs.signals import run_task, stage_prompt_text
+from runs.signals import run_ctx_for, run_task, stage_prompt_text
 from runs.signals.features import Features
 from runs.signals.features import build as build_features
 from schemas.signals import SignalInvalid, Validation, validate_validation, validation_schema
@@ -251,10 +251,13 @@ def validate_signal(cfg: EarnConfig, jdb: sqlite3.Connection, kdb: sqlite3.Conne
     rel = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
 
     prompt = render_prompt(cfg, pack, root=root)
-    outcome = runner(vcfg.task, prompt, models_cfg=models_cfg,
+    # The validation job IS the enclosing run: one signal, one detached process under
+    # ops/locks/validate.lock with the same wall-clock budget its `timeout` uses.
+    ctx = run_ctx_for(vcfg.task, run_id=signal_id, signal_id=signal_id, root=root,
+                      deadline_s=float(vcfg.deadline_s), now=now)
+    outcome = runner(vcfg.task, prompt, run_ctx=ctx, models_cfg=models_cfg,
                      output_schema=validation_schema(), tools_profile="read_only",
-                     skills=_skills_for(cfg), cwd=root,
-                     deadline_s=float(vcfg.deadline_s))
+                     skills=_skills_for(cfg), root=root, cfg=cfg, jdb=jdb, kdb=kdb)
 
     parsed: Validation | None = None
     error = outcome.error or outcome.failure

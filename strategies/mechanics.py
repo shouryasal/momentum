@@ -82,6 +82,45 @@ def get_path(data: Any, path: str, default: Any = None) -> Any:
     return node
 
 
+# --------------------------------------------------------------------------- order side
+
+#: freqtrade uses TWO different "side" vocabularies and they are not interchangeable:
+#:
+#: * ``LongShort`` — the POSITION side, ``'long'`` | ``'short'``. This is what
+#:   ``confirm_trade_entry``, ``custom_stake_amount`` and ``custom_entry_price`` are
+#:   handed (``freqtradebot.execute_entry`` passes ``side=trade_side``), and what
+#:   ``trade.trade_direction`` returns.
+#: * ``BuySell`` — the ORDER side actually sent to the exchange, ``'buy'`` | ``'sell'``.
+#:   This is ``order.ft_order_side``, ``trade.entry_side`` and ``trade.exit_side``.
+#:
+#: The journal stores the ORDER side everywhere (``gate_decisions.side``,
+#: ``orders.side``, ``fills.side`` all CHECK ``IN ('buy','sell')``) so that a gate
+#: decision, the order it produced and its fills can be compared column-for-column and
+#: joined against the exchange. :func:`order_side` is the ONE place the position side is
+#: converted; forwarding freqtrade's ``side`` argument straight into the column is what
+#: made every entry row fail its CHECK and the audit trail silently disappear.
+POSITION_SIDES = ("long", "short")
+ORDER_SIDES = ("buy", "sell")
+_ENTRY_ORDER_SIDE = {"long": "buy", "short": "sell"}
+_EXIT_ORDER_SIDE = {"long": "sell", "short": "buy"}
+
+
+def order_side(side: str | None, *, is_entry: bool) -> str | None:
+    """Exchange order side (``buy``/``sell``) for a freqtrade ``side`` argument.
+
+    Accepts either vocabulary: a position side (``long``/``short``) is converted for the
+    given direction, an order side is passed through unchanged (spot long entries are
+    already ``buy``). Anything else — including ``None`` — returns ``None`` rather than a
+    guessed value, so the journal stores NULL and the caller raises an incident instead of
+    writing a row that is wrong or a row that never lands at all.
+    """
+    s = str(side or "").strip().lower()
+    if s in ORDER_SIDES:
+        return s
+    table = _ENTRY_ORDER_SIDE if is_entry else _EXIT_ORDER_SIDE
+    return table.get(s)
+
+
 # --------------------------------------------------------------------------- pricing
 
 

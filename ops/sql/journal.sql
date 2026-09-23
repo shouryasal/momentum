@@ -2,6 +2,16 @@
 -- Complete schema (weeks 1-5) ships up front; ops/init_dbs.py applies idempotently.
 -- Conventions: *_utc TEXT = UTC ISO-8601 'Z'; sleeve values lowercase 'a'|'b'|'benchmark';
 -- run_id format '2026-09-22T08:30+04:00' (Gulf offset).
+--
+-- `side` everywhere in this file is the EXCHANGE ORDER side, 'buy'|'sell' — the same
+-- vocabulary as freqtrade's `order.ft_order_side` / `trade.entry_side` / `trade.exit_side`
+-- and as the exchange's own fills, so a gate decision, the order it produced and that
+-- order's fills join column-for-column. It is NOT the position side: freqtrade hands
+-- `confirm_trade_entry` / `custom_stake_amount` / `custom_entry_price` a LongShort
+-- ('long'|'short'), and `strategies/mechanics.py::order_side` is the one place that is
+-- converted. Forwarding the raw callback argument here made every entry row fail this
+-- CHECK for eight hours while both sleeves traded; the writer now NULLs an unmappable
+-- side and opens an incident instead of losing the row.
 
 CREATE TABLE IF NOT EXISTS runs (
   run_id TEXT NOT NULL,
@@ -361,9 +371,9 @@ CREATE TABLE IF NOT EXISTS mode_transitions (
 );
 
 CREATE TABLE IF NOT EXISTS sleeve_runs (
-  run_id TEXT PRIMARY KEY,             -- 'test-a-20261027-01' | 'live-b-20270201-01'
+  run_id TEXT PRIMARY KEY,             -- 'test-a-…' | 'demo-a-…' | 'live-b-20270201-01'
   sleeve TEXT NOT NULL CHECK (sleeve IN ('a','b')),
-  mode TEXT NOT NULL CHECK (mode IN ('test','live')),
+  mode TEXT NOT NULL CHECK (mode IN ('test','demo','live')),
   submode TEXT CHECK (submode IN ('propose','execute')),
   seed_usdt REAL NOT NULL,
   started_utc TEXT NOT NULL,
@@ -386,7 +396,7 @@ CREATE TABLE IF NOT EXISTS nav_points (
   ts_utc TEXT NOT NULL,
   sleeve TEXT NOT NULL CHECK (sleeve IN ('a','b','benchmark')),
   run_id TEXT,
-  mode TEXT NOT NULL CHECK (mode IN ('test','live')),
+  mode TEXT NOT NULL CHECK (mode IN ('test','demo','live')),
   nav_usdt REAL NOT NULL,
   cash_usdt REAL,
   reserved_usdt REAL,                  -- USDT locked in resting entry orders (ledger NAV)
@@ -467,8 +477,12 @@ CREATE TABLE IF NOT EXISTS llm_calls (   -- one row per ATTEMPT (runs keeps one 
   model TEXT NOT NULL,
   auth_source TEXT,
   attempt INTEGER NOT NULL,
+  -- Mirrors runs.llm.types.CALL_STATUSES exactly. 'provider_down' belongs here: a dead
+  -- Ollama daemon or a missing registry entry raises inside an ATTEMPT, so there is a row
+  -- to write; leaving it out made that insert fail the CHECK and be swallowed, which is
+  -- why the AI & Models page could never show the most common local failure.
   status TEXT NOT NULL CHECK (status IN ('ok','error','timeout','rate_limited','auth_error',
-      'quota_exhausted','budget_exhausted','schema_invalid','empty_output',
+      'quota_exhausted','budget_exhausted','provider_down','schema_invalid','empty_output',
       'skipped_open_circuit','skipped_capability')),
   error TEXT,
   latency_ms INTEGER,

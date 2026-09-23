@@ -4,6 +4,8 @@ import {
 } from '@mantine/core';
 import { useEffect, useState } from 'react';
 
+import { ConfirmDialog } from '@/components';
+
 import { KIND_LABELS, type AutonomyMatrix, type AutonomySetting } from '../api';
 
 const SETTINGS: AutonomySetting[] = ['auto', 'approve', 'off'];
@@ -18,7 +20,7 @@ export interface AutonomyMatrixCardProps {
   matrix: AutonomyMatrix;
   saving?: boolean;
   error?: string | null;
-  onSave: (body: Partial<AutonomyMatrix>) => void;
+  onSave: (body: Partial<AutonomyMatrix>) => Promise<unknown> | void;
 }
 
 /**
@@ -30,6 +32,7 @@ export interface AutonomyMatrixCardProps {
  */
 export function AutonomyMatrixCard({ matrix, saving, error, onSave }: AutonomyMatrixCardProps) {
   const [draft, setDraft] = useState(matrix);
+  const [confirming, setConfirming] = useState(false);
   useEffect(() => setDraft(matrix), [matrix]);
 
   const setKind = (kind: string, column: 'test' | 'live', value: AutonomySetting) => {
@@ -193,10 +196,31 @@ export function AutonomyMatrixCard({ matrix, saving, error, onSave }: AutonomyMa
             <List.Item key={line}>{line}</List.Item>
           ))}
         </List>
-        <Button disabled={!dirty} loading={saving} onClick={() => onSave(draft)}>
+        <Button
+          disabled={!dirty}
+          loading={saving}
+          onClick={() => setConfirming(true)}
+          data-testid="save-autonomy"
+        >
           Save matrix
         </Button>
       </Group>
+
+      {/* `PUT /api/autonomy` is step-up guarded — it decides what merges without a human.
+          It used to fire from this button's bare onClick, which 403s outside the window. */}
+      <ConfirmDialog
+        opened={confirming}
+        onClose={() => setConfirming(false)}
+        title="Change the autonomy matrix?"
+        confirmLabel="Save matrix"
+        requireStepUp
+        danger
+        description="This decides which model-authored changes merge with no human. It is written to autonomy.* in config/earn.yaml and audited like any protected save."
+        onConfirm={async () => {
+          await onSave(draft);
+          setConfirming(false);
+        }}
+      />
     </Card>
   );
 }

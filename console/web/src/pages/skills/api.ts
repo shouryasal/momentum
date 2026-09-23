@@ -15,6 +15,9 @@ export interface SkillPolicy {
 
 export interface SkillRow {
   name: string;
+  /** The skill's own one-line "what I do and when I fire", from its SKILL.md. */
+  title?: string;
+  description?: string;
   status: SkillStatus;
   origin: string;
   bindings: string[];
@@ -170,19 +173,15 @@ export function useArchiveSkill() {
   });
 }
 
-export function useSetBindings() {
-  const client = useApi();
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (vars: { name: string; tasks: string[] }) =>
-      client.put<unknown>(`/skills/${encodeURIComponent(vars.name)}/bindings`, {
-        tasks: vars.tasks,
-      }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: skillKeys.list });
-    },
-  });
-}
+/*
+ * `PUT /api/skills/{name}/bindings` had a mutation hook here that nothing rendered.
+ *
+ * An exported transport wrapper for a step-up-guarded route with no affordance behind it
+ * is a trap: whoever wires it to a button inherits a 403, because nothing on the way opens
+ * the step-up window. Binding is done through Self-improvement → Attach, which does go
+ * through a ConfirmDialog. `tests/test_console/test_stepup_ui.py` keeps this honest — the
+ * route is declared NO_UI there, and a caller reappearing turns that test red.
+ */
 
 export type CheckKind = 'lint' | 'test' | 'eval' | 'trial';
 

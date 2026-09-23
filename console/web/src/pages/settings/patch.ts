@@ -109,3 +109,19 @@ export function setAtDotted<T>(root: T, dotted: string, next: unknown): T {
   };
   return clone(root, 0) as T;
 }
+
+/**
+ * The change the operator is about to review *and* save — derived once, used by both.
+ *
+ * Preview and save used to key on different conditions (`tab === 'raw'` vs
+ * `tab === 'raw' && rawDirty`), so form edits reviewed from the Raw tab were previewed as
+ * the unchanged file — empty diff, no effects, `requires_stepup: false` — and then saved as
+ * the patch. The operator confirmed a blank diff and wrote something else.
+ */
+export function changeBodyFor(args: {
+  rawDirty: boolean;
+  rawDraft: string | null;
+  ops: PatchOp[];
+}): { patch?: PatchOp[]; raw?: string } {
+  return args.rawDirty ? { raw: args.rawDraft ?? '' } : { patch: args.ops };
+}

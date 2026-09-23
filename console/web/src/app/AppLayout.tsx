@@ -18,10 +18,12 @@ import { useDisclosure, useHotkeys } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import {
   IconBell,
+  IconLayoutGrid,
   IconLogout,
   IconMoon,
   IconSearch,
   IconSun,
+  IconTool,
   IconUser,
 } from '@tabler/icons-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -38,10 +40,11 @@ import { errorMessage } from '../api/errors';
 import { shellKeys } from '../api/queryClient';
 import { KillButton } from '../components/KillButton';
 import { SSEIndicator } from '../components/SSEIndicator';
-import { NAV_GROUPS, ROUTES } from '../routes';
+import { DEVELOPER_ROUTE_IDS, PRIMARY_NAV, developerNavGroups, routeById } from '../routes';
 import { AlertsDrawer } from './AlertsDrawer';
 import { useEndpoints } from './ApiContext';
 import { pendingApprovalCount } from './approvals';
+import { ChromeGuard } from './ChromeGuard';
 import { Clock } from './Clock';
 import { CommandPalette, useShellCommands } from './CommandPalette';
 import { useEvents } from './EventStreamContext';
@@ -52,6 +55,7 @@ import { ProviderChip } from './ProviderChip';
 import { SafetyStrip } from './SafetyStrip';
 import { useSession } from './SessionContext';
 import { StepUpLock } from './StepUpLock';
+import { useViewMode } from './ViewModeContext';
 
 /** Global chrome from spec 12, mounted on every route. */
 export function AppLayout({ children }: { children: ReactNode }) {
@@ -65,6 +69,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
+  const view = useViewMode();
 
   useShellCommands();
   useHotkeys([
@@ -146,7 +151,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
               <Text fw={800} size="sm" ff="monospace">
                 EARN
               </Text>
-              <ModeBadges modes={meta.data?.modes ?? []} />
+              <ChromeGuard label="mode badges">
+                <ModeBadges modes={meta.data?.modes ?? []} />
+              </ChromeGuard>
               {killed ? (
                 <Badge color="red" variant="filled" data-testid="kill-banner">
                   KILL{killReason ? `: ${killReason}` : ''}
@@ -156,13 +163,23 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
             <Group gap="xs" wrap="nowrap">
               <Clock />
-              <HealthDot summary={healthSummaryFrom(health.data)} />
-              <ProviderChip data={providers.data ?? null} />
-              <Tooltip label={`${pending} pending approval(s)`}>
+              <ChromeGuard label="health dot">
+                <HealthDot summary={healthSummaryFrom(health.data)} />
+              </ChromeGuard>
+              <ChromeGuard label="model status">
+                <ProviderChip data={providers.data ?? null} />
+              </ChromeGuard>
+              <Tooltip
+                label={
+                  pending === 0
+                    ? 'Nothing is waiting on you.'
+                    : `${pending} thing(s) are waiting for your yes or no.`
+                }
+              >
                 <Indicator label={pending > 0 ? String(pending) : undefined} disabled={pending === 0} size={16}>
                   <ActionIcon
                     variant="subtle"
-                    aria-label="pending approvals"
+                    aria-label="things waiting on you"
                     data-testid="approvals-counter"
                     data-pending={pending}
                     onClick={() => navigate('/decisions')}
@@ -220,35 +237,64 @@ export function AppLayout({ children }: { children: ReactNode }) {
               </Menu>
             </Group>
           </Group>
-          <SafetyStrip strip={safetyStrip.data ?? null} invariants={meta.data?.invariants ?? []} />
+          <ChromeGuard label="safety strip">
+            <SafetyStrip strip={safetyStrip.data ?? null} invariants={meta.data?.invariants ?? []} />
+          </ChromeGuard>
         </Box>
       </AppShell.Header>
 
       <AppShell.Navbar p="xs">
         <ScrollArea>
           <Stack gap="xs">
-            {NAV_GROUPS.map((group) => (
-              <Stack key={group} gap={2}>
-                <Text size="xs" c="dimmed" fw={700} tt="uppercase" px="xs">
-                  {group}
-                </Text>
-                {ROUTES.filter((route) => route.group === group).map((route) => {
-                  const Icon = route.icon;
-                  return (
+            {/* The four destinations plus Setup, in both views: the operator's places do
+                not move when the developer area is open. */}
+            <Stack gap={2} data-testid="nav-primary">
+              {PRIMARY_NAV.map((entry) => {
+                const route = routeById(entry.routeId);
+                if (!route) return null;
+                const Icon = entry.icon;
+                return (
+                  <Tooltip key={entry.routeId} label={entry.blurb} position="right" multiline w={280}>
                     <NavLink
-                      key={route.id}
                       component={RouterNavLink}
                       to={route.path}
-                      label={route.title}
+                      label={entry.label}
                       leftSection={<Icon size={16} />}
                       active={location.pathname === route.path}
                       onClick={navHandlers.close}
                       data-testid={`nav-${route.id}`}
                     />
-                  );
-                })}
-              </Stack>
-            ))}
+                  </Tooltip>
+                );
+              })}
+            </Stack>
+
+            {view.developer
+              ? developerNavGroups().map(({ group, routes }) => (
+                  <Stack key={group} gap={2} data-testid={`nav-developer-${group.toLowerCase()}`}>
+                    <Text size="xs" c="dimmed" fw={700} tt="uppercase" px="xs">
+                      {group}
+                    </Text>
+                    {routes.map((route) => {
+                      const Icon = route.icon;
+                      return (
+                        <NavLink
+                          key={route.id}
+                          component={RouterNavLink}
+                          to={route.path}
+                          label={route.title}
+                          leftSection={<Icon size={16} />}
+                          active={location.pathname === route.path}
+                          onClick={navHandlers.close}
+                          data-testid={`nav-${route.id}`}
+                        />
+                      );
+                    })}
+                  </Stack>
+                ))
+              : null}
+
+            <DeveloperSwitch developer={view.developer} onToggle={view.toggle} />
           </Stack>
         </ScrollArea>
       </AppShell.Navbar>
@@ -258,5 +304,39 @@ export function AppLayout({ children }: { children: ReactNode }) {
       <AlertsDrawer opened={alertsOpen} onClose={alertsHandlers.close} />
       <CommandPalette opened={paletteOpen} onClose={paletteHandlers.close} />
     </AppShell>
+  );
+}
+
+/**
+ * The Developer switch, in the corner of the navigation.
+ *
+ * The five destinations above it never move.  This adds the sixteen builder-shaped
+ * screens below them — the labs, the internals, the generated settings form, the audit
+ * trail — grouped as the system is built.  It changes the navigation only: every route
+ * stays mounted in both views, so a developer screen is still one URL or one Ctrl-K away
+ * with the area closed, and the choice is remembered for this operator in `localStorage`.
+ */
+function DeveloperSwitch({ developer, onToggle }: { developer: boolean; onToggle: () => void }) {
+  const extra = DEVELOPER_ROUTE_IDS.length;
+  return (
+    <Box pt="sm" mt="xs" style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}>
+      <NavLink
+        onClick={onToggle}
+        label={developer ? 'Hide developer screens' : 'Developer'}
+        description={
+          developer
+            ? 'Back to the five screens a demo run needs'
+            : `The other ${extra} screens: labs, internals, audit`
+        }
+        leftSection={developer ? <IconLayoutGrid size={16} /> : <IconTool size={16} />}
+        data-testid="view-mode-toggle"
+        data-view={developer ? 'developer' : 'operator'}
+      />
+      <Text size="xs" c="dimmed" px="xs" pt={4}>
+        {developer
+          ? 'Showing every screen, grouped as the system is built.'
+          : 'They are all still there: type the address, or press Ctrl-K.'}
+      </Text>
+    </Box>
   );
 }

@@ -5,10 +5,21 @@ No FastAPI here. Two rules run through everything:
 * **Every write is linted, server side, before it lands.** The browser's copy of the lint
   is a convenience; this is the one that decides. A write whose lint has errors is refused
   with the findings, so a broken skill never reaches disk for the next run to load.
-* **``scripts/**`` is tier 2.** The router demands step-up for it, and an automated session
-  cannot write one at all (the PreToolUse hook denies it). The per-skill policy in
-  ``config/earn.yaml: skills.policy`` says which parts are ``human`` and which are
-  ``gated``; ``ops-runbook`` is human end to end.
+* **``scripts/**`` and ``tests/**`` are tier 2.** The router demands step-up for both, and
+  an automated session cannot write a ``scripts/`` file at all (the PreToolUse hook denies
+  it). The per-skill policy in ``config/earn.yaml: skills.policy`` says which parts are
+  ``human`` and which are ``gated``; ``ops-runbook`` is human end to end.
+
+Two things here used to add up to arbitrary code execution from any signed-in session,
+with no step-up:
+
+* the step-up decision was taken on the **raw** request path while the writer normalised
+  it, so ``PUT .../files/tests/..%2Fscripts%2Fzz.py`` was "tier 1" to the router and
+  landed in ``scripts/``. :func:`normalise_rel` is now the first thing every path meets
+  and :func:`file_tier` sees only the normalised form — resolve first, then decide;
+* ``tests/**`` was tier 1 *and* executed by the Test button, in the console's own
+  environment, as the owner. It is tier 2 here now, it is linted (``evals.skill_lint``
+  walks it), and :func:`sandbox_for` decides whether it may be executed at all.
 
 The tier-1 overlay ``config/skills-registry.auto.yaml`` (incubating / bound / archived) is
 read and written through :mod:`runs.apply_changes`, which owns it.
@@ -25,7 +36,7 @@ that call these directly want.
 from __future__ import annotations
 
 import hashlib
-import os
+import re
 import shutil
 import subprocess
 import sys
@@ -112,27 +123,64 @@ def existing_names(root: Path | None = None) -> set[str]:
 # --------------------------------------------------------------------------- tiers
 
 
+#: The parts of a skill folder that are *executed*, and so are the human's. ``scripts/``
+#: is what an automated session runs; ``tests/`` is what the Test button and the change
+#: gate run. A session that can write either has arbitrary code execution, which is why
+#: both demand step-up here regardless of what ``skills.policy`` says about the gate.
+TIER2_PARTS = ("scripts", "tests")
+
+
+def normalise_rel(rel: str) -> str:
+    """``rel`` as it will land on disk: POSIX, ``.`` and ``..`` collapsed.
+
+    ``""`` means the path cannot be expressed inside the skill folder at all — it is
+    absolute, or it climbs above the folder — and every caller treats that as tier 2.
+
+    This exists because the step-up gate read the **raw** request string while the writer
+    normalised it. ``PUT .../files/tests/..%2Fscripts%2Fzz.py`` is decoded by Starlette
+    *after* routing, so the router saw a first segment of ``tests`` (tier 1, no step-up)
+    and the file landed in ``scripts/``. Resolve first, then decide the tier.
+    """
+    raw = str(rel).replace("\\", "/").strip()
+    if not raw or raw.startswith("/") or re.match(r"^[A-Za-z]:", raw):
+        return ""
+    parts: list[str] = []
+    for seg in raw.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if not parts:
+                return ""
+            parts.pop()
+            continue
+        parts.append(seg)
+    return "/".join(parts)
+
+
 def file_tier(rel: str) -> str:
-    """``scripts/**`` is tier 2; everything else in a skill folder is tier 1."""
-    parts = Path(rel).as_posix().split("/")
-    return "tier2" if parts and parts[0] == "scripts" else "tier1"
+    """``scripts/**`` and ``tests/**`` are tier 2; the rest of a skill folder is tier 1.
+
+    The path is normalised first, so no amount of ``..`` (or percent-encoded ``..``) turns
+    a tier-2 destination into a tier-1 decision. A path that cannot be placed inside the
+    skill folder is tier 2: unclassifiable means human-only.
+    """
+    safe = normalise_rel(rel)
+    if not safe:
+        return "tier2"
+    return "tier2" if safe.split("/")[0] in TIER2_PARTS else "tier1"
 
 
 def policy_for(cfg: EarnConfig, name: str) -> dict[str, str]:
-    table = cfg.skills.policy or {}
-    entry = table.get(name) or table.get("default")
-    if entry is None:
-        return {"body": "gated", "scripts": "human", "tests": "gated"}
-    return {"body": str(entry.body), "scripts": str(entry.scripts), "tests": str(entry.tests)}
+    """What the Skills page shows — and, since the gate reads the same function, what it
+    enforces. ``runs.apply_changes`` owns the table so the label and the hold cannot drift.
+    """
+    return apply_changes.skill_policy_for(cfg, name)
 
 
 def part_of(rel: str) -> str:
-    parts = Path(rel).as_posix().split("/")
-    if parts[0] == "scripts":
-        return "scripts"
-    if parts[0] == "tests":
-        return "tests"
-    return "body"
+    safe = normalise_rel(rel)
+    head = safe.split("/")[0] if safe else ""
+    return head if head in ("scripts", "tests") else "body"
 
 
 def requires_step_up(rel: str) -> bool:
@@ -140,6 +188,28 @@ def requires_step_up(rel: str) -> bool:
 
 
 # --------------------------------------------------------------------------- listing
+
+
+def skill_summary(skill_dir: Path) -> tuple[str, str]:
+    """``(title, description)`` from the skill's ``SKILL.md`` frontmatter.
+
+    The description is the one sentence the skill itself uses to say what it does and when
+    it fires — it is what a skill's own lint already insists on (``MIN_DESCRIPTION``), and
+    it is what the console's Skills screen leads with, because "what does this thing do"
+    is the only question an operator has about a skill they did not write. Anything
+    unreadable comes back empty rather than raising: a skill with a broken frontmatter
+    still has to appear in the list, with its status, so it can be fixed.
+    """
+    md = skill_dir / "SKILL.md"
+    if not md.is_file():
+        return "", ""
+    try:
+        meta, _ = skill_lint.parse_frontmatter(md.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return "", ""
+    title = str(meta.get("title") or "").strip()
+    description = str(meta.get("description") or "").strip()
+    return title, description
 
 
 def list_skills(cfg: EarnConfig, *, root: Path | None = None, jdb: Any = None
@@ -163,8 +233,11 @@ def list_skills(cfg: EarnConfig, *, root: Path | None = None, jdb: Any = None
             status = "bound" if bound_to else ("template" if d.name == TEMPLATE_NAME
                                                else "unbound")
         tests = sorted((d / "tests").glob("test_*.py")) if (d / "tests").is_dir() else []
+        title, description = skill_summary(d)
         out.append({
             "name": d.name,
+            "title": title,
+            "description": description,
             "status": status,
             "origin": entry.get("origin", "human"),
             "bindings": bound_to,
@@ -203,9 +276,17 @@ def tree(name: str, *, root: Path | None = None) -> list[dict[str, Any]]:
     return [n.as_dict() for n in nodes]
 
 
-def _resolve(name: str, rel: str, *, root: Path | None = None) -> tuple[Path, Path]:
+def _resolve(name: str, rel: str, *, root: Path | None = None) -> tuple[Path, Path, str]:
+    """``(skill dir, target, the normalised relative path)``.
+
+    Returning the normalised path is the point: every tier decision downstream is taken on
+    what the write will actually touch, not on the string the client sent.
+    """
     d = skill_dir(name, root=root)
-    target = (d / rel)
+    safe = normalise_rel(rel)
+    if not safe:
+        raise SkillError(f"'{rel}' escapes the skill folder", code="forbidden")
+    target = d / safe
     try:
         resolved = target.resolve()
         base = d.resolve()
@@ -213,18 +294,18 @@ def _resolve(name: str, rel: str, *, root: Path | None = None) -> tuple[Path, Pa
         raise SkillError(f"bad path: {rel}") from exc
     if not (resolved == base or resolved.is_relative_to(base)):
         raise SkillError(f"'{rel}' escapes the skill folder", code="forbidden")
-    return d, target
+    return d, target, safe
 
 
 def read_file(name: str, rel: str, *, root: Path | None = None) -> dict[str, Any]:
-    _, target = _resolve(name, rel, root=root)
+    _, target, safe = _resolve(name, rel, root=root)
     if not target.is_file():
-        raise SkillError(f"no file {rel} in skill {name}", code="not_found")
+        raise SkillError(f"no file {safe} in skill {name}", code="not_found")
     if target.stat().st_size > MAX_FILE_BYTES:
-        raise SkillError(f"{rel} is too large to edit here", code="too_large")
+        raise SkillError(f"{safe} is too large to edit here", code="too_large")
     text = target.read_text(encoding="utf-8")
-    return {"skill": name, "path": rel, "content": text, "sha": _sha(text),
-            "tier": file_tier(rel), "requires_step_up": requires_step_up(rel)}
+    return {"skill": name, "path": safe, "content": text, "sha": _sha(text),
+            "tier": file_tier(safe), "requires_step_up": requires_step_up(safe)}
 
 
 def write_file(name: str, rel: str, content: str, *, actor: str,
@@ -237,14 +318,14 @@ def write_file(name: str, rel: str, content: str, *, actor: str,
     that shadows another skill or a write outside ``knowledge/``/``reports/`` is still an
     error, and still refused.
     """
-    d, target = _resolve(name, rel, root=root)
+    d, target, safe = _resolve(name, rel, root=root)
     if target.suffix not in EDITABLE_SUFFIXES:
-        raise SkillError(f"{rel} is not an editable file type", code="forbidden")
+        raise SkillError(f"{safe} is not an editable file type", code="forbidden")
     if len(content.encode("utf-8")) > MAX_FILE_BYTES:
-        raise SkillError(f"{rel} exceeds {MAX_FILE_BYTES} bytes", code="too_large")
+        raise SkillError(f"{safe} exceeds {MAX_FILE_BYTES} bytes", code="too_large")
     previous = target.read_text(encoding="utf-8") if target.is_file() else None
     if base_sha is not None and previous is not None and _sha(previous) != base_sha:
-        raise SkillError(f"{rel} changed since you loaded it", code="conflict")
+        raise SkillError(f"{safe} changed since you loaded it", code="conflict")
 
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(target.suffix + ".tmp")
@@ -258,9 +339,9 @@ def write_file(name: str, rel: str, content: str, *, actor: str,
             target.unlink(missing_ok=True)
         else:
             target.write_text(previous, encoding="utf-8")
-        raise SkillError(f"lint refused the write to {rel}", code="lint_failed",
+        raise SkillError(f"lint refused the write to {safe}", code="lint_failed",
                          detail=findings)
-    return {"skill": name, "path": rel, "sha": _sha(content), "actor": actor,
+    return {"skill": name, "path": safe, "sha": _sha(content), "actor": actor,
             "lint_ok": result.ok, "findings": findings,
             "saved_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
@@ -405,11 +486,14 @@ def lint(name: str, *, root: Path | None = None, strict_tools: bool = True,
 
 
 def _clean_env(repo_root: Path) -> dict[str, str]:
-    """A subprocess environment with no credential in it (``skill_eval``'s rule)."""
-    env = dict(os.environ)
-    for key in skill_eval.STRIPPED_ENV:
-        env.pop(key, None)
-    env["PYTHONPATH"] = str(repo_root)
+    """The environment a model-authored subprocess gets: an **allowlist**, nothing else.
+
+    This used to be ``dict(os.environ)`` minus ten known credential names, which meant a
+    secret added to ``.env`` tomorrow was inherited by default and the console's own
+    ``EARN_*`` pointers were handed over as well. :func:`evals.skill_eval.contained_env`
+    is now the single definition, shared with the change gate.
+    """
+    env = skill_eval.contained_env(Path(repo_root))
     env["PYTHONUNBUFFERED"] = "1"
     return env
 
@@ -463,24 +547,49 @@ def _stream(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout_s
     return proc.returncode, lines
 
 
+def sandbox_for(cfg: EarnConfig, *, root: Path | None = None) -> skill_eval.Sandbox:
+    """The containment the Test and Eval buttons run under — the change gate's, exactly.
+
+    A skill's ``tests/**`` and its ``evals/cases.yaml`` are model-authored. Running them
+    from the console used to hand them the console process's own environment and the
+    owner's privileges, which is arbitrary code execution for anyone holding a session
+    cookie — no step-up, no lint, no hook. There is no "but the console is the human's
+    tool" exemption: the human's authority is over *deciding*, not over what a payload
+    then does with their uid.
+
+    So the console asks :func:`evals.skill_eval.sandbox_for` the same question the gate
+    asks. Configured ``security.agent_user`` + ``security.agent_cli_wrapper`` give a uid
+    drop; without them this refuses, the button reports the refusal, and nothing runs.
+    """
+    return skill_eval.sandbox_for(cfg, root=_root(root))
+
+
 def run_tests(name: str, cfg: EarnConfig, *, root: Path | None = None,
               progress: Any = None) -> dict[str, Any]:
-    """The skill's own pytest suite, streamed line by line and killable."""
+    """The skill's own pytest suite, contained, streamed line by line and killable."""
     d = skill_dir(name, root=root)
     tests = d / "tests"
     if not tests.is_dir() or not any(tests.glob("test_*.py")):
         _say(progress, 1.0, "no tests")
         return {"skill": name, "ok": False, "log": "no tests"}
+    sandbox = sandbox_for(cfg, root=root)
+    if not sandbox.may_execute:
+        log = f"{skill_eval.REFUSED}{sandbox.reason}"
+        _emit(progress, log)
+        _say(progress, 1.0, "refused: no sandbox")
+        return {"skill": name, "ok": False, "log": log, "refused": log,
+                "sandbox": sandbox.as_dict()}
     _check_cancelled(progress)
     _say(progress, 0.1, f"pytest {name}")
     code, lines = _stream(
-        [sys.executable, "-m", "pytest", "-q", str(tests)],
+        sandbox.wrap([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                      str(tests)]),
         cwd=_root(root), env=_clean_env(_root(root)),
         timeout_s=int(cfg.skills.eval.timeout_s), progress=progress)
     log = "\n".join(lines)[-MAX_LOG_CHARS:]
     ok = code == 0
     _say(progress, 1.0, "pytest passed" if ok else "pytest failed")
-    return {"skill": name, "ok": ok, "log": log}
+    return {"skill": name, "ok": ok, "log": log, "sandbox": sandbox.as_dict()}
 
 
 def run_eval(name: str, cfg: EarnConfig, *, root: Path | None = None,
@@ -488,7 +597,11 @@ def run_eval(name: str, cfg: EarnConfig, *, root: Path | None = None,
     """Every declared eval case, one at a time so progress and cancel mean something."""
     d = skill_dir(name, root=root)
     cases = skill_eval.load_cases(d)
+    sandbox = sandbox_for(cfg, root=root)
     res = skill_eval.SkillEvalResult(name=d.name)
+    if cases and not sandbox.may_execute and any("run" in c for c in cases):
+        res.refused = f"{skill_eval.REFUSED}{sandbox.reason}"
+        _emit(progress, res.refused)
     total = len(cases)
     for index, case in enumerate(cases):
         _check_cancelled(progress)
@@ -497,12 +610,13 @@ def run_eval(name: str, cfg: EarnConfig, *, root: Path | None = None,
         outcome = skill_eval.run_case(case, d, cwd=_root(root),
                                       timeout_s=int(cfg.skills.eval.timeout_s),
                                       session_runner=session_runner,
-                                      repo_root=_root(root))
+                                      repo_root=_root(root), sandbox=sandbox)
         res.cases.append(outcome)
         _emit(progress, f"{outcome.status} {outcome.id} {outcome.detail}".rstrip())
     payload = res.as_dict()
     payload["min_pass_rate"] = float(cfg.skills.eval.min_pass_rate)
     payload["ok"] = res.ok(float(cfg.skills.eval.min_pass_rate))
+    payload["sandbox"] = sandbox.as_dict()
     _say(progress, 1.0, f"{res.passed}/{total} passed")
     return payload
 

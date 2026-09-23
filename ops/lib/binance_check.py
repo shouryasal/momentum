@@ -20,6 +20,22 @@ The permission requirements come from spec §8.3 check 4:
 * ``enableSpotAndMarginTrading`` must be true, otherwise the bot cannot trade at all;
 * every futures/options/margin permission must be off — Earn is spot only;
 * ``ipRestrict`` is a warning, not a blocker: a home IP changes.
+
+**Venue.** Nothing here is pinned to production any more. :class:`BinanceClient` takes a
+``venue`` and asks ``ops.lib.exchange_endpoints`` for the host, so a demo preflight probes
+``demo-api.binance.com`` and a live preflight probes ``api.binance.com`` — with no shared
+default that a caller could forget to override. :func:`keys_for` picks the credential env
+names the same way, from the venue, which is why a demo key lives under
+``BINANCE_DEMO_KEY`` and not under ``BINANCE_KEY_A``.
+
+One thing genuinely changes between venues: **demo has no ``sapi`` tier at all.**
+``demo-api.binance.com/sapi/v1/account/apiRestrictions`` answers an nginx ``404`` where
+production answers a Binance error code, so key permissions cannot be read back on demo.
+:func:`restrictions_unavailable` is the honest verdict for that case — a warning naming the
+reason, never a silent pass. Treating the 404 as "no restrictions found, therefore no
+forbidden restrictions" would turn the single most important check (withdrawals disabled)
+into a rubber stamp. On demo the operator disables withdrawals in the UI and
+``docs/design/demo-mode.md`` §7 records it as a manual step.
 """
 
 from __future__ import annotations
@@ -33,7 +49,16 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-BASE_URL = "https://api.binance.com"
+from ops.lib.exchange_endpoints import (
+    Venue,
+    credential_env_names,
+    endpoints_for,
+)
+
+#: Kept for callers that still import it, and derived rather than spelled: it is the LIVE
+#: venue's host and nothing else. New code passes ``venue=`` instead — a module-level
+#: default pointed at production is exactly how a demo probe ends up on the real exchange.
+BASE_URL = endpoints_for(Venue.LIVE).rest_base
 RESTRICTIONS_PATH = "/sapi/v1/account/apiRestrictions"
 ACCOUNT_PATH = "/api/v3/account"
 EXCHANGE_INFO_PATH = "/api/v3/exchangeInfo"
@@ -70,6 +95,9 @@ class KeyPair:
     secret_env: str
     key: str = ""
     secret: str = ""
+    #: Which Binance these credentials are for. A KeyPair always knows, so a probe can
+    #: never be built against a venue the key was not issued for.
+    venue: Venue = Venue.LIVE
 
     @property
     def present(self) -> bool:
@@ -84,27 +112,41 @@ class KeyPair:
             "sleeve": self.sleeve,
             "key_env": self.key_env,
             "secret_env": self.secret_env,
+            "venue": self.venue.value,
             "present": self.present,
             "last4": self.last4,
         }
 
 
-def keys_for(sleeve: str, env: Mapping[str, str] | None = None) -> KeyPair:
-    """``BINANCE_KEY_A`` / ``BINANCE_SECRET_A`` for sleeve ``a``."""
+def keys_for(
+    sleeve: str,
+    env: Mapping[str, str] | None = None,
+    *,
+    venue: Venue | str = Venue.LIVE,
+) -> KeyPair:
+    """The credentials for ``sleeve`` at ``venue``.
+
+    ``live`` -> ``BINANCE_KEY_A``/``BINANCE_SECRET_A``;
+    ``demo`` -> ``BINANCE_DEMO_KEY``/``BINANCE_DEMO_SECRET`` (one demo account, no sleeve
+    letter — which is also what makes the two impossible to confuse by eye).
+    """
     e = env if env is not None else os.environ
-    up = sleeve.upper()
-    key_env, secret_env = f"BINANCE_KEY_{up}", f"BINANCE_SECRET_{up}"
+    v = endpoints_for(venue).venue
+    key_env, secret_env = credential_env_names(v, sleeve)
     return KeyPair(
         sleeve=sleeve.lower(),
         key_env=key_env,
         secret_env=secret_env,
         key=(e.get(key_env) or "").strip(),
         secret=(e.get(secret_env) or "").strip(),
+        venue=v,
     )
 
 
-def describe_keys(sleeve: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
-    return keys_for(sleeve, env).describe()
+def describe_keys(
+    sleeve: str, env: Mapping[str, str] | None = None, *, venue: Venue | str = Venue.LIVE
+) -> dict[str, Any]:
+    return keys_for(sleeve, env, venue=venue).describe()
 
 
 # --------------------------------------------------------------------------- client
@@ -117,15 +159,25 @@ class BinanceClient:  # pragma: no cover - the network edge; evaluators are test
         self,
         keys: KeyPair,
         *,
-        base_url: str = BASE_URL,
+        venue: Venue | str | None = None,
+        base_url: str | None = None,
         client: Any | None = None,
         timeout: float = 10.0,
         recv_window_ms: int = 5000,
     ) -> None:
         if not keys.present:
             raise BinanceCheckError(f"{keys.key_env}/{keys.secret_env} are not both set")
+        # The venue comes from the credentials unless a caller overrides it deliberately;
+        # there is no production default to forget.
+        self.endpoints = endpoints_for(venue if venue is not None else keys.venue)
+        self.venue = self.endpoints.venue
+        if self.venue is not keys.venue:
+            raise BinanceCheckError(
+                f"refusing to probe {self.venue.value} ({self.endpoints.rest_host}) with "
+                f"{keys.key_env}, which holds a {keys.venue.value} credential"
+            )
         self._keys = keys
-        self.base = base_url.rstrip("/")
+        self.base = (base_url or self.endpoints.rest_base).rstrip("/")
         self.recv_window_ms = recv_window_ms
         if client is None:
             import httpx
@@ -153,7 +205,17 @@ class BinanceClient:  # pragma: no cover - the network edge; evaluators are test
             raise BinanceCheckError(f"GET {path} -> HTTP {r.status_code}")
         return r.json()
 
+    @property
+    def supports_restrictions(self) -> bool:
+        """Whether :meth:`api_restrictions` can be asked at all on this venue."""
+        return self.endpoints.supports_sapi
+
     def api_restrictions(self) -> dict[str, Any]:
+        if not self.supports_restrictions:
+            raise BinanceCheckError(
+                f"{self.endpoints.rest_host} does not serve the sapi tier, so key "
+                f"permissions cannot be read there"
+            )
         return dict(self._signed_get(RESTRICTIONS_PATH))
 
     def account(self) -> dict[str, Any]:
@@ -204,6 +266,34 @@ def check_restrictions(data: Mapping[str, Any]) -> RestrictionReport:
         warnings.append(f"trading authority expires at {expiry}")
     return RestrictionReport(
         ok=not blocking, blocking=blocking, warnings=warnings, permissions=perms
+    )
+
+
+def restrictions_unavailable(venue: Venue | str) -> RestrictionReport:
+    """The verdict when a venue cannot be asked about key permissions at all.
+
+    Demo serves no ``sapi`` tier (``/sapi/v1/account/apiRestrictions`` -> nginx 404), so
+    there is no payload to evaluate. This returns ``ok=True`` with an explicit WARNING and
+    an EMPTY ``permissions`` map — it must never be mistaken for a checked key:
+
+    * ``ok`` is True because a missing endpoint is not a failing key, and blocking here
+      would make demo unreachable for a reason that is not about the key at all;
+    * the warning names the venue and the reason, so the preflight report says
+      "not checked, here is why" instead of "passed";
+    * ``permissions`` stays empty, so any consumer that reasons about
+      ``report.permissions["enableWithdrawals"]`` raises rather than reading False as
+      "withdrawals are off".
+    """
+    ep = endpoints_for(venue)
+    return RestrictionReport(
+        ok=True,
+        blocking=[],
+        warnings=[
+            f"key permissions NOT verified: {ep.rest_host} serves no sapi tier, so "
+            f"{RESTRICTIONS_PATH} returns 404 and withdrawals-disabled cannot be read "
+            f"back. Confirm it by hand at {ep.key_console} (demo-mode.md §7 step 2)."
+        ],
+        permissions={},
     )
 
 
@@ -281,6 +371,7 @@ __all__ = [
     "describe_keys",
     "free_balance",
     "keys_for",
+    "restrictions_unavailable",
     "supports_stop_orders",
     "symbol_of",
     "total_balances",

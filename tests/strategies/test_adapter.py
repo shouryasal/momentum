@@ -5,6 +5,8 @@ import pytest
 
 freqtrade = pytest.importorskip("freqtrade")
 
+from .conftest import NOW as _NOW  # noqa: E402
+
 
 @pytest.fixture()
 def strategy_cls(monkeypatch, gate_cfg, tmp_path):
@@ -83,6 +85,43 @@ def test_backtest_mode_uses_stubbed_providers(strategy_cls):
     s = _mk(strategy_cls)
     assert s._is_backtest
     # benign providers: no flags file / knowledge db present, yet entries pass the guards
-    from .conftest import ps
-    d = s.gate.check_entry("BTC/USDT", 100.0, ps())
+    from .conftest import ENTRY, ps
+    d = s.gate.check_entry("BTC/USDT", ENTRY, ps())
     assert d.allowed, d.reason
+
+
+class TestTheMonthBoundaryReleasesTheLocksItsStopCreated:
+    """A monthly stop that ends must take its freqtrade pair locks with it.
+
+    ``bot_loop_start`` never locks pairs for the monthly stop (HIGH #10) and the daily
+    stop's locks are timed, so by the month boundary they are always past. The sweep is
+    belt-and-braces for a lock written by an older build — and it must touch ONLY our
+    own reasons: CooldownPeriod / StoplossGuard / MaxDrawdown locks are freqtrade's own
+    and carry their own candle-counted expiry.
+    """
+
+    def test_it_unlocks_only_the_gates_own_reasons(self, strategy_cls, monkeypatch):
+        s = _mk(strategy_cls)
+        monkeypatch.setattr(s, "_is_backtest", False)
+        seen: list[str] = []
+        monkeypatch.setattr(s, "unlock_reason", seen.append, raising=False)
+        s._release_risk_pair_locks(_NOW)
+        assert seen == ["risk_stop_daily", "risk_stop_monthly"]
+
+    def test_a_backtest_touches_no_locks_at_all(self, strategy_cls, monkeypatch):
+        s = _mk(strategy_cls)
+        assert s._is_backtest
+        monkeypatch.setattr(s, "unlock_reason", lambda reason: pytest.fail("unlocked"),
+                            raising=False)
+        s._release_risk_pair_locks(_NOW)
+
+    def test_a_freqtrade_without_unlock_reason_does_not_break_the_loop(
+            self, strategy_cls, monkeypatch):
+        s = _mk(strategy_cls)
+        monkeypatch.setattr(s, "_is_backtest", False)
+
+        def boom(reason):
+            raise RuntimeError("no such API")
+
+        monkeypatch.setattr(s, "unlock_reason", boom, raising=False)
+        s._release_risk_pair_locks(_NOW)     # must not raise

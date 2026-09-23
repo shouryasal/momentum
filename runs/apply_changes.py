@@ -17,8 +17,11 @@ What changed from v1 (HIGH issues 6, 16 and 17)
   ``change_log.claimed_evidence_json`` and shown beside the verified ones, and a mismatch
   over 10% is written as a ``root_cause_events`` row (``evidence_mismatch``);
 * autonomy is a matrix — change *kind* × effective *mode* (test / live) — with hard code
-  invariants on top: a ``skill_new`` containing ``scripts/**`` is always held, a ``model``
-  promotion is always held, and the weekly auto-merge cap is a ceiling nothing can raise;
+  invariants on top: **any** skill change containing ``scripts/**`` is always held
+  (``skill_new`` *and* ``skill_edit``: the tier-2 check upstream looks at the declared
+  target folder, never at the commit's file list), a part of a skill that
+  ``skills.policy`` marks ``human`` is always held, a ``model`` promotion is always held,
+  and the weekly auto-merge cap is a ceiling nothing can raise;
 * ``approve()``, ``revert()`` and the ``auto_revert_requested`` events written by
   ``daily_review`` are all executed here, so the live HEAD keeps exactly two movers.
 """
@@ -129,6 +132,50 @@ def contains_scripts(files: list[str]) -> bool:
     return any("/scripts/" in f or f.endswith("/scripts") for f in files)
 
 
+#: The three parts of a skill folder ``skills.policy`` speaks about.
+SKILL_PARTS = ("body", "scripts", "tests")
+
+
+def skill_policy_for(cfg: EarnConfig, name: str) -> dict[str, str]:
+    """``{body,scripts,tests} -> human|gated`` for one skill, with the shipped default.
+
+    Same table and same fallback as the console's Skills page reads, so the marking the
+    operator sees is the marking this gate enforces.
+    """
+    table = cfg.skills.policy or {}
+    entry = table.get(name) or table.get("default")
+    if entry is None:
+        return {"body": "gated", "scripts": "human", "tests": "gated"}
+    return {part: str(getattr(entry, part)) for part in SKILL_PARTS}
+
+
+def skill_part(rel: str, target: str) -> str:
+    """Which part of ``target``'s skill folder ``rel`` belongs to."""
+    base = str(target).rstrip("/")
+    inner = rel[len(base) + 1:] if rel.startswith(base + "/") else rel
+    head = inner.split("/")[0]
+    return head if head in ("scripts", "tests") else "body"
+
+
+def human_only_parts(cfg: EarnConfig, change: dict, files: list[str]) -> list[str]:
+    """The parts of this skill change the operator marked ``human`` in ``skills.policy``.
+
+    ``skills.policy`` was declared in ``config/earn.yaml``, rendered on the Skills page and
+    enforced by nothing: the only reader was the listing endpoint. An operator who marked
+    a skill ``human`` got a label, not a hold. This is the reader that makes it mean
+    something — and, being on the autonomy side, it holds rather than rejects, so the
+    change is still there for the human to approve.
+    """
+    if str(change.get("kind")) != "skill":
+        return []
+    target = str(change.get("target") or "").rstrip("/")
+    if not target:
+        return []
+    policy = skill_policy_for(cfg, target.rsplit("/", 1)[-1])
+    return sorted({part for f in files
+                   if policy.get(part := skill_part(f, target)) == "human"})
+
+
 def load_pending(changes_dir: Path, statuses: tuple[str, ...] = ("proposed",)
                  ) -> list[tuple[Path, dict]]:
     out: list[tuple[Path, dict]] = []
@@ -175,15 +222,35 @@ def autonomy_key(change: dict) -> str:
     return kind if kind in AUTONOMY_KEYS else "params"
 
 
-def effective_mode(root: Path | None = None) -> str:
-    """``live`` when any sleeve is LIVE_*, else ``test``. Unverified state reads TEST."""
-    try:
-        from ops.lib import mode_state
+def effective_mode(root: Path | None = None, *, jdb=None) -> str:
+    """The autonomy *column*: ``live`` unless every sleeve is provably TEST.
 
-        state = mode_state.load()
-    except Exception:  # noqa: BLE001 - the mode file must never take the gate down
-        return "test"
-    return "live" if state.any_live() else "test"
+    This is the one place in the codebase where "I cannot tell" must resolve to **live**,
+    and it is the opposite of the trading-mode rule on purpose. ``mode_state.load()``
+    fails closed to all-TEST, which is right for a writer and was fatal here: ``apply_all``
+    is reached only from ``review_run.postflight`` and ``daily_review``, both of which run
+    under ``ops/envwrap.sh review|daily_review`` — allowlist
+    ``CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY``, ``env -i``, and no
+    ``EARN_CONSOLE_SECRET`` by design. So ``any_live()`` was *always* False, the ``test``
+    column (params/prompt/skill_edit = ``auto``) was always the one read, and
+    ``autonomy.live_forces_human`` — which the console truthfully displays as on — was
+    dead code in every unattended run. A model-authored params or prompt change
+    auto-merged onto the live branch with real money trading.
+
+    :mod:`ops.lib.mode_view` answers LIVE / TEST / UNKNOWN from the rendered
+    ``var/runtime`` overlays and the journal's completed transitions, and anything that is
+    not a *proven* TEST selects the restrictive column.
+
+    ``root`` is honoured: it is the state root whose ``var/runtime`` is consulted (the
+    console passes its live root). ``jdb`` lets the journal corroborate.
+    """
+    try:
+        from ops.lib import mode_view
+
+        view = mode_view.load(jdb=jdb, root=root)
+    except Exception:  # noqa: BLE001 - the mode file must never take the gate down,
+        return "live"  # but an unreadable one must never unlock it either
+    return "test" if not view.any_assume_live() else "live"
 
 
 def autonomy_setting(cfg: EarnConfig, key: str, mode: str) -> str:
@@ -317,7 +384,7 @@ def check(change: dict, cfg: EarnConfig, jdb, root: Path, *,
     mismatches = list(getattr(vres, "mismatches", []) or [])
     verdict = str(getattr(vres, "verdict", "hold"))
     reason = str(getattr(vres, "reason", ""))
-    mode = mode or effective_mode(root)
+    mode = mode or effective_mode(root, jdb=jdb)
     key = autonomy_key(change)
     base = CheckResult(verdict, reason, checks, verified, mismatches, "", mode)
     if verdict != "pass":
@@ -335,9 +402,22 @@ def check(change: dict, cfg: EarnConfig, jdb, root: Path, *,
 
     # ---- code invariants that outrank the matrix
     files = commit_files(root, (change.get("what") or {}).get("commit") or "")
-    if key == "skill_new" and contains_scripts(files):
+    # ``scripts/**`` is a human decision for *every* skill change, not only a new skill.
+    # It used to be tested under ``key == "skill_new"`` alone, and the tier-2 check above
+    # looks at ``change['target']`` (the skill *folder*), never at the commit's file list —
+    # so with ``skill_edit: {test: auto}`` a commit that rewrote an existing skill's
+    # executable scripts auto-merged with no human, which is the one thing §10 says can
+    # never happen.
+    if key in ("skill_new", "skill_edit") and contains_scripts(files):
         base.verdict = "hold"
-        base.reason = "skill_new touches scripts/** — always a human decision (spec §10)"
+        base.reason = f"{key} touches scripts/** — always a human decision (spec §10)"
+        base.autonomy = "approve"
+        return base
+    human_parts = human_only_parts(cfg, change, files)
+    if human_parts:
+        base.verdict = "hold"
+        base.reason = (f"skills.policy marks {', '.join(human_parts)} of"
+                       f" {str(change['target']).rsplit('/', 1)[-1]} human-only")
         base.autonomy = "approve"
         return base
 
@@ -410,8 +490,17 @@ def _merge_locked(change: dict, cfg: EarnConfig, root: Path) -> MergeOutcome:
 
 
 def is_tier0_only(files: list[str]) -> bool:
+    """True for a commit this module may cherry-pick without the change gate at all.
+
+    The prefix list is not enough on its own: ``knowledge/flags.json``,
+    ``knowledge/state/**`` and ``evals/results/**`` are all *inside* ``TIER0_PREFIXES``
+    and all **tier 2**, so the free path would have carried exactly the files the gate
+    refuses — while ``CLAUDE.md`` promised this module "refuses to merge any commit
+    touching a tier-2 path". The tier-2 list now has the last word here too.
+    """
     return bool(files) and all(
-        f in TIER0_FILES or f.startswith(TIER0_PREFIXES) for f in files)
+        (f in TIER0_FILES or f.startswith(TIER0_PREFIXES)) and not is_tier2(f)
+        for f in files)
 
 
 def merge_tier0(branch: str, cfg: EarnConfig, root: Path, *, lock: bool = True

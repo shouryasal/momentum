@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from strategies.riskgate import MemoryStateStore
 
-from .conftest import NOW, benign_gate, ps
+from .conftest import ENTRY, NOW, benign_gate, ps
 
 
 class TestWeightCap:
@@ -34,7 +34,7 @@ class TestGrossExposureAndFloor:
 
     def test_gross_80pct_rejected_after_drift(self, gate):
         # ETH drifted to 76% of NAV; BTC entry passes its own cap but breaks gross
-        d = gate.check_entry("BTC/USDT", 100.0, ps(btc=500, eth=7600))
+        d = gate.check_entry("BTC/USDT", ENTRY, ps(btc=500, eth=7600))
         assert not d.allowed and d.reason == "gross_cap:BTC/USDT"
 
     def test_usdt_floor_20pct_rejected(self, gate):
@@ -81,13 +81,13 @@ class TestTradesPerDay:
         store = MemoryStateStore()
         gate = benign_gate(gate_cfg, store)
         for _ in range(4):
-            assert gate.check_entry("BTC/USDT", 100.0, ps()).allowed
+            assert gate.check_entry("BTC/USDT", ENTRY, ps()).allowed
             gate.record_entry_fill(NOW)
-        d = gate.check_entry("BTC/USDT", 100.0, ps())
+        d = gate.check_entry("BTC/USDT", ENTRY, ps())
         assert not d.allowed and d.reason == "trades_per_day"
         # next Gulf day (Gulf midnight = 20:00 UTC): counter resets
         tomorrow = NOW + timedelta(hours=13)
-        assert gate.check_entry("BTC/USDT", 100.0, ps(now=tomorrow)).allowed
+        assert gate.check_entry("BTC/USDT", ENTRY, ps(now=tomorrow)).allowed
 
     def test_counter_survives_restart_via_store(self, gate_cfg):
         store = MemoryStateStore()
@@ -95,4 +95,4 @@ class TestTradesPerDay:
         for _ in range(4):
             gate1.record_entry_fill(NOW)
         gate2 = benign_gate(gate_cfg, store)  # "restarted" bot, same store
-        assert not gate2.check_entry("BTC/USDT", 100.0, ps()).allowed
+        assert not gate2.check_entry("BTC/USDT", ENTRY, ps()).allowed

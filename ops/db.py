@@ -33,7 +33,7 @@ from typing import Any
 from ops.config import REPO_ROOT, EarnConfig
 from ops.lib.paths import data_path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 SQL_DIR = Path(__file__).resolve().parent / "sql"
 
 WRITE_BUSY_TIMEOUT_MS = 5000
@@ -84,6 +84,17 @@ SCRIPT_MIGRATIONS: dict[int, dict[str, str]] = {
         "journal": "migrations/003_journal.sql",
         "knowledge": "migrations/003_knowledge.sql",
     },
+    # v4: llm_calls.status must accept 'provider_down' — see the script's header.
+    4: {
+        "journal": "migrations/004_journal.sql",
+    },
+    # v5: sleeve_runs.mode and nav_points.mode must accept 'demo' — a Binance Spot Demo
+    # Mode run is neither 'test' (nothing about the order path is simulated) nor 'live'
+    # (none of the P&L is real), and sharing a word with either is how one gets reported
+    # as the other. See the script's header.
+    5: {
+        "journal": "migrations/005_journal.sql",
+    },
 }
 
 
@@ -101,14 +112,25 @@ def has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return column in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
 
-def connect(db_path: Path | str, *, readonly: bool = False) -> sqlite3.Connection:
+def connect(
+    db_path: Path | str, *, readonly: bool = False, same_thread: bool = True
+) -> sqlite3.Connection:
+    """Open a connection.
+
+    ``same_thread=False`` is for a connection that is opened and used on different
+    threads of one pool: FastAPI runs a sync dependency and the sync endpoint it feeds on
+    *different* threadpool threads, so a per-request connection created in the dependency
+    raises ``ProgrammingError`` in the endpoint unless the check is off. It stays True
+    everywhere else, because a connection genuinely shared between concurrent threads is a
+    bug this check catches.
+    """
     p = Path(db_path)
     if readonly:
-        conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, check_same_thread=same_thread)
         conn.execute(f"PRAGMA busy_timeout={READ_BUSY_TIMEOUT_MS}")
     else:
         p.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(p)
+        conn = sqlite3.connect(p, check_same_thread=same_thread)
         conn.execute(f"PRAGMA busy_timeout={WRITE_BUSY_TIMEOUT_MS}")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")

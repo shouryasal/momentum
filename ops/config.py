@@ -29,13 +29,21 @@ from __future__ import annotations
 import ast
 import re
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    computed_field,
+    create_model,
+)
 
+from ops import universe as universe_mod
 from ops.lib.paths import REPO_ROOT
 
 DEFAULT_CONFIG = REPO_ROOT / "config" / "earn.yaml"
@@ -260,7 +268,88 @@ class AutoRevert(_Model):
     )
 
 
+class SpendCap(_Model):
+    """One bot's model-spend ceiling. ``null`` on a limit means "no ceiling"."""
+
+    daily_usd: float | None = F(
+        10.0, desc="Model spend a bot may incur in one UTC day before at_cap applies.",
+        group="autonomy", unit="usd", ge=0,
+    )
+    monthly_usd: float | None = F(
+        150.0, desc="Model spend a bot may incur in one UTC month before at_cap applies.",
+        group="autonomy", unit="usd", ge=0,
+    )
+
+
+class RunSpend(_Model):
+    """Spend caps that are *enforced* before a stage runs, not merely displayed."""
+
+    default: SpendCap = F(
+        default_factory=SpendCap, desc="Spend ceilings applied to every bot without an override.",
+        group="autonomy",
+    )
+    overrides: dict[str, SpendCap] = F(
+        default_factory=dict, desc="Per-bot spend ceilings, keyed by sleeve (a, b).",
+        group="autonomy",
+    )
+    at_cap: Literal["degrade", "hold"] = F(
+        "degrade",
+        desc="At the ceiling: 'degrade' drops the bot to the cheapest permitted tier, "
+             "'hold' stops it deciding until the window rolls over.",
+        group="autonomy", protected=True,
+    )
+    warn_at_pct: int = F(
+        80, desc="Show a warning once spend reaches this percentage of a ceiling.",
+        group="autonomy", unit="pct", ge=1, le=100,
+    )
+
+
+class RunAutonomy(_Model):
+    """*How much the bot does alone* — the operating axis, independent of mode.
+
+    Mode (``var/state/mode.json``) says whose money is at stake. This says how far the
+    scheduled loop may go on its own: off, watching, proposing or trading. The live
+    level itself is **not** here — it lives signed in ``var/state/autonomy.json``
+    (``ops.lib.autonomy_state``), because a level is authority and config is not. What
+    lives here is the ceiling that level is clamped to, and the spend caps.
+    """
+
+    enabled: bool = F(
+        True,
+        desc="Master switch for the operating loop: false pins every bot to 'off' whatever "
+             "the signed state says.",
+        group="autonomy", protected=True,
+    )
+    max_level: Literal["off", "watching", "proposing", "trading"] = F(
+        "proposing",
+        desc="Ceiling the signed per-bot level is clamped to. It can only ever lower a bot; "
+             "raising a bot still requires a signed, audited human transition.",
+        group="autonomy", protected=True,
+    )
+    late_grace_min: int = F(
+        15,
+        desc="How long past a job's expected fire time before liveness calls the loop late.",
+        group="autonomy", unit="minutes", ge=1,
+    )
+    stale_heartbeat_hours: int = F(
+        26,
+        desc="A bot whose fastest job has not run within this window is reported as not "
+             "running at all, however confident the config looks.",
+        group="autonomy", unit="hours", ge=1,
+    )
+    spend: RunSpend = F(
+        default_factory=RunSpend, desc="Per-bot model-spend ceilings and what happens at one.",
+        group="autonomy",
+    )
+
+
 class Autonomy(_Model):
+    run: RunAutonomy = F(
+        default_factory=RunAutonomy,
+        desc="Operating autonomy: how much the scheduled loop does without a human. "
+             "Separate from the change-merge autonomy below, which is about self-improvement.",
+        group="autonomy",
+    )
     tier1_auto_merge: bool = F(
         True, desc="Master switch: false holds every tier-1 change for a human.",
         group="autonomy", protected=True,
@@ -288,18 +377,347 @@ class Autonomy(_Model):
 # --------------------------------------------------------------------------- universe
 
 
+class UniverseRules(_Model):
+    """Membership thresholds for the dynamic universe. Every value is measured, not
+    guessed — ``docs/design/wide-universe.md`` §1.2 records the evidence behind each
+    one against a survivorship-free panel of all 735 USDT spot pairs ever listed."""
+
+    min_ann_vol_120d: float = F(
+        0.20, desc="Annualised 120d volatility floor: removes pegged assets (U at 0.4% was "
+                   "rank 23 by volume, so a hardcoded stablecoin list would have missed it). "
+                   "A 30% floor would also kill TRX at 0.21, which is a real coin.",
+        group="universe", unit="fraction", protected=True, ge=0, le=5,
+    )
+    vol_window_days: int = F(
+        120, desc="Lookback for the peg test, in days.", group="universe", unit="days",
+        protected=True, ge=30, le=730,
+    )
+    min_weekend_volume_ratio: float = F(
+        0.35, desc="Weekend volume as a fraction of weekday volume. Crypto trades on "
+                   "Saturdays; tokenized equities do not. Median across all pairs is 0.86.",
+        group="universe", unit="fraction", protected=True, ge=0, le=2,
+    )
+    weekend_window_days: int = F(
+        120, desc="Lookback for the 24/7 behaviour test, in days.", group="universe",
+        unit="days", protected=True, ge=30, le=730,
+    )
+    equity_token_pattern: str = F(
+        r"^[A-Z]{2,6}B$",
+        desc="Name rule for tokenized equities (AAPLB, TSLAB, MSTRB). It also matches real "
+             "crypto, which is why universe.crypto_allowlist exists.",
+        group="universe", protected=True,
+    )
+    require_ascii_base: bool = F(
+        True, desc="Refuse non-ASCII base assets. Nothing downstream — journal, filenames, "
+                   "prompts, Telegram — is tested for them.",
+        group="universe", protected=True,
+    )
+    max_tick_bps: float = F(
+        50.0, desc="One tick as a fraction of price, in bps. Below one tick there is no "
+                   "price: BTTC's tick is 270 bps, a 2.7% round trip before fees.",
+        group="universe", unit="bps", protected=True, gt=0,
+    )
+    min_listing_age_days: int = F(
+        180, desc="Data-sufficiency floor, not an alpha rule: a 90d lookback plus a 60d vol "
+                  "window plus slack.",
+        group="universe", unit="days", protected=True, ge=0,
+    )
+    volume_window_days: int = F(
+        90, desc="Lookback for the MEDIAN daily quote volume. Median, not mean: for 89 of "
+                 "480 pairs the mean is more than twice the median, so a mean-based floor "
+                 "admits coins whose liquidity was one pump.",
+        group="universe", unit="days", protected=True, ge=7, le=730,
+    )
+    min_median_quote_volume_usdt: float = F(
+        1_000_000.0,
+        desc="Watchlist floor: a name Earn is willing to look at and carry features for.",
+        group="universe", unit="usdt", protected=True, ge=0,
+    )
+    leveraged_suffixes: list[str] = F(
+        default_factory=lambda: ["UP", "DOWN", "BULL", "BEAR"],
+        desc="Leveraged-token suffixes. A base counts as leveraged only when the remainder "
+             "is itself a listed base asset, so JUP and SYRUP survive and ETHBULL does not.",
+        group="universe", protected=True,
+    )
+
+
+class UniverseTierRule(_Model):
+    min_median_quote_volume_usdt: float = F(
+        ..., desc="Median 90d quote-volume floor for this tier.", group="universe",
+        unit="usdt", protected=True, ge=0,
+    )
+    min_listing_age_days: int = F(
+        0, desc="Listing-age floor for this tier.", group="universe", unit="days",
+        protected=True, ge=0,
+    )
+
+
+class UniverseTiers(_Model):
+    """Tier **membership** (design §2.2). The cap each tier carries is not written here
+    — it comes from ``risk.tier_caps`` and ``risk.max_weight``, so there is exactly one
+    place a human raises a ceiling. The resolver stamps the resolved cap into every
+    snapshot entry; an asset with no tier has a cap of **zero** and the gate refuses
+    it, so adding a coin to a list can never grant it 30% of NAV by accident."""
+
+    major: UniverseTierRule = F(
+        default_factory=lambda: UniverseTierRule(
+            min_median_quote_volume_usdt=25_000_000.0, min_listing_age_days=730,
+        ),
+        desc="Deep, long-listed names.", group="universe", protected=True,
+    )
+    satellite: UniverseTierRule = F(
+        default_factory=lambda: UniverseTierRule(
+            min_median_quote_volume_usdt=5_000_000.0,
+        ),
+        desc="The tradeable floor. Below $5M median volume the round trip roughly doubles "
+             "(24.6 -> 47.8 bps) and the 5%-deep book falls by an order of magnitude.",
+        group="universe", protected=True,
+    )
+
+
+class UniverseScore(_Model):
+    """The satellite candidate score. Deliberately not momentum: the rank IC of 90d
+    trailing against 90d forward return is -0.067 at t = -7.4 over 345 weekly
+    cross-sections, so ranking by it would be knowingly trading a wrong signal."""
+
+    liquidity_weight: float = F(
+        0.40, desc="Weight on the median-volume rank — the one cross-sectional sort that "
+                   "measured positive.",
+        group="universe", unit="fraction", protected=True, ge=0, le=1,
+    )
+    trend_quality_weight: float = F(
+        0.35, desc="Weight on the trend-quality gate (above its own MA, vol inside the band).",
+        group="universe", unit="fraction", protected=True, ge=0, le=1,
+    )
+    long_trend_weight: float = F(
+        0.25, desc="Weight on the 365d return rank — the only positive-IC lookback (+0.023, "
+                   "t = +2.26), and therefore weighted lowest.",
+        group="universe", unit="fraction", protected=True, ge=0, le=1,
+    )
+    long_trend_days: int = F(
+        365, desc="Lookback for the long-horizon trend component.", group="universe",
+        unit="days", protected=True, ge=30,
+    )
+    ma_days: int = F(
+        200, desc="Moving average the trend-quality component compares price against.",
+        group="universe", unit="days", protected=True, ge=20,
+    )
+    vol_lookback_days: int = F(
+        60, desc="Realised-volatility window for the trend-quality band.", group="universe",
+        unit="days", protected=True, ge=10,
+    )
+    vol_band: list[float] = F(
+        default_factory=lambda: [0.40, 1.50],
+        desc="[low, high] annualised realised-vol band a candidate must sit inside.",
+        group="universe", unit="fraction", protected=True,
+    )
+
+
+class UniverseRefresh(_Model):
+    cron: str = F(
+        "0 18 * * 0", desc="Gulf-time schedule for the universe refresh. Weekly matches the "
+                           "measured churn: the eligible set turns over a median 11.0% of "
+                           "names per week, the top 50 by ADV 6.0%.",
+        group="universe", widget="cron", protected=True,
+    )
+    snapshot_dir: str = F(
+        "knowledge/universe",
+        desc="Where point-in-time snapshots live. Committed: they are the backtest's "
+             "whitelist and must be reviewable.",
+        group="universe", widget="path", protected=True,
+    )
+    max_tradeable_shrink: float = F(
+        0.50, desc="A refresh that would shrink the tradeable tier by more than this "
+                   "fraction is refused without --force. A Binance API hiccup must not "
+                   "flatten the book.",
+        group="universe", unit="fraction", protected=True, gt=0, le=1,
+    )
+    history_days: int = F(
+        1000, desc="Daily candles requested per symbol. /api/v3/klines caps a page at 1000, "
+                   "which is ~2.7 years — every lookback the rules need.",
+        group="universe", unit="days", protected=True, ge=200, le=1000,
+    )
+    max_workers: int = F(
+        6, desc="Concurrent klines fetchers behind a shared token bucket. Binance allows "
+                "6,000 weight/min and klines cost 2.",
+        group="universe", protected=True, ge=1, le=16,
+    )
+    exit_only_weeks: int = F(
+        4, desc="How long a pair that has left the universe stays on the whitelist as "
+                "exit-only. Falling out is a signal to wind a position down, not an exit; "
+                "the resolver cannot see positions, so the offer is time-boxed. In weeks.",
+        group="universe", protected=True, ge=1, le=52,
+    )
+    deadline_s: int = F(
+        1800, desc="Wall-clock budget for one refresh, in seconds.", group="universe",
+        protected=True, ge=60,
+    )
+
+
 class Universe(_Model):
+    """What Earn may look at and what it may trade.
+
+    ``assets`` and ``pairs`` are **computed from the current point-in-time snapshot**,
+    not stored here. That is the whole change: the live bots and the backtests read
+    one artefact, and a coin cannot acquire a cap by being typed into a list.
+    """
+
     quote: str = F("USDT", desc="Quote currency for every tradeable pair.", group="universe",
                    protected=True)
-    assets: list[str] = F(..., desc="Base assets Earn may hold. Locked decision: BTC and ETH.",
-                          group="universe", protected=True, widget="pair")
-    pairs: list[str] = F(..., desc="Tradeable pairs; must equal <asset>/<quote> in order.",
-                         group="universe", protected=True, widget="pair")
-    data_only_symbols: list[str] = F(
-        default_factory=list,
-        desc="Symbols ingested for data only (fee conversion); never tradeable.",
+    core: list[str] = F(
+        default_factory=lambda: ["BTC", "ETH"],
+        desc="Core assets, in allocation order. Never rotated out, never ranked, and the "
+             "whole book is gated by BTC's 200d MA.",
         group="universe", protected=True, widget="pair",
     )
+    data_only_symbols: list[str] = F(
+        default_factory=list,
+        desc="Symbols ingested for data only (fee conversion); never tradeable. The "
+             "resolver excludes them from every tier.",
+        group="universe", protected=True, widget="pair",
+    )
+    excluded_bases: list[str] = F(
+        default_factory=list,
+        desc="Human-maintained exclusions: tokenized real-world assets that pass both "
+             "behavioural tests (gold — XAUT, PAXG) and anything a human has ruled out.",
+        group="universe", protected=True, widget="pair",
+    )
+    crypto_allowlist: list[str] = F(
+        default_factory=list,
+        desc="Real crypto whose ticker matches the tokenized-equity name rule: ARB, BNB, "
+             "CKB, DGB, SHIB, TRB.",
+        group="universe", protected=True, widget="pair",
+    )
+    rules: UniverseRules = F(
+        default_factory=UniverseRules, desc="Quality filters, in funnel order.",
+        group="universe", protected=True,
+    )
+    tiers: UniverseTiers = F(
+        default_factory=UniverseTiers, desc="Tier membership and the cap each tier carries.",
+        group="universe", protected=True,
+    )
+    score: UniverseScore = F(
+        default_factory=UniverseScore, desc="The satellite candidate score.",
+        group="universe", protected=True,
+    )
+    refresh: UniverseRefresh = F(
+        default_factory=UniverseRefresh, desc="Refresh cadence and the snapshot store.",
+        group="universe", protected=True,
+    )
+
+    # -- the resolver's view of this config --------------------------------
+    def resolver_rules(self) -> universe_mod.Rules:
+        r = self.rules
+        return universe_mod.Rules(
+            quote=self.quote,
+            core=tuple(self.core),
+            data_only=tuple(
+                p.split("/")[0] for p in self.data_only_symbols
+            ),
+            leveraged_suffixes=tuple(r.leveraged_suffixes),
+            min_ann_vol_120d=r.min_ann_vol_120d,
+            vol_window_days=r.vol_window_days,
+            min_weekend_volume_ratio=r.min_weekend_volume_ratio,
+            weekend_window_days=r.weekend_window_days,
+            equity_token_pattern=r.equity_token_pattern,
+            crypto_allowlist=tuple(self.crypto_allowlist),
+            excluded_bases=tuple(self.excluded_bases),
+            require_ascii_base=r.require_ascii_base,
+            max_tick_bps=r.max_tick_bps,
+            min_listing_age_days=r.min_listing_age_days,
+            volume_window_days=r.volume_window_days,
+            min_median_quote_volume_usdt=r.min_median_quote_volume_usdt,
+        )
+
+    def resolver_tiers(self, caps: Mapping[str, float] | None = None) -> universe_mod.Tiers:
+        """Membership from this block; the caps from ``risk`` (see :func:`resolver_tiers_for`)."""
+        t, c = self.tiers, dict(caps or {})
+        return universe_mod.Tiers(
+            core_caps={a: float(c.get(a, 0.0)) for a in self.core},
+            major_min_volume_usdt=t.major.min_median_quote_volume_usdt,
+            major_min_age_days=t.major.min_listing_age_days,
+            major_cap=float(c.get("major", 0.0)),
+            satellite_min_volume_usdt=t.satellite.min_median_quote_volume_usdt,
+            satellite_cap=float(c.get("satellite", 0.0)),
+            watchlist_cap=0.0,
+        )
+
+    def resolver_score(self) -> universe_mod.ScoreRules:
+        s = self.score
+        low, high = (s.vol_band + [0.40, 1.50])[:2]
+        return universe_mod.ScoreRules(
+            liquidity_weight=s.liquidity_weight,
+            trend_quality_weight=s.trend_quality_weight,
+            long_trend_weight=s.long_trend_weight,
+            long_trend_days=s.long_trend_days,
+            ma_days=s.ma_days,
+            vol_lookback_days=s.vol_lookback_days,
+            vol_band_low=low,
+            vol_band_high=high,
+        )
+
+    # -- the current snapshot ----------------------------------------------
+    def snapshot_dir(self, root: Path | None = None) -> Path:
+        return (root or REPO_ROOT) / self.refresh.snapshot_dir
+
+    def snapshot(self, root: Path | None = None) -> universe_mod.Snapshot | None:
+        """The newest point-in-time snapshot, or ``None`` before the first refresh."""
+        return universe_mod.load_current(self.snapshot_dir(root))
+
+    def _from_snapshot(self, attr: str) -> list[str] | None:
+        snap = self.snapshot()
+        if snap is None:
+            return None
+        return list(getattr(snap, attr))
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Base assets Earn may hold: the tradeable tier of the current universe "
+                    "snapshot, core first. Falls back to universe.core before the first "
+                    "refresh.",
+    )
+    @property
+    def assets(self) -> list[str]:
+        return self._from_snapshot("tradeable_assets") or list(self.core)
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Tradeable pairs, from the current universe snapshot.",
+    )
+    @property
+    def pairs(self) -> list[str]:
+        return self._from_snapshot("tradeable_pairs") or [
+            f"{a}/{self.quote}" for a in self.core
+        ]
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Everything Earn carries features and news for — wider than `pairs` on "
+                    "purpose. Looking is cheap; a name watched for a year is a name that can "
+                    "be tested.",
+    )
+    @property
+    def watchlist_pairs(self) -> list[str]:
+        return self._from_snapshot("watchlist_pairs") or list(self.pairs)
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Base assets of `watchlist_pairs`.",
+    )
+    @property
+    def watchlist_assets(self) -> list[str]:
+        return self._from_snapshot("watchlist_assets") or list(self.assets)
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Date + sha256 of the snapshot `pairs` was resolved from; null before "
+                    "the first refresh. A proposal cites this so it can be replayed after "
+                    "the universe has moved.",
+    )
+    @property
+    def snapshot_ref(self) -> dict[str, str] | None:
+        snap = self.snapshot()
+        return None if snap is None else {"date": snap.date, "sha256": snap.sha256}
+
+    def tier_of(self, asset: str) -> str:
+        """The asset's tier in the current snapshot; ``excluded`` when there is none."""
+        snap = self.snapshot()
+        return snap.tier_of(asset) if snap else ("core" if asset in self.core else "excluded")
 
 
 class Exchange(_Model):
@@ -469,10 +887,36 @@ class Reconcile(_Model):
     )
 
 
+class TierCaps(_Model):
+    """Per-tier weight CEILINGS for a wide universe (wide-universe.md §2.2).
+
+    A universe snapshot may propose a lower cap for an individual name; the gate takes
+    ``min(snapshot cap, this ceiling)``, so widening a cap is always a human edit here.
+    An asset with no tier and no ``risk.max_weight`` entry has a cap of zero.
+    """
+
+    core: float = F(
+        0.40, desc="Cap for a core asset (BTC/ETH) when max_weight has no tighter entry.",
+        group="risk.exposure", unit="fraction", protected=True, ge=0, le=1,
+    )
+    major: float = F(
+        0.15, desc="Cap for a major: tradeable, median 90d volume >= $25M, listed >= 2 years.",
+        group="risk.exposure", unit="fraction", protected=True, ge=0, le=1,
+    )
+    satellite: float = F(
+        0.05, desc="Cap for a satellite: tradeable, median 90d volume >= $5M.",
+        group="risk.exposure", unit="fraction", protected=True, ge=0, le=1,
+    )
+
+
 class Risk(_Model):
     max_weight: dict[str, float] = F(
-        ..., desc="Per-asset weight cap as a fraction of sleeve NAV; 'default' is the fallback.",
+        ..., desc="Explicit per-asset weight cap as a fraction of sleeve NAV. No 'default'.",
         group="risk.exposure", unit="fraction", protected=True,
+    )
+    tier_caps: TierCaps = F(
+        default_factory=TierCaps, desc="Per-universe-tier weight ceilings.",
+        group="risk.exposure", protected=True,
     )
     max_gross_exposure: float = F(
         ..., desc="Maximum total non-USDT exposure as a fraction of NAV.",
@@ -531,8 +975,32 @@ class Risk(_Model):
         unit="fraction", protected=True, gt=0, le=1,
     )
     max_orders_per_day: int = F(
-        12, desc="Discretionary orders per sleeve per Gulf day; risk exits are exempt.",
+        16, desc="Discretionary orders per sleeve per Gulf day; risk exits are exempt.",
         group="risk.throughput", protected=True, ge=1,
+    )
+    max_open_positions: int = F(
+        8, desc="Concurrent non-USDT positions per sleeve; also freqtrade's max_open_trades.",
+        group="risk.exposure", protected=True, ge=1,
+    )
+    max_satellite_positions: int = F(
+        4, desc="Concurrent satellite-tier positions per sleeve.", group="risk.exposure",
+        protected=True, ge=0,
+    )
+    max_satellite_gross: float = F(
+        0.10, desc="Whole satellite sleeve as a fraction of NAV.", group="risk.exposure",
+        unit="fraction", protected=True, ge=0, le=1,
+    )
+    max_beta_to_btc: float = F(
+        1.30, desc="Portfolio 60d realised beta to BTC the gate will let an entry create.",
+        group="risk.exposure", protected=True, gt=0,
+    )
+    max_avg_pairwise_corr: float = F(
+        0.70, desc="Average 60d pairwise correlation of the held book an entry may create.",
+        group="risk.exposure", protected=True, gt=0, le=1,
+    )
+    min_position_pct_nav: float = F(
+        0.02, desc="Smallest position the gate will open, as a fraction of NAV.",
+        group="risk.exposure", unit="fraction", protected=True, ge=0, lt=1,
     )
     max_turnover_pct_per_day: float = F(
         0.50, desc="Traded notional divided by NAV per Gulf day.", group="risk.throughput",
@@ -1009,6 +1477,9 @@ class StagePrompts(_Model):
     validate_: str = F("prompts/stages/validate.v1.md", alias="validate",
                        desc="Prompt file for the signal validator.", group="research.prompts",
                        tier="tier1", widget="path")
+    watch: str = F("prompts/stages/watch.v1.md",
+                   desc="Prompt file for the per-holding local watcher.",
+                   group="research.prompts", tier="tier1", widget="path")
 
 
 class Research(_Model):
@@ -1234,6 +1705,212 @@ class Signals(_Model):
                          group="signals.planner")
     outcomes: Outcomes = F(default_factory=Outcomes, desc="How signal outcomes are resolved.",
                            group="signals.outcomes")
+
+
+# --------------------------------------------------------------------------- watch
+
+
+class WatchNews(_Model):
+    """How headlines reach the watcher, and how one story stops costing three calls."""
+
+    window_min: int = F(180, desc="How far back the watcher looks for headlines on a held "
+                                  "asset.", group="watch.news", unit="minutes", ge=5)
+    max_headlines: int = F(5, desc="Most headlines shown for one holding after clustering.",
+                           group="watch.news", ge=1, le=20)
+    include_market_wide: bool = F(
+        True, desc="Also show macro/ETF stories that name no asset.", group="watch.news")
+    embed_model: str = F("nomic-embed-text",
+                         desc="Local embedding model used to cluster near-duplicate "
+                              "headlines. Never asked a question.",
+                         group="watch.news", widget="model-ref")
+    cluster_threshold: float = F(
+        0.86, desc="Cosine similarity at or above which two headlines are one story.",
+        group="watch.news", ge=0.5, le=1.0)
+    token_threshold: float = F(
+        0.55, desc="Word-overlap fallback threshold when no embedding model answers.",
+        group="watch.news", ge=0.1, le=1.0)
+
+
+class WatchEscalate(_Model):
+    """What wakes Claude. Every threshold here is a policy, not a constant in code."""
+
+    on_invalidation_fired: bool = F(
+        True, desc="Escalate the moment a numeric invalidation Claude wrote becomes true. "
+                   "Ignores the cooldown: this is a fact, not an opinion.",
+        group="watch.escalate")
+    on_risk_threshold: bool = F(
+        True, desc="Escalate on a deterministic risk threshold (through the stop, inside "
+                   "the stop band, over the weight cap, past the drawdown band).",
+        group="watch.escalate")
+    stop_proximity_pct: float = F(
+        1.0, desc="Distance to the stop, in percent, that counts as a risk threshold.",
+        group="watch.escalate", unit="pct", ge=0.0, le=20.0)
+    drawdown_pct: float | None = F(
+        12.0, desc="Drawdown from the high since entry, in percent, that escalates. null "
+                   "disables it.", group="watch.escalate", unit="pct")
+    broken_min_confidence: float = F(
+        0.70, desc="Confidence the local model needs before a 'broken' verdict escalates.",
+        group="watch.escalate", ge=0.0, le=1.0)
+    weakened_min_confidence: float = F(
+        0.85, desc="The higher bar a mere 'weakened' verdict must clear.",
+        group="watch.escalate", ge=0.0, le=1.0)
+    hand_raises_to_escalate: int = F(
+        4, desc="Hand-raises for one asset inside the window that escalate on their own. "
+                "0 disables the persistence rule.", group="watch.escalate", ge=0)
+    window_min: int = F(60, desc="The window the persistence rule counts over.",
+                        group="watch.escalate", unit="minutes", ge=1)
+    cooldown_min: int = F(
+        90, desc="No second model-driven escalation for one asset inside this long, so a "
+                 "republished story cannot wake Claude repeatedly.",
+        group="watch.escalate", unit="minutes", ge=0)
+
+
+class Watch(_Model):
+    """The local holdings watcher: cheap, constant, and allowed only to raise a hand."""
+
+    enabled: bool = F(True, desc="Run the local watcher over open positions.",
+                      group="watch.core")
+    cron: str = F("*/7 * * * *", desc="Watcher schedule.", group="watch.core",
+                  widget="cron", effects=["crontab"])
+    deadline_s: int = F(120, desc="Wall-clock budget for one watch cycle.",
+                        group="watch.core", ge=15)
+    task: str = F("classify", desc="models.yaml task the watcher borrows. It must be a "
+                                   "cheap, tools-free, single-turn task; the code refuses "
+                                   "a wider tool grant than 'none'.",
+                  group="watch.core", widget="model-ref")
+    local_only: bool = F(
+        True, desc="Hand the router the local provider and nothing else, so a watch cycle "
+                   "can never spend on a cloud model. Turn this off to fall back to Haiku.",
+        group="watch.core")
+    max_holdings_per_cycle: int = F(
+        8, desc="Most positions checked in one cycle, closest to their stop first.",
+        group="watch.core", ge=1)
+    max_mark_age_min: float = F(
+        30.0, desc="A position whose newest price is older than this is not judged at all.",
+        group="watch.core", unit="minutes", ge=1)
+    news: WatchNews = F(default_factory=WatchNews,
+                        desc="Headline window and deduplication.", group="watch.news")
+    escalate: WatchEscalate = F(default_factory=WatchEscalate,
+                                desc="What wakes Claude, and the cooldown that stops it "
+                                     "happening twice.", group="watch.escalate")
+
+
+# --------------------------------------------------------------------------- discovery
+
+
+class DiscoveryPass(_Model):
+    """One scheduled depth of the research loop.
+
+    Two exist by convention — a cheap nightly ``light`` pass that keeps the queue moving,
+    and a ``deep`` weekly pass that is allowed to spend a real backtest budget and to
+    package a survivor as a change. Each pass name ``<p>`` must have a matching
+    ``ops.schedules.discovery_<p>`` entry whose ``timeout`` contains it; ``_validate_deadlines``
+    refuses the file otherwise, because a pass with no cron line never runs and nothing
+    would say so.
+    """
+
+    hypotheses: int = F(1, desc="Hypotheses this pass takes all the way through test, "
+                                "validate and record. Every one is a trial and the "
+                                "deflated hurdle rises with the count, so this is "
+                                "deliberately small.",
+                        group="discovery.passes", ge=1, le=10)
+    folds: int = F(2, desc="Walk-forward folds. 0 skips the walk-forward, which also makes "
+                           "the pass unable to propose anything.",
+                   group="discovery.passes", ge=0, le=12)
+    timerange: str = F("20230101-", desc="freqtrade timerange the pass measures over "
+                                         "(YYYYMMDD-YYYYMMDD, open end allowed).",
+                       group="discovery.passes")
+    deadline_s: int = F(3000, desc="Wall-clock budget for one pass, excluding postflight.",
+                        group="discovery.passes", ge=120, effects=["crontab"])
+    generate: bool = F(True, desc="Ask the models for new hypotheses before draining the "
+                                  "queue. False runs the queue only — which is what makes "
+                                  "the loop testable with no model at all.",
+                       group="discovery.passes")
+    propose: bool = F(False, desc="May a survivor of this pass become a changes/*.json? "
+                                  "The gate still recomputes every number and a human "
+                                  "still applies it; this only decides whether the pass "
+                                  "is allowed to ask.",
+                      group="discovery.passes")
+
+
+class DiscoveryGates(_Model):
+    """What a hypothesis must clear before the loop will package it as a change.
+
+    These are the loop's own bar, not the change gate's. `evals/verify_change.py` recomputes
+    everything afterwards and can still refuse; nothing here can lower that.
+    """
+
+    min_oos_win_rate: float = F(
+        0.5, desc="Fraction of walk-forward folds the candidate must win out of sample.",
+        group="discovery.gates", unit="fraction", ge=0.0, le=1.0)
+    min_folds: int = F(2, desc="Fewest walk-forward folds a proposal may rest on.",
+                       group="discovery.gates", ge=1)
+    min_trades: int = F(20, desc="Fewest trades in the candidate arm. A spectacular result "
+                                 "on six trades is six trades.",
+                        group="discovery.gates", ge=1)
+    require_hurdle: bool = F(
+        True, desc="Require the candidate Sharpe to clear the DEFLATED hurdle "
+                   "(baseline + expected max Sharpe over the trial count), not the "
+                   "baseline. Never turn this off to get a proposal through.",
+        group="discovery.gates")
+    require_beat_benchmark_direction: bool = F(
+        True, desc="Refuse a candidate that loses to the shipped strategy AND to "
+                   "buy-and-hold BTC over the same window. One baseline is how a bad "
+                   "result gets sold.",
+        group="discovery.gates")
+    max_proposals_per_run: int = F(
+        1, desc="Most changes/*.json one pass may write. The weekly auto-merge ceiling in "
+                "autonomy.max_auto_merges_per_week binds on top of this.",
+        group="discovery.gates", ge=0, le=5)
+
+
+class Discovery(_Model):
+    """The self-research loop: generate, test, validate, propose, record.
+
+    Everything this section configures is *research*. It writes no order, no proposal
+    (in the trading sense) and no limit; a survivor leaves it as a `changes/*.json` whose
+    every number the change gate recomputes before anything merges.
+    """
+
+    enabled: bool = F(True, desc="Run the discovery loop on its schedule.",
+                      group="discovery.core")
+    passes: dict[str, DiscoveryPass] = F(
+        default_factory=lambda: {"light": DiscoveryPass(), "deep": DiscoveryPass()},
+        desc="Named passes; each needs an ops.schedules.discovery_<name> entry.",
+        group="discovery.passes", effects=["crontab"])
+    generate_task: str = F(
+        "brief", desc="models.yaml task that DRAFTS candidate hypotheses (the cheap tier).",
+        group="discovery.core", widget="model-ref")
+    select_task: str = F(
+        "discover", desc="models.yaml task that SELECTS which drafts enter the queue. It "
+                         "must declare min_tier >= 3 and allow_local false — a local model "
+                         "may never author what becomes a proposal, and runs/discovery.py "
+                         "refuses the task outright when it does not.",
+        group="discovery.core", widget="model-ref")
+    prompt: str = F("prompts/stages/discover.v1.md",
+                    desc="Prompt file the selection stage renders.",
+                    group="discovery.core", tier="tier1", widget="path")
+    max_open_hypotheses: int = F(
+        12, desc="Ungraded hypotheses allowed in the ledger before generation stops. An "
+                 "unbounded queue is a way to look busy without finishing anything.",
+        group="discovery.core", ge=1)
+    seed_dir: str = F("knowledge/hypotheses",
+                      desc="Seed queue: hand-written starting hypotheses, drawn from the "
+                           "measured findings in docs/design/.",
+                      group="discovery.core", widget="path")
+    report_dir: str = F("reports/discovery", desc="Where each run's write-up is filed.",
+                        group="discovery.core", widget="path")
+    postflight_margin_s: int = F(
+        300, desc="Time reserved after the last measurement for recording and reporting.",
+        group="discovery.core", ge=0)
+    pairs: list[str] = F(
+        default_factory=list,
+        desc="Narrow the measured whitelist to these pairs; empty means the configured "
+             "universe. A research run may narrow it and can never add to it.",
+        group="discovery.core", widget="pair")
+    gates: DiscoveryGates = F(default_factory=DiscoveryGates,
+                              desc="What a survivor must clear before it is packaged.",
+                              group="discovery.gates")
 
 
 class Triggers(_Model):
@@ -1537,6 +2214,11 @@ class EarnConfig(_Model):
                            group="research")
     signals: Signals = F(default_factory=Signals, desc="The tiered signal pipeline.",
                          group="signals")
+    watch: Watch = F(default_factory=Watch,
+                     desc="The local holdings watcher between decisions.", group="watch")
+    discovery: Discovery = F(default_factory=Discovery,
+                             desc="The self-research loop: generate, test, validate, "
+                                  "propose, record.", group="discovery.core")
     ingest: Ingest = F(default_factory=Ingest, desc="What ingest pulls and how far back.",
                        group="ingest")
     news: News = F(..., desc="News window, feeds and keyword tables.", group="news")
@@ -1581,8 +2263,35 @@ class EarnConfig(_Model):
 # --------------------------------------------------------------------------- accessors
 
 
-def max_weight_for(cfg: EarnConfig, asset: str) -> float:
-    return cfg.risk.max_weight.get(asset, cfg.risk.max_weight["default"])
+def max_weight_for(cfg: EarnConfig, asset: str, tier: str | None = None) -> float:
+    """The human ceiling for one asset. Unknown asset with no tier ⇒ **zero**.
+
+    ``risk.max_weight`` has no ``default`` key: under a wide universe a default silently
+    granted every newly listed coin a 30% cap (wide-universe.md §2.2). A tier, when the
+    universe snapshot supplies one, resolves through ``risk.tier_caps``; an explicit
+    ``max_weight`` entry binds on top of it, whichever is tighter.
+    """
+    ceiling = getattr(cfg.risk.tier_caps, str(tier or ""), None) if tier else None
+    explicit = cfg.risk.max_weight.get(asset)
+    if explicit is None:
+        return float(ceiling or 0.0)
+    return float(min(explicit, ceiling) if ceiling is not None else explicit)
+
+
+def resolver_args(
+    cfg: EarnConfig,
+) -> tuple[universe_mod.Rules, universe_mod.Tiers, universe_mod.ScoreRules]:
+    """The three argument bundles :func:`ops.universe.resolve` takes, from one config.
+
+    Membership thresholds come from ``universe.*``; the cap stamped into each snapshot
+    entry comes from ``risk.max_weight``/``risk.tier_caps`` through
+    :func:`max_weight_for`, so a ceiling is raised in exactly one place.
+    """
+    u = cfg.universe
+    caps: dict[str, float] = {t: max_weight_for(cfg, "", t) for t in ("major", "satellite")}
+    for asset in u.core:
+        caps[asset] = max_weight_for(cfg, asset, "core")
+    return u.resolver_rules(), u.resolver_tiers(caps), u.resolver_score()
 
 
 def seed_for(cfg: EarnConfig, sleeve: str, *, state: Any | None = None) -> float:
@@ -1749,6 +2458,10 @@ def _validate_deadlines(cfg: EarnConfig) -> None:
         "research_run": r.deadline_s + r.postflight_margin_s,
         "scanner": cfg.signals.scanner.deadline_s,
     }
+    # One cron line per discovery pass. A pass with no schedule entry never fires, and the
+    # only thing that would say so is nobody noticing the queue stopped moving.
+    for name, p in (cfg.discovery.passes or {}).items():
+        checks[f"discovery_{name}"] = p.deadline_s + cfg.discovery.postflight_margin_s
     for job, needed in checks.items():
         s = sched.get(job)
         if s is None:
@@ -1860,9 +2573,13 @@ def _validate_strategies(cfg: EarnConfig, root: Path) -> None:
 def _validate_news(cfg: EarnConfig) -> None:
     if not cfg.news.asset_keywords:
         return
-    missing = [a for a in cfg.universe.assets if a not in cfg.news.asset_keywords]
+    # Core only. Under a dynamic universe the tradeable tier is resolved weekly from the
+    # exchange, so demanding a hand-written keyword list per asset would mean a new
+    # listing could not enter the universe without a config edit. The news pipeline
+    # falls back to the ticker for anything without an explicit keyword list.
+    missing = [a for a in cfg.universe.core if a not in cfg.news.asset_keywords]
     if missing:
-        raise ConfigError(f"news.asset_keywords does not cover universe assets {missing}")
+        raise ConfigError(f"news.asset_keywords does not cover universe core assets {missing}")
 
 
 def _cross_validate(cfg: EarnConfig, root: Path | None = None) -> None:
@@ -1870,19 +2587,57 @@ def _cross_validate(cfg: EarnConfig, root: Path | None = None) -> None:
     r, u = cfg.risk, cfg.universe
     if r.usdt_floor + r.max_gross_exposure > 1.0 + 1e-9:
         raise ConfigError("risk: usdt_floor + max_gross_exposure must be <= 1.0")
-    if "default" not in r.max_weight:
-        missing = [a for a in u.assets if a not in r.max_weight]
-        if missing:
-            raise ConfigError(f"risk.max_weight: no cap (and no default) for {missing}")
-    expected = [f"{a}/{u.quote}" for a in u.assets]
-    if u.pairs != expected:
-        raise ConfigError(f"universe.pairs must equal {expected}, got {u.pairs}")
-    overlap = set(u.pairs) & set(u.data_only_symbols)
+    # `universe.assets`/`pairs` are resolved from the point-in-time snapshot, so the old
+    # "pairs must equal <asset>/<quote> in order" and "max_weight must cover every asset"
+    # rules are gone: they were the two-asset assumption written down twice. What is
+    # checked here is the config the human owns.
+    if not u.core:
+        raise ConfigError("universe.core must name at least one asset")
+    for a in u.core:
+        if max_weight_for(cfg, a, "core") <= 0:
+            raise ConfigError(
+                f"core asset {a!r} has a cap of zero: give it a risk.max_weight entry or "
+                "raise risk.tier_caps.core"
+            )
+    if u.tiers.satellite.min_median_quote_volume_usdt < u.rules.min_median_quote_volume_usdt:
+        raise ConfigError(
+            "universe.tiers.satellite.min_median_quote_volume_usdt must be >= the watchlist "
+            "floor universe.rules.min_median_quote_volume_usdt"
+        )
+    if u.tiers.major.min_median_quote_volume_usdt < u.tiers.satellite.min_median_quote_volume_usdt:
+        raise ConfigError("universe.tiers.major volume floor must be >= the satellite floor")
+    weights = (
+        u.score.liquidity_weight + u.score.trend_quality_weight + u.score.long_trend_weight
+    )
+    if abs(weights - 1.0) > 1e-9:
+        raise ConfigError(f"universe.score weights must sum to 1.0, got {weights}")
+    if len(u.score.vol_band) != 2 or u.score.vol_band[0] >= u.score.vol_band[1]:
+        raise ConfigError(f"universe.score.vol_band must be [low, high], got {u.score.vol_band}")
+    overlap = {p.split("/")[0] for p in u.data_only_symbols} & set(u.core)
     if overlap:
-        raise ConfigError(f"universe.data_only_symbols overlaps tradeable pairs: {overlap}")
+        raise ConfigError(f"universe.data_only_symbols overlaps universe.core: {overlap}")
+    # The universe refresh has no cron line of its own: ops/refresh_backtest_data.sh runs
+    # it, then tops up candles for whatever it resolved (a new name needs a whitelist entry
+    # before it can get history). So universe.refresh.cron is documentation, and it has to
+    # tell the truth about when the job actually runs.
+    backtest_data = cfg.ops.schedules.get("backtest_data")
+    if backtest_data is not None and u.refresh.cron != backtest_data.cron:
+        raise ConfigError(
+            f"universe.refresh.cron {u.refresh.cron!r} must equal "
+            f"ops.schedules.backtest_data.cron {backtest_data.cron!r}: the refresh rides "
+            "that job (ops/refresh_backtest_data.sh)"
+        )
     for a in cfg.sleeve_a.base_weights:
-        if a not in u.assets:
-            raise ConfigError(f"sleeve_a.base_weights references non-universe asset {a}")
+        if a not in u.core:
+            raise ConfigError(f"sleeve_a.base_weights references non-core asset {a}")
+    if "default" in r.max_weight:
+        # The single most dangerous line the old config could carry: `max_weight.default`
+        # silently grants every newly resolved asset that cap the moment it appears in the
+        # universe. Under a dynamic universe that is three 30% alt positions nobody chose.
+        raise ConfigError(
+            "risk.max_weight must not carry a 'default': an asset with no explicit cap and "
+            "no tier in the universe snapshot has a cap of zero (wide-universe.md §2.2)"
+        )
     _validate_slots(cfg)
     _validate_deadlines(cfg)
     _validate_seeds(cfg)
@@ -1909,6 +2664,24 @@ def _strip_legacy(raw: dict[str, Any], source: str) -> dict[str, Any]:
             stacklevel=3,
         )
         out.pop("phase")
+    uni = out.get("universe")
+    if isinstance(uni, dict) and ("assets" in uni or "pairs" in uni):
+        # v2 stored the whole universe as two hardcoded lists. They are now computed from
+        # the point-in-time snapshot, so the keys are translated (assets -> core, once) and
+        # dropped rather than rejected: an old checkout still loads.
+        uni = dict(uni)
+        assets = uni.pop("assets", None)
+        uni.pop("pairs", None)
+        if assets and "core" not in uni:
+            uni["core"] = list(assets)
+        warnings.warn(
+            f"{source}: universe.assets/universe.pairs are no longer stored — they are "
+            "resolved from the newest snapshot under universe.refresh.snapshot_dir. "
+            "'assets' was read as 'universe.core'.",
+            ConfigWarning,
+            stacklevel=3,
+        )
+        out["universe"] = uni
     sleeves = out.get("sleeves")
     if isinstance(sleeves, dict):
         for name in ("a", "b"):
@@ -1978,6 +2751,7 @@ __all__ = [
     "config_schema",
     "load_config",
     "max_weight_for",
+    "resolver_args",
     "seed_for",
     "slots_for",
     "stage_prompt",

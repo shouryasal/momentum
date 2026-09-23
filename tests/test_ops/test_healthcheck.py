@@ -268,6 +268,20 @@ def test_a_rerun_passes_the_slot_to_research(hc):
     assert cmd[-1] == "1600" and "runs.research_run" in cmd
 
 
+def test_every_rerun_target_is_a_module_that_exists():
+    """``reconcile`` pointed at ``runs.reconcile``, which does not exist — a watchdog
+    rerun of the ledger/exchange check died with ModuleNotFoundError into logs/ while the
+    watchdog reported it as respawned."""
+    import importlib.util
+
+    from ops.healthcheck import RERUN_CMDS
+
+    # ``backup`` is a shell script and is special-cased with a None module.
+    missing = [module for _job, (_env, module) in RERUN_CMDS.items()
+               if module is not None and importlib.util.find_spec(module) is None]
+    assert missing == []
+
+
 # --------------------------------------------------------------------------- gate/TCA
 
 
@@ -308,18 +322,193 @@ def test_tca_threshold_alert(hc, cfg):
 # --------------------------------------------------------------------------- mode/bless
 
 
+def _render_mode(root, sleeve, state, *, generated_at="2026-09-20T00:00:00Z",
+                 config_sha=None):
+    """The two ``var/runtime`` overlays a real transition leaves behind.
+
+    The watchdog holds no ``EARN_CONSOLE_SECRET`` — ``ops/envwrap.sh healthcheck``'s
+    allowlist does not include it and ``env -i`` strips everything else — so these files,
+    written by the human's own transition, are the mode evidence it actually has.
+
+    ``generated_at`` and ``config_sha`` are the provenance ``mode_view`` checks before it
+    lets this file corroborate anything (``docs/contracts.md`` §1.2); they default to a
+    genuine render of the config on disk. Pass ``config_sha="..."`` or an old
+    ``generated_at`` to write a forged or superseded one.
+    """
+    import json
+
+    from ops.lib import mode_view
+
+    d = root / "var" / "runtime"
+    d.mkdir(parents=True, exist_ok=True)
+    live = state.startswith("LIVE")
+    (d / f"runtime-{sleeve}.json").write_text(json.dumps({
+        "version": 1, "sleeve": sleeve, "mode": "live" if live else "test",
+        "state": state, "submode": "execute" if live else None,
+        "run_id": f"{'live' if live else 'test'}-{sleeve}-01", "seed_usdt": 10000.0,
+        "generated_at": generated_at,
+        "config_sha": mode_view.config_sha() if config_sha is None else config_sha,
+    }))
+    (d / f"freqtrade-{sleeve}.mode.json").write_text(json.dumps({"dry_run": not live}))
+
+
+def _journal_run(h, cfg, sleeve, *, mode, run_id, started="2026-09-19T00:00:00Z"):
+    """The sleeve_runs row transition step 12 opens — the journal's own record.
+
+    Independent of ``var/runtime``: that is the whole point of asking for two sources
+    before a cron job is allowed to flatten a book.
+    """
+    from ops import modes
+
+    modes.open_run(h.jdb, cfg, run_id=run_id, sleeve=sleeve, mode=mode,
+                   submode=None, seed_usdt=10000.0, started_utc=started)
+
+
 class TestModeConsistency:
-    def test_a_live_bot_under_a_test_mode_file_is_killed(self, hc, cfg):
-        """No mode file means TEST (fail closed). A bot reporting dry_run=false is
-        therefore placing real orders nobody authorised."""
+    def test_a_live_bot_on_a_provably_test_sleeve_is_killed(self, hc, cfg):
+        """A bot reporting dry_run=false while the sleeve is *provably* TEST is placing
+        real orders nobody authorised. That is the KILL case, and the only mode-derived
+        one.
+
+        This test used to rely on "no mode file ⇒ TEST", which is why the bug below
+        survived: under that reading every live sleeve looked unauthorised. It now also
+        supplies the *second* source: a current overlay is evidence, and evidence alone no
+        longer flattens a book (``docs/contracts.md`` §1.2)."""
         from ops.lib import kill as killlib
 
         h, sent, _, apis, *_ = hc
+        _render_mode(h.state_root, "a", "TEST")
+        _journal_run(h, cfg, "a", mode="test", run_id="test-a-01")
         apis["a"].config = {"dry_run": False, "strategy": "SleeveA"}
         h.check_mode_consistency()
         assert killlib.is_engaged(cfg, h.root)
         assert "stopentry" in apis["a"].calls
         assert any("KILL ENGAGED" in t and s == "critical" for s, t, _ in sent)
+
+    def test_a_live_bot_on_a_live_sleeve_is_quiet(self, hc, cfg):
+        """Verified CRITICAL: LIVE mode was self-killing. ``expect_live`` came from
+        ``mode_state.load()``, which can never verify in this job, so a genuinely armed
+        sleeve reporting dry_run=false landed in the KILL branch every five minutes."""
+        from ops.lib import kill as killlib
+
+        h, sent, _, apis, *_ = hc
+        _render_mode(h.state_root, "b", "LIVE_EXECUTE")
+        apis["b"].config = {"dry_run": False, "strategy": "SleeveB"}
+        h.check_mode_consistency()
+        assert not killlib.is_engaged(cfg, h.root)
+        assert "stopentry" not in apis["b"].calls
+        assert sent == []
+
+    def test_an_unprovable_mode_alerts_and_never_kills(self, hc, cfg):
+        """With no evidence at all the job cannot show the sleeve was meant to be
+        dry-run, so it escalates to the human instead of flattening the book — exactly
+        what ``check_config_bless`` already does on ``no_secret``."""
+        from ops.lib import kill as killlib
+
+        h, sent, _, apis, *_ = hc
+        apis["b"].config = {"dry_run": False, "strategy": "SleeveB"}
+        h.check_mode_consistency()
+        assert not killlib.is_engaged(cfg, h.root)
+        assert "stopentry" not in apis["b"].calls
+        assert any(s == "critical" and "NOT engaging KILL" in t for s, t, _ in sent)
+        row = h.kdb.execute("SELECT kind FROM ops_incidents").fetchone()
+        assert row["kind"] == "mode_mismatch"
+
+    def test_a_dry_run_bot_on_a_live_sleeve_alerts(self, hc, cfg):
+        """The other direction: an armed sleeve whose container came up dry-run trades
+        nothing, so it is an alert, not a kill."""
+        from ops.lib import kill as killlib
+
+        h, sent, _, apis, *_ = hc
+        _render_mode(h.state_root, "b", "LIVE_PROPOSE")
+        apis["b"].config = {"dry_run": True, "strategy": "SleeveB"}
+        h.check_mode_consistency()
+        assert not killlib.is_engaged(cfg, h.root)
+        assert any(s == "critical" and "dry_run=true" in t for s, t, _ in sent)
+
+    def test_the_journal_alone_can_prove_liveness(self, hc, cfg):
+        """Second evidence source: the run the human opened at transition step 12."""
+        from ops.lib import kill as killlib
+
+        h, sent, _, apis, _jdb, *_ = hc
+        from ops import modes
+
+        modes.open_run(h.jdb, cfg, run_id="live-b-01", sleeve="b", mode="live",
+                       submode="execute", seed_usdt=500.0,
+                       started_utc="2026-09-20T00:00:00Z")
+        apis["b"].config = {"dry_run": False, "strategy": "SleeveB"}
+        h.check_mode_consistency()
+        assert not killlib.is_engaged(cfg, h.root)
+        assert sent == []
+
+    def test_an_uncorroborated_test_overlay_alerts_instead_of_killing(self, hc, cfg):
+        """The trust boundary, stated as behaviour (``docs/contracts.md`` §1.2).
+
+        ``var/runtime`` is unsigned and is the very file the container was started from.
+        One such file saying TEST is not a licence to flatten a live book — the journal
+        has to say it too. Without that second source the mismatch is still shouted, it
+        just does not pull the trigger.
+        """
+        from ops.lib import kill as killlib
+
+        h, sent, _, apis, *_ = hc
+        _render_mode(h.state_root, "a", "TEST")
+        apis["a"].config = {"dry_run": False, "strategy": "SleeveA"}
+        h.check_mode_consistency()
+        assert not killlib.is_engaged(cfg, h.root)
+        assert "stopentry" not in apis["a"].calls
+        assert any(s == "critical" and "NOT engaging KILL" in t for s, t, _ in sent)
+
+    def test_a_stale_overlay_does_not_kill(self, hc, cfg):
+        """The exact attack the staleness check exists for.
+
+        The sleeve was armed, then disarmed back to TEST by a human — and the overlay left
+        on disk predates that transition. Even though it *agrees* with the journal, it is
+        discarded: the answer rests on the journal alone, which is one source, so the
+        watchdog alerts rather than killing a bot that may still be legitimately live.
+        """
+        from ops.lib import kill as killlib
+
+        h, sent, _, apis, *_ = hc
+        _render_mode(h.state_root, "b", "TEST", generated_at="2026-09-01T00:00:00Z")
+        h.jdb.execute(
+            "INSERT INTO mode_transitions(sleeve, from_state, to_state, started_utc,"
+            " status, actor) VALUES ('b','LIVE_EXECUTE','TEST','2026-09-15T00:00:00Z',"
+            "'completed','human:cli')")
+        h.jdb.commit()
+        apis["b"].config = {"dry_run": False, "strategy": "SleeveB"}
+        h.check_mode_consistency()
+        assert not killlib.is_engaged(cfg, h.root)
+        assert any(s == "critical" and "NOT engaging KILL" in t for s, t, _ in sent)
+
+    def test_a_tampered_overlay_does_not_kill(self, hc, cfg):
+        """A hand-written ``runtime-b.json`` cannot arrange for a bot to be killed.
+
+        Its ``config_sha`` does not match the config on disk, so its provenance fails and
+        it can never corroborate — whatever the journal says.
+        """
+        from ops.lib import kill as killlib
+
+        h, sent, _, apis, *_ = hc
+        _render_mode(h.state_root, "b", "TEST", config_sha="0" * 64)
+        _journal_run(h, cfg, "b", mode="test", run_id="test-b-01")
+        apis["b"].config = {"dry_run": False, "strategy": "SleeveB"}
+        h.check_mode_consistency()
+        assert not killlib.is_engaged(cfg, h.root)
+        assert any(s == "critical" and "NOT engaging KILL" in t for s, t, _ in sent)
+
+    def test_an_overlay_that_disagrees_with_the_journal_does_not_kill(self, hc, cfg):
+        """Overlay says TEST, the journal says a live run is open: nothing is proven."""
+        from ops.lib import kill as killlib
+
+        h, sent, _, apis, *_ = hc
+        _render_mode(h.state_root, "b", "TEST")
+        _journal_run(h, cfg, "b", mode="live", run_id="live-b-01")
+        apis["b"].config = {"dry_run": False, "strategy": "SleeveB"}
+        h.check_mode_consistency()
+        assert not killlib.is_engaged(cfg, h.root)
+        assert "stopentry" not in apis["b"].calls
+        assert any(s == "critical" and "cannot prove" in t for s, t, _ in sent)
 
     def test_a_scaffold_bot_in_test_alerts(self, hc, cfg):
         """Verified HIGH #1: both bots ran Scaffold, so nothing traded and the gate was
@@ -357,6 +546,48 @@ class TestModeConsistency:
         apis["a"].config = {"dry_run": False, "strategy": "SleeveA"}
         h.check_mode_consistency()
         assert sent == []
+
+
+class TestDisplayTimezone:
+    """One zone per install: ``meta.display_timezone``.
+
+    ``ops.gen_ops_files`` renders it as ``CRON_TZ``, which is what makes cron evaluate
+    every expression in that zone. The watchdog derives its fire times from the same
+    expressions, so a hardcoded UTC+4 here meant it looked for artifacts in the wrong hour
+    — and across a day boundary, the wrong day — for any operator who moved the setting.
+    """
+
+    def test_the_watchdog_uses_the_configured_zone(self, hc, cfg):
+        from zoneinfo import ZoneInfo
+
+        h, *_ = hc
+        assert h.tz == ZoneInfo(cfg.meta.display_timezone)
+
+    def test_moving_the_zone_moves_the_fire_times(self, dbs):
+        from zoneinfo import ZoneInfo
+
+        from ops.config import load_config
+        from ops.healthcheck import GULF
+
+        root, jdb, kdb = dbs
+        gulf_cfg, london_cfg = load_config(), load_config()
+        london_cfg.meta.display_timezone = "Europe/London"
+        kw = {"root": root, "state_root": root, "now": NOW,
+              "sender": lambda text, severity, key=None, ttl=60: True}
+        gulf = Healthcheck(gulf_cfg, jdb, kdb, {}, **kw)
+        london = Healthcheck(london_cfg, jdb, kdb, {}, **kw)
+        assert gulf.tz.utcoffset(NOW) == GULF.utcoffset(NOW)
+        assert london.tz == ZoneInfo("Europe/London")
+        # nav_job fires at 00:10 local; the two zones cannot mean the same instant.
+        assert gulf.last_fire("nav_job", NOW) != london.last_fire("nav_job", NOW)
+
+    def test_an_unknown_zone_falls_back_instead_of_breaking_the_watchdog(self):
+        from ops.config import load_config
+        from ops.healthcheck import GULF, display_tz
+
+        broken = load_config()
+        broken.meta.display_timezone = "Mars/Olympus_Mons"
+        assert display_tz(broken) is GULF
 
 
 class TestConfigBless:

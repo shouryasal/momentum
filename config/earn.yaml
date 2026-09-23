@@ -38,6 +38,21 @@ security:
   console_bind_note: "127.0.0.1 only (invariant)"
 
 autonomy:
+  # `run:` is the OPERATING axis — how much the scheduled loop does alone (off / watching /
+  # proposing / trading). It is independent of mode, which is about whose money is at stake.
+  # The live per-bot level is NOT here: a level is authority, so it lives HMAC-signed in
+  # var/state/autonomy.json (ops.lib.autonomy_state) and only a human can raise it. What is
+  # here is the ceiling that level is clamped to, and the spend caps the gate enforces.
+  run:
+    enabled: true                  # false pins every bot to `off`, whatever the state says
+    max_level: proposing           # ceiling; raise to `trading` deliberately, never by drift
+    late_grace_min: 15             # past a job's fire time before liveness says "late"
+    stale_heartbeat_hours: 26      # no job at all in this window = "it has not run"
+    spend:                         # model spend, per bot, enforced before a stage runs
+      default: { daily_usd: 10.0, monthly_usd: 150.0 }
+      overrides: {}                # e.g. b: { daily_usd: 4.0, monthly_usd: 60.0 }
+      at_cap: degrade              # degrade = cheapest permitted tier; hold = stop deciding
+      warn_at_pct: 80
   tier1_auto_merge: true           # master switch; false = every tier-1 change is HELD
   kinds:                           # kind -> {test|live: auto|approve|off}
     params:     { test: auto,    live: approve }
@@ -51,11 +66,55 @@ autonomy:
   max_auto_merges_per_week: 5
   auto_revert: { enabled: true, window_days: 7, validity_drop_pct: 10, breach_increase: 1 }
 
+# `universe.assets` and `universe.pairs` are GONE as stored keys. They are computed from the
+# newest point-in-time snapshot under `refresh.snapshot_dir`, written by `ops.universe_refresh`
+# and committed. That file is simultaneously the whitelist the bots run and the whitelist the
+# backtests replay, which is the only way live and backtest can be the same system: verified
+# against the installed freqtrade 2026.8, every dynamic pairlist we would want
+# (VolumePairList, AgeFilter, SpreadFilter, VolatilityFilter, DelistFilter, ...) is
+# SupportsBacktesting.NO, so freqtrade always runs StaticPairList over our snapshot.
+# Every threshold below was measured on 2026-09-23 against the live Binance API and a
+# survivorship-free panel of all 735 USDT spot pairs ever listed — docs/design/wide-universe.md.
 universe:
   quote: USDT
-  assets: [BTC, ETH]               # BTC/USDT and ETH/USDT ONLY (locked decision)
-  pairs: ["BTC/USDT", "ETH/USDT"]
+  core: [BTC, ETH]                 # never rotated, never ranked; BTC's 200d MA gates the book
   data_only_symbols: ["BNB/USDT"]  # candles for fee conversion only; NEVER tradeable
+  # Tokenized real-world assets that pass BOTH behavioural tests and are still not crypto.
+  excluded_bases: [XAUT, PAXG]     # tokenized gold
+  # Real crypto whose ticker matches the tokenized-equity name rule `^[A-Z]{2,6}B$`. Without
+  # this the rule deletes six genuine coins along with AAPLB/TSLAB/MSTRB/QQQB/NFLXB.
+  crypto_allowlist: [ARB, BNB, CKB, DGB, SHIB, TRB]
+  rules:                           # the funnel, in order — §1.2. Today: 708 -> 107 watchlist
+    min_ann_vol_120d: 0.20         # removes pegs; U (rank 23 by volume) sits at 0.4% ann vol
+    vol_window_days: 120           # ... and a 30% floor would kill TRX at 0.21, a real coin
+    min_weekend_volume_ratio: 0.35 # crypto trades Saturdays; tokenized equities do not
+    weekend_window_days: 120       # median across all pairs is 0.86; 62 pairs fall below 0.35
+    equity_token_pattern: "^[A-Z]{2,6}B$"
+    require_ascii_base: true       # 牛来USDT is $32M ADV and nothing downstream is tested for it
+    max_tick_bps: 50               # BTTC's tick is 270 bps: a 2.7% round trip before fees
+    min_listing_age_days: 180      # data sufficiency (90d lookback + 60d vol + slack)
+    volume_window_days: 90
+    min_median_quote_volume_usdt: 1000000   # WATCHLIST floor — a name we will look at
+    leveraged_suffixes: [UP, DOWN, BULL, BEAR]
+  tiers:                           # membership only; the CAPS live in risk.max_weight/tier_caps
+    major:     { min_median_quote_volume_usdt: 25000000, min_listing_age_days: 730 }
+    satellite: { min_median_quote_volume_usdt: 5000000 }   # the TRADEABLE floor: 32 pairs today
+  score:                           # §3.2 — deliberately NOT momentum (rank IC -0.067, t -7.4)
+    liquidity_weight: 0.40         # the one cross-sectional sort that measured positive
+    trend_quality_weight: 0.35
+    long_trend_weight: 0.25        # 365d is the only positive-IC lookback (+0.023, t +2.26)
+    long_trend_days: 365
+    ma_days: 200
+    vol_lookback_days: 60
+    vol_band: [0.40, 1.50]
+  refresh:
+    cron: "0 18 * * 0"             # Sunday 18:00 Gulf, alongside backtest_data
+    snapshot_dir: knowledge/universe
+    max_tradeable_shrink: 0.50     # a Binance hiccup must not flatten the book
+    history_days: 1000             # one /api/v3/klines page ~ 2.7 years of daily bars
+    max_workers: 6
+    exit_only_weeks: 4             # a name that leaves stays whitelisted, exit-only, this long
+    deadline_s: 1800
 
 exchange:
   name: binance                    # UAE entity, spot only
@@ -86,12 +145,32 @@ modes:
     confirm_phrase: "GO LIVE {sleeve} {seed} USDT"
 
 risk:                              # the gate reads these (via riskgate.json); one test per control
-  max_weight: { BTC: 0.40, default: 0.30 }   # fraction of sleeve NAV, keyed by base asset
+  # Explicit per-asset caps, as a fraction of sleeve NAV, keyed by base asset. There is NO
+  # `default` key any more and the gate does not invent one: an asset with neither an entry
+  # here nor a tier in the universe snapshot has a cap of ZERO and the gate refuses it
+  # (docs/design/wide-universe.md §2.2). A `default: 0.30` silently granted every newly
+  # listed coin a 30% cap the moment it appeared in the universe — under a wide universe
+  # that is three 30% alt positions nobody chose.
+  max_weight: { BTC: 0.40, ETH: 0.30 }
+  # The CEILING per universe tier. The snapshot may propose a lower cap for a name; it can
+  # never propose a higher one — the gate takes min(snapshot cap, this ceiling). BTC and ETH
+  # additionally carry their own entries in max_weight above, which bind first.
+  tier_caps:                       # wide-universe.md §2.2
+    core: 0.40                     # BTC/ETH; their max_weight entries are tighter still
+    major: 0.15                    # tradeable, median 90d volume >= $25M, listed >= 2y
+    satellite: 0.05                # tradeable, median 90d volume >= $5M
   max_gross_exposure: 0.80
   usdt_floor: 0.20
-  daily_loss_stop: 0.03            # flatten + lock entries
-  daily_stop_lock_hours: 24
-  monthly_loss_stop: 0.10          # flatten + pause sleeve; resume is human-only
+  daily_loss_stop: 0.03            # flatten + lock entries (measured from the Gulf-DAY anchor)
+  daily_stop_lock_hours: 24        # the lock expires on a timestamp, never on a date
+  # Measured from the Gulf-MONTH anchor, and it ends when that month does: the boundary
+  # re-anchors NAV and releases the lock in the same tick. Per mode
+  # (strategies/riskgate.py: GateConfig.monthly_lock_release):
+  #   LIVE  -> human_or_month_end: the sleeve is PAUSED and a human may resume early via
+  #            ops.lib.risk_resume; if nobody does, the Gulf month boundary ends it.
+  #   TEST/backtest -> month_end: there is no human, so the boundary is the only release.
+  # Never a lock that outlives the drawdown it measured — a -10% May must not block December.
+  monthly_loss_stop: 0.10          # flatten + pause sleeve; early resume is human-only
   max_trades_per_day: 4            # per sleeve
   stoploss_guard: { count: 3, window_hours: 48, lock_hours: 24 }
   cooldown_candles: 2
@@ -102,8 +181,18 @@ risk:                              # the gate reads these (via riskgate.json); o
   kill_file: ops/killdir/KILL
   max_entries_per_trade: 4         # initial + DCA + pyramid adds
   max_order_notional_pct: 0.20     # single order <= 20% of ledger NAV
-  max_orders_per_day: 12           # discretionary orders per sleeve per Gulf day
+  max_orders_per_day: 16           # discretionary orders per sleeve per Gulf day
   max_turnover_pct_per_day: 0.50   # traded notional / NAV per Gulf day
+  # --- wide-universe controls (docs/design/wide-universe.md §2.3-2.4) -------------------
+  # A twenty-alt book is worth ~2 independent bets (measured avg pairwise corr 0.37-0.49,
+  # N_eff saturating at 1.95 by N=20), and on the 20 worst BTC days since 2019 between
+  # 86.7% and 100% of the top-30 alts fell with it. So width is capped, not celebrated.
+  max_open_positions: 8            # per sleeve; 8 buys 1.82 of the 1.95 bets on offer
+  max_satellite_positions: 4       # satellite count is monotonically harmful past ~4
+  max_satellite_gross: 0.10        # whole satellite sleeve as a fraction of NAV
+  max_beta_to_btc: 1.30            # portfolio 60d realised beta; alts measure 1.03-1.48
+  max_avg_pairwise_corr: 0.70      # 60d avg pairwise corr of the held book (calm p90 0.591)
+  min_position_pct_nav: 0.02       # below this a position can only be opened and closed
   max_fee_pct_per_month: 0.01      # 1% NAV/month fee budget (matches G2/G3)
   market_entries_allowed: false    # market ENTRY orders need an explicit human opt-in
   protections: { max_drawdown: { lookback_candles: 6, trade_limit: 2 } }
@@ -200,13 +289,13 @@ research:
   deadline_s: 2400
   stage_deadlines_s: { flags: 240, brief: 360, decide: 900, shadow: 240 }
   postflight_margin_s: 120
-  prompt_version: research.v3
+  prompt_version: research.v4     # v4: dynamic universe, sparse targets, universe_snapshot
   stage_prompts:                   # code constants moved to files (tier 1, editable in the UI)
     flags: prompts/stages/flags.v1.md
     brief: prompts/stages/brief.v1.md
     brief_short: prompts/stages/brief_short.v1.md
     classify: prompts/stages/classify.v1.md
-    scan: prompts/stages/scan.v1.md
+    scan: prompts/stages/scan.v2.md   # v2: two-tier features + the watchlist/tradeable split
     validate: prompts/stages/validate.v1.md
 
 signals:
@@ -246,6 +335,72 @@ signals:
     max_per_day: 3                 # replaces triggers.max_per_day (legacy key still accepted)
     cooldown_hours: 4
   outcomes: { resolve_after_hours: 24, measure_tf: "1h" }
+
+watch:                             # the LOCAL holdings watcher — runs between decisions
+  # Deterministic first: every number below is computed in Python before any model is
+  # asked anything, and a numeric invalidation that has fired escalates with no model call
+  # at all. The model is asked exactly one fuzzy question per holding, on a prompt sized
+  # for a 6 GB GPU (~1.2k tokens against providers.ollama.options.num_ctx = 8192).
+  # The watcher may ONLY write a watch_events row and request escalation: it can never
+  # place, size or cancel an order, write a proposal or change config, and
+  # runs/watch/guard.py enforces that rather than asking for it.
+  enabled: true
+  cron: "*/7 * * * *"
+  deadline_s: 120
+  task: classify                   # a declared cheap, tools-free, single-turn task
+  local_only: true                 # the router is handed the local provider and nothing else
+  max_holdings_per_cycle: 8
+  max_mark_age_min: 30.0
+  news: { window_min: 180, max_headlines: 5, include_market_wide: true,
+          embed_model: nomic-embed-text, cluster_threshold: 0.86, token_threshold: 0.55 }
+  escalate:
+    on_invalidation_fired: true    # a fact: bypasses the cooldown
+    on_risk_threshold: true        # also a fact: bypasses the cooldown
+    stop_proximity_pct: 1.0
+    drawdown_pct: 12.0
+    broken_min_confidence: 0.70    # "broken" and "weakened" are different claims and
+    weakened_min_confidence: 0.85  # do not share a bar
+    hand_raises_to_escalate: 4     # persistence: 4 mutters in the window is a pattern
+    window_min: 60
+    cooldown_min: 90               # one republished story cannot wake Claude twice
+
+discovery:                         # THE SELF-RESEARCH LOOP (runs/discovery.py)
+  # Until now every strategy finding this system holds was produced by a BUILD-TIME agent
+  # and handed over as finished config. That tests the builders, not the product. This
+  # section is the product forming its own hypotheses, measuring them against history,
+  # validating them by the edge-audit rules and proposing survivors through the SAME change
+  # gate a human-authored change goes through — where every number it claims is recomputed
+  # by evals/verify_change.py before anything merges.
+  #
+  # What it can never do, by construction and not by promise: touch a risk limit, the
+  # universe, capital, mode, credentials, execution code or the gate. Its patches live in
+  # the three namespaces evals/backtest_api.py allows (params.*, trading.*, execution.*)
+  # and only `params.*` within `bounds:` can become a proposal at all — the rest is
+  # reported as a finding for a human. A local model may never select or author here
+  # (select_task must declare min_tier >= 3 and allow_local false; the code re-checks it).
+  enabled: true
+  generate_task: brief             # the cheap tier drafts candidates
+  select_task: discover            # the stronger tier picks which enter the queue
+  prompt: prompts/stages/discover.v1.md
+  max_open_hypotheses: 12          # ungraded hypotheses before generation stops
+  seed_dir: knowledge/hypotheses   # the starting queue (seeded from measured findings)
+  report_dir: reports/discovery
+  postflight_margin_s: 300
+  pairs: []                        # empty = the configured whitelist; never widens it
+  passes:
+    # Nightly: drain the queue, no proposal. Cheap enough to run every day.
+    light: { hypotheses: 1, folds: 2, timerange: "20230101-", deadline_s: 3000,
+             generate: false, propose: false }
+    # Weekly: generate new candidates, full window, four folds, may package ONE survivor.
+    deep:  { hypotheses: 2, folds: 4, timerange: "20210101-", deadline_s: 10200,
+             generate: true,  propose: true }
+  gates:                           # the loop's own bar; the change gate still binds on top
+    min_oos_win_rate: 0.5
+    min_folds: 2
+    min_trades: 20
+    require_hurdle: true           # the DEFLATED hurdle, never the baseline
+    require_beat_benchmark_direction: true   # both baselines, or it is not a result
+    max_proposals_per_run: 1
 
 triggers:                          # kept for back-compat; unset keys derive from signals.*
   enabled: true
@@ -324,6 +479,13 @@ ops:
     backup:        { cron: "0 3 * * *",     deadline_s: 2700, artifact: backup_file }
     maintenance:   { cron: "0 2 * * 1",     deadline_s: 3600, artifact: maintenance_row }
     daily_review:  { cron: "30 21 * * *",   deadline_s: 3300, artifact: daily_report }
+    # One line per discovery.passes entry. Nightly 02:20 Gulf (clear of maintenance at
+    # 02:00 Monday) and Saturday 04:00 (clear of backtest_data and review on Sunday). Both
+    # take the SAME flock, so a long deep pass can never overlap the next light one.
+    # artifact: none — a pass that finds nothing writes nothing, and that is a correct
+    # outcome, not a missed run. Liveness is the `runs` row it always journals.
+    discovery_light: { cron: "20 2 * * *",   deadline_s: 3600,  artifact: none }
+    discovery_deep:  { cron: "0 4 * * 6",    deadline_s: 11400, artifact: none }
     # research_run.cron is `derived`: ops/gen_ops_files.py renders one line per
     # research.slots entry, which is also what nearest_slot and the healthcheck read.
 

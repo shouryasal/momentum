@@ -124,11 +124,44 @@ def risk_mechanics(sleeve: str, _actor: Session) -> dict[str, Any]:
 def risk_utilisation(
     sleeve: str,
     _actor: Session,
-    nav: Annotated[float, Query(ge=0.0)] = 0.0,
-    free_usdt: Annotated[float, Query(ge=0.0)] = 0.0,
+    nav: Annotated[float | None, Query(ge=0.0)] = None,
+    free_usdt: Annotated[float | None, Query(ge=0.0)] = None,
 ) -> dict[str, Any]:
-    return svc.utilisation(get_cfg(), _sleeve(sleeve), nav=nav, positions={},
-                           free_usdt=free_usdt, now=datetime.now(UTC))
+    """Headroom meters against the real portfolio.
+
+    NAV, the book and free USDT are read here rather than taken from the client: the page
+    has no way to know them, and the old query-parameter defaults of ``0`` made every
+    NAV-derived meter render as 0% with a permanent USDT-floor breach. ``nav`` and
+    ``free_usdt`` stay accepted as explicit overrides for what-if reads.
+    """
+    sleeve = _sleeve(sleeve)
+    cfg = get_cfg()
+    bot = _bot_view(cfg, sleeve)
+    view = svc.portfolio_view(cfg, sleeve, bot_status=bot["status"], balance=bot["balance"],
+                              fallback_nav=svc.nav_rows(cfg).get(sleeve))
+    source = view["source"]
+    if nav is not None:
+        view["nav"], source = float(nav), "caller"
+    if free_usdt is not None:
+        view["free_usdt"] = float(free_usdt)
+    return svc.utilisation(cfg, sleeve, nav=view["nav"], positions=view["positions"],
+                           free_usdt=view["free_usdt"], now=datetime.now(UTC),
+                           nav_source=source)
+
+
+def _bot_view(cfg, sleeve: str) -> dict[str, Any]:
+    """The bot's own status and balance; a dead bot is a state, never a failed read."""
+    api = bot_api(cfg, sleeve)
+    out: dict[str, Any] = {"status": None, "balance": None}
+    if api is None:
+        return out
+    try:
+        out["status"] = list(api.status() or [])
+        out["balance"] = dict(api.balance() or {})
+    except Exception:  # noqa: BLE001 — fall through to the ledger row
+        out["status"] = None
+        out["balance"] = None
+    return out
 
 
 @router.get("/gate-decisions")

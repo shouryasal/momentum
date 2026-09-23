@@ -12,9 +12,18 @@
 # Claude auth mode (EARN_CLAUDE_AUTH_MODE in .env, kept in sync by the console when
 # models.yaml auth.claude_mode is saved; anything unknown falls back to subscription):
 #
-#   subscription  CLAUDE_CODE_OAUTH_TOKEN only — a present ANTHROPIC_API_KEY would
-#                 preempt subscription auth in headless runs, so it is dropped.
-#   api_key       ANTHROPIC_API_KEY only; the OAuth token is dropped.
+#   subscription  CLAUDE_CODE_OAUTH_TOKEN only. A present ANTHROPIC_API_KEY is renamed
+#                 to EARN_FALLBACK_ANTHROPIC_API_KEY, UNCONDITIONALLY — token or no
+#                 token. It used to be dropped only when an OAuth token was also
+#                 present, which is exactly backwards: on a host with
+#                 `auth.subscription_source: login` there is legitimately no token in
+#                 .env, so every cron model job got the plain key, the headless CLI
+#                 accepted it, and the spend was metered with no cap and nothing
+#                 journalled. The job inherits its environment verbatim in any stage
+#                 runner that passes no `env=` overlay, so the plain name must simply
+#                 never be exported outside api_key mode.
+#   api_key       ANTHROPIC_API_KEY only; the OAuth token is dropped. The one mode in
+#                 which the plain name is exported, because metered spend IS the intent.
 #   auto          the OAuth token (if any) PLUS the API key renamed to
 #                 EARN_FALLBACK_ANTHROPIC_API_KEY, a name the CLI can never pick up
 #                 implicitly — only runs/llm/providers/claude_sdk.py reads it. The
@@ -52,7 +61,7 @@ ENV_FILE="${EARN_ENV_FILE:-$REPO_ROOT/.env}"
 allowlist() {
   case "$1" in
     # Model-facing jobs: a Claude credential only. Nothing else, ever.
-    research|review|daily_review|maintenance|signals|scanner|ingest)
+    research|review|daily_review|maintenance|signals|scanner|ingest|discovery)
                     echo "CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY" ;;
     # Alerting + bot control. healthcheck also drains the alert outbox, so it is the one
     # job that always has the Telegram token.
@@ -64,8 +73,15 @@ allowlist() {
     nav|nav_tick)   echo "FT_API_PASSWORD_A FT_API_PASSWORD_B FT_JWT_SECRET" ;;
     # Host-side only: ledger-vs-exchange reconciliation and the live preflight read the
     # exchange account. Never a model job.
+    #
+    # BINANCE_DEMO_KEY/SECRET are the DEMO venue's credentials (demo-api.binance.com) and
+    # are deliberately separate names from the live BINANCE_KEY_A/B — a demo key is never
+    # filed under a live name, so neither can be promoted to the other by a one-word .env
+    # edit. Both venues' names appear here because these two jobs are the ones that probe
+    # whichever venue the sleeve's mode binds them to; which one they may actually USE is
+    # decided per sleeve by ops.lib.exchange_endpoints.resolve_binding, not by this list.
     reconcile|preflight)
-                    echo "FT_API_PASSWORD_A FT_API_PASSWORD_B FT_JWT_SECRET BINANCE_KEY_A BINANCE_SECRET_A BINANCE_KEY_B BINANCE_SECRET_B" ;;
+                    echo "FT_API_PASSWORD_A FT_API_PASSWORD_B FT_JWT_SECRET BINANCE_KEY_A BINANCE_SECRET_A BINANCE_KEY_B BINANCE_SECRET_B BINANCE_DEMO_KEY BINANCE_DEMO_SECRET" ;;
     backup)         echo "BACKUP_RCLONE_REMOTE" ;;
     # The console is NOT run through envwrap (it needs its own secrets and refuses to
     # start under EARN_AUTOMATED_RUN=1); the entry exists so tooling can ask, and get
@@ -135,28 +151,27 @@ case "$AUTH_MODE_RAW" in
   *)                         AUTH_MODE="subscription" ;;
 esac
 
-HAVE_OAUTH=0; [ -n "${VALUES[CLAUDE_CODE_OAUTH_TOKEN]:-}" ] && HAVE_OAUTH=1
 HAVE_KEY=0;   [ -n "${VALUES[ANTHROPIC_API_KEY]:-}" ]       && HAVE_KEY=1
 
+# ALWAYS rename, token or no token, in every mode but api_key. The only thing that makes
+# metered spend deliberate is that the CLI cannot see the key on its own: the child CLI
+# inherits this environment verbatim whenever a caller passes no `env=` overlay (every
+# research/review/daily stage does), so the plain name reaching a job IS the spend. The
+# credential is not lost — ops.lib.claude_auth.api_key_from() reads the fallback name
+# first, and env_for('claude:api_key') materialises it under the real name for an
+# explicit, journalled, capped api_key attempt.
+rename_key() {
+  if [ "$HAVE_KEY" = "1" ]; then
+    VALUES[EARN_FALLBACK_ANTHROPIC_API_KEY]="${VALUES[ANTHROPIC_API_KEY]}"
+    unset 'VALUES[ANTHROPIC_API_KEY]'
+  fi
+}
+
 case "$AUTH_MODE" in
-  subscription)
-    # Subscription-first: drop the API key only when the token can actually serve.
-    [ "$HAVE_OAUTH" = "1" ] && unset 'VALUES[ANTHROPIC_API_KEY]'
-    ;;
+  subscription) rename_key ;;
+  auto)         rename_key ;;
   api_key)
     [ "$HAVE_KEY" = "1" ] && unset 'VALUES[CLAUDE_CODE_OAUTH_TOKEN]'
-    ;;
-  auto)
-    # ALWAYS rename, token or no token. `auto` means "metered spend is a deliberate
-    # fallback", and the only thing that makes it deliberate is that the CLI cannot see
-    # the key on its own. Handing a key-only host the plain name would turn every
-    # unattended run into a metered one with no chain control and no monthly cap — and
-    # the credential is not lost: ops.lib.claude_auth.api_key_from() reads the fallback
-    # name first, and env_for('claude:api_key') materialises it for an explicit attempt.
-    if [ "$HAVE_KEY" = "1" ]; then
-      VALUES[EARN_FALLBACK_ANTHROPIC_API_KEY]="${VALUES[ANTHROPIC_API_KEY]}"
-      unset 'VALUES[ANTHROPIC_API_KEY]'
-    fi
     ;;
 esac
 

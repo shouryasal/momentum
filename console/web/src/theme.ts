@@ -35,6 +35,10 @@ export const theme: MantineThemeOverride = createTheme({
 export const MODE_COLORS: Record<string, string> = {
   TEST: 'blue',
   ARMING: 'grape',
+  // Binance Spot Demo Mode: real orders, fake money. Its own family, so it reads as
+  // neither test (blue) nor live (yellow/red) at a glance.
+  DEMO_PROPOSE: 'violet',
+  DEMO_EXECUTE: 'pink',
   LIVE_PROPOSE: 'yellow',
   LIVE_EXECUTE: 'red',
   DISARMING: 'grape',

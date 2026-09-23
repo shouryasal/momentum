@@ -21,6 +21,7 @@ from pathlib import Path
 from evals import snapshot as snapshotlib
 from ops import db
 from ops.config import REPO_ROOT, EarnConfig, load_config
+from ops.lib import autopilot
 from ops.lib import kill as killlib
 from ops.lib import locks, paths, tg
 from runs import build_prompt, decision_core, router
@@ -225,6 +226,24 @@ class ResearchRun:
         """
         return float(self.cfg.research.stage_deadlines_s.get(stage, default))
 
+    def _universe_checks(self) -> dict:
+        """The wide-universe arguments ``validate_proposal`` takes beyond the asset list.
+
+        ``max_assets`` is ``risk.max_open_positions`` — a proposal naming more assets than
+        the gate will let the sleeve hold is rejected here rather than half-executed.
+        ``snapshot`` is the point-in-time universe THIS run resolved its tradeable set
+        from: the proposal must quote it back, so a decision stays replayable and a model
+        cannot answer against a universe it was not shown.
+        """
+        out: dict = {}
+        cap = getattr(self.cfg.risk, "max_open_positions", None)
+        if cap:
+            out["max_assets"] = int(cap)
+        ref = getattr(self.cfg.universe, "snapshot_ref", None)
+        if ref:
+            out["snapshot"] = ref
+        return out
+
     def _decide_once(self, choice, bp) -> tuple:
         res = self.stage_runner(
             bp.text, model=choice.model, max_turns=choice.max_turns,
@@ -237,7 +256,8 @@ class ResearchRun:
             return None, res
         try:
             prop = validate_proposal(res.text, self.cfg.universe.assets,
-                                     self.cfg.universe.quote)
+                                     self.cfg.universe.quote,
+                                     **self._universe_checks())
         except ProposalInvalid as e:
             res.meta.error = f"schema: {e}"
             return None, res
@@ -301,22 +321,35 @@ class ResearchRun:
         return True
 
     def proposal_destination(self) -> tuple[str, str]:
-        """``("", "n/a")`` normally; ``("pending/", "pending")`` in propose mode.
+        """``("", "n/a")`` normally; ``("", "pending")`` when a human must sign first.
 
-        In ``LIVE_PROPOSE`` a proposal is a REQUEST, not an instruction: it lands in
-        ``proposals/pending/`` and only an approval (HMAC-signed, verified inside the
-        container) moves it where the strategy reads it. Unverifiable mode state reads as
-        TEST, so this fails closed to the normal directory.
+        In ``LIVE_PROPOSE`` a proposal is a REQUEST, not an instruction: the strategy
+        refuses it (``SleeveB._approved``) until an HMAC-signed approval file exists, and
+        the console's approval queue and the overview's awaiting-approval tile both filter
+        ``proposals.approval_status='pending'``.
+
+        Two bugs lived here. The status came from ``mode_state.load()``, and this job runs
+        under ``ops/envwrap.sh research`` — no ``EARN_CONSOLE_SECRET`` — so ``verified``
+        was always False and every proposal was journalled ``n/a``: the container refused
+        each one for want of an approval while the queue the operator approves *from* was
+        permanently empty. Sleeve B would have done nothing for the whole 30-day propose
+        stage. The requirement now comes from :mod:`ops.lib.mode_view`, which reads the
+        same rendered ``require_approval`` the container enforces, and UNKNOWN requires
+        approval.
+
+        And the "correct" branch was broken too: it wrote to ``proposals/pending/``, which
+        ``strategies.proposal_loader.load_newest_valid`` does not recurse into and
+        ``runs.approvals.proposal_file_for`` never looks in — so an approved proposal could
+        never be found. The path stays flat; the *status* is what gates execution.
         """
         try:
-            from ops.lib import mode_state
+            from ops.lib import mode_view
 
-            state = mode_state.load()
-        except Exception:  # noqa: BLE001 — unreadable mode state means TEST
-            return "", "n/a"
-        if state.verified and any(state.sleeve(s).requires_approval
-                                  for s in ("a", "b")):
-            return "pending/", "pending"
+            view = mode_view.load(jdb=self.jdb, root=self.state_root)
+        except Exception:  # noqa: BLE001 — an unreadable view still needs a human
+            return "", "pending"
+        if any(view.sleeve(s).requires_approval for s in paths.SLEEVES):
+            return "", "pending"
         return "", "n/a"
 
     def _mark_signal_acted(self) -> None:
@@ -345,7 +378,8 @@ class ResearchRun:
         if res.ok:
             try:
                 prop = validate_proposal(res.text, self.cfg.universe.assets,
-                                         self.cfg.universe.quote)
+                                         self.cfg.universe.quote,
+                                         **self._universe_checks())
                 status, reason = "success", None
             except ProposalInvalid as e:
                 reason = str(e)
@@ -370,6 +404,15 @@ class ResearchRun:
 
         if killlib.is_engaged(self.cfg, self.state_root):
             self.journal("decide", "killed")
+            return 0
+        # "How much it does by itself" is a second, independent switch from "whose money".
+        # Below `proposing` this run must not spend a model call or write a plan: the
+        # operator has said the system may watch but not decide. This is the only place a
+        # decision can start — cron, a trigger spawn and the console's "Run now" all land
+        # here — so one check makes the level true for every path.
+        if not autopilot.may_decide(autopilot.load(
+                path=autopilot.autopilot_path({"EARN_STATE_ROOT": str(self.state_root)}))):
+            self.journal("decide", "paused")
             return 0
         target = self.root / self.cfg.paths.proposals_dir / proposal_filename(slot, self.now)
         if target.exists():

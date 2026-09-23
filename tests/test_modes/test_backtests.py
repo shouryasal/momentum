@@ -271,6 +271,51 @@ class TestQueue:
         finally:
             queue.stop(timeout=1.0)
 
+    def test_a_backtest_cancelled_while_queued_never_runs(self, cfg, jdb, state_root,
+                                                          request_a):
+        """Cancel writes the row; the ``_Item`` stays in the in-process queue.
+
+        ``backtest_job.execute`` sets ``running`` unconditionally before its first
+        per-window cancellation check, so the cancel was overwritten and could never fire:
+        the run went to completion — up to 1800 s of docker per window — and finished with
+        a ``finished_utc`` stamped *before* it started (``set_status`` COALESCEs it).
+        The worker must not start a row that already reached a terminal status.
+        """
+        ran: list[list[str]] = []
+        # The row is created directly so the worker thread never starts: `run_now` is
+        # exactly what the worker calls once it pops the item, which is the path at issue.
+        bt_id = bj.create(jdb, cfg, request_a, actor="human:cli", now=NOW)
+        queue = self._queue(cfg, state_root, ran)
+        assert queue.cancel(bt_id) is True
+        assert bj.get(jdb, bt_id)["status"] == bj.STATUS_CANCELLED   # still queued, cancelled
+        assert queue.run_now(backtest_service._Item(bt_id, request_a)) == {
+            "status": bj.STATUS_CANCELLED, "windows": []}
+        assert ran == [], "a cancelled backtest still spawned docker"
+        row = bj.get(jdb, bt_id)
+        assert row is not None and row["status"] == bj.STATUS_CANCELLED
+
+    def test_a_queued_backtest_that_was_not_cancelled_still_runs(self, cfg, jdb,
+                                                                 state_root, request_a):
+        """The terminal-status guard must not become "never run anything"."""
+        ran: list[list[str]] = []
+        bt_id = bj.create(jdb, cfg, request_a, actor="human:cli", now=NOW)
+        out = self._queue(cfg, state_root, ran).run_now(
+            backtest_service._Item(bt_id, request_a))
+        assert out["status"] == bj.STATUS_OK and len(ran) == 1
+
+    @staticmethod
+    def _queue(cfg, state_root, ran: list[list[str]]):
+        from ops import db as opsdb
+
+        def runner(argv, cwd, timeout_s):
+            ran.append(list(argv))
+            return composelib.CommandResult(list(argv), 0)
+
+        return backtest_service.BacktestQueue(
+            cfg, journal_path=opsdb.journal_path(cfg), root=state_root,
+            runner=runner, now=lambda: NOW,
+        )
+
     def test_an_interrupted_queue_is_failed_at_start_up(self, cfg, jdb, request_a):
         bt_id = bj.create(jdb, cfg, request_a, actor="human:cli", now=NOW)
         bj.set_status(jdb, bt_id, bj.STATUS_RUNNING, now=NOW)

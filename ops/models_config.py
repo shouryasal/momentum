@@ -37,7 +37,21 @@ from ops.config import ConfigError, F
 from ops.lib.paths import REPO_ROOT
 
 DEFAULT_MODELS_CONFIG = REPO_ROOT / "config" / "models.yaml"
-OVERLAY_PATH = REPO_ROOT / "config" / "models-auto.yaml"
+
+#: The tier-1 overlay's file name. It always sits beside the models config it overlays —
+#: a worktree's overlay must never be the live checkout's.
+OVERLAY_NAME = "models-auto.yaml"
+OVERLAY_PATH = REPO_ROOT / "config" / OVERLAY_NAME
+
+
+class _Sibling:
+    """Sentinel: "the overlay beside whichever models.yaml you gave me"."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<overlay sibling {OVERLAY_NAME}>"
+
+
+SIBLING = _Sibling()
 
 MODELS_VERSION = 2
 
@@ -120,9 +134,66 @@ class Capability(_Model):
                             group="capabilities")
 
 
+class PanelPassCfg(_Model):
+    """One pass of a consensus panel: which model, at which effort, in which role."""
+
+    model: str = F(..., desc="Model alias this pass runs on.", group="tasks",
+                   widget="model-ref")
+    effort: str = F(..., desc="Reasoning effort for this pass; the code floor still clamps.",
+                    group="tasks")
+    label: str = F("", desc="Short name for this pass in the journal and on the console.",
+                   group="tasks")
+    role: Literal["vote", "adjudicator"] = F(
+        "vote",
+        desc="'vote' passes are counted; the single 'adjudicator' runs only when they "
+             "disagree and its verdict decides.",
+        group="tasks",
+    )
+
+
+class PanelCfg(_Model):
+    """Multi-pass consensus for one task. Agreement acts; disagreement escalates."""
+
+    enabled: bool = F(False, desc="Run this task as a panel instead of a single call.",
+                      group="tasks")
+    passes: list[PanelPassCfg] = F(default_factory=list,
+                                   desc="Independent passes, run in order.", group="tasks")
+    quorum: int = F(2, desc="Valid passes required before any verdict may be acted on.",
+                    group="tasks", ge=1)
+    min_confidence: float = F(
+        0.6,
+        desc="Unanimous passes below this confidence escalate to the adjudicator instead "
+             "of acting.",
+        group="tasks", unit="fraction", ge=0, le=1,
+    )
+    verdict_key: str = F("verdict", desc="JSON key each pass returns its verdict under.",
+                         group="tasks")
+    confidence_key: str = F("confidence",
+                            desc="JSON key each pass returns its 0-1 confidence under.",
+                            group="tasks")
+    verdicts: list[str] = F(default_factory=list,
+                            desc="Allowed verdict values; anything else is an invalid pass.",
+                            group="tasks")
+
+
 class TaskCfg(_Model):
     chain: list[str] = F(..., desc="Ordered model aliases; the first that can serve, does.",
                          group="tasks", widget="model-ref")
+    why: str | None = F(
+        None,
+        desc="One line saying why this task sits at this model and this effort. Shown on "
+             "the console's AI & Models page beside the row it explains.",
+        group="tasks",
+    )
+    escalation_effort: str | None = F(
+        None,
+        desc="On escalation, re-run the CHAIN HEAD at this effort before moving to the "
+             "escalation MODEL. Effort is the cheaper lever, so it is pulled first.",
+        group="tasks",
+    )
+    panel: PanelCfg | None = F(
+        None, desc="Multi-pass consensus configuration for this task.", group="tasks",
+    )
     escalation: str | None = F(None, desc="Model prepended on a hard case or forced escalation.",
                                group="tasks", widget="model-ref")
     tools: ToolsProfile = F("none", desc="Tool profile this task runs with.", group="tasks")
@@ -257,6 +328,11 @@ class ModelsConfig(_Model):
 
     def tier_of(self, alias: str) -> int:
         return self.model_ref(alias).tier
+
+    def panel_for(self, name: str) -> PanelCfg | None:
+        """The enabled panel for a task, or ``None`` when it runs as a single call."""
+        panel = self.task(name).panel
+        return panel if (panel is not None and panel.enabled and panel.passes) else None
 
     def caps_for(self, alias: str) -> Capability:
         if alias in self.capabilities:
@@ -424,6 +500,48 @@ def apply_overlay(base: ModelsConfig, overlay: dict[str, Any] | None) -> ModelsC
 # --------------------------------------------------------------------------- validation
 
 
+def _validate_panel(cfg: ModelsConfig, name: str, task: TaskCfg) -> None:
+    """A panel must name declared models, clear the task's own tier floor on every pass,
+    and be able to reach its quorum.
+
+    The tier check is repeated here so a misconfiguration is a load error rather than a
+    run-time skip. ``runs.llm.types.chain_for`` is still the thing that *enforces* it on
+    every pass — this only makes the failure visible before a panel is ever run.
+    """
+    from runs.llm.types import ALWAYS_LOCAL_FORBIDDEN, MIN_TIER_FLOOR
+
+    panel = task.panel
+    if panel is None or not panel.enabled:
+        return
+    floor = max(task.min_tier, MIN_TIER_FLOOR.get(name, 1))
+    local_ok = task.allow_local and name not in ALWAYS_LOCAL_FORBIDDEN
+    votes = 0
+    adjudicators = 0
+    for p in panel.passes:
+        entry = cfg.models.get(p.model)
+        if entry is None:
+            raise ConfigError(f"tasks.{name}.panel: model alias {p.model!r} is not declared")
+        if entry.tier < floor:
+            raise ConfigError(
+                f"tasks.{name}.panel: pass on {p.model!r} is tier {entry.tier}, below the "
+                f"tier {floor} floor for this task"
+            )
+        if not local_ok and cfg.providers.get(entry.provider, None) is not None \
+                and cfg.providers[entry.provider].kind == "ollama":
+            raise ConfigError(
+                f"tasks.{name}.panel: {p.model!r} is local and {name!r} may not be served "
+                "by a local model"
+            )
+        votes += p.role == "vote"
+        adjudicators += p.role == "adjudicator"
+    if adjudicators > 1:
+        raise ConfigError(f"tasks.{name}.panel: at most one adjudicator pass")
+    if votes < panel.quorum:
+        raise ConfigError(
+            f"tasks.{name}.panel: {votes} voting pass(es) cannot reach quorum {panel.quorum}"
+        )
+
+
 def _cross_validate(cfg: ModelsConfig) -> None:
     for alias, entry in cfg.models.items():
         if entry is None:
@@ -441,6 +559,7 @@ def _cross_validate(cfg: ModelsConfig) -> None:
             raise ConfigError(
                 f"tasks.{name}: no chain entry reaches min_tier {task.min_tier} (best {best})"
             )
+        _validate_panel(cfg, name, task)
     for alias in cfg.capabilities:
         if alias not in cfg.models:
             raise ConfigError(f"capabilities.{alias} is not a declared model alias")
@@ -449,10 +568,22 @@ def _cross_validate(cfg: ModelsConfig) -> None:
 
 
 def load_models_cfg(
-    path: Path | str | None = None, *, overlay: Path | str | None = OVERLAY_PATH
+    path: Path | str | None = None, *, overlay: Path | str | None | _Sibling = SIBLING
 ) -> ModelsConfig:
-    """Load config/models.yaml (v1 or v2) and merge the tier-1 overlay if present."""
+    """Load config/models.yaml (v1 or v2) and merge the tier-1 overlay if present.
+
+    ``overlay`` defaults to :data:`OVERLAY_NAME` **beside the given path**, not to the
+    live checkout's copy. The old default was the absolute ``OVERLAY_PATH``, so loading a
+    worktree's ``config/models.yaml`` through this strict loader silently merged the LIVE
+    checkout's overlay — precisely the code path that is supposed to prove a proposed
+    model change is safe before a human applies it. ``runs.router.load_models_cfg``
+    already resolved the sibling correctly; the two now agree.
+
+    Pass an explicit path to override, or ``None`` for "no overlay at all".
+    """
     p = Path(path) if path else DEFAULT_MODELS_CONFIG
+    if isinstance(overlay, _Sibling):
+        overlay = p.parent / OVERLAY_NAME
     try:
         raw = yaml.safe_load(p.read_text())
     except FileNotFoundError as e:
@@ -487,10 +618,14 @@ def models_schema() -> dict[str, Any]:
 __all__ = [
     "DEFAULT_MODELS_CONFIG",
     "MODELS_VERSION",
+    "OVERLAY_NAME",
     "OVERLAY_PATH",
+    "SIBLING",
     "Capability",
     "ModelEntry",
     "ModelsConfig",
+    "PanelCfg",
+    "PanelPassCfg",
     "TaskCfg",
     "apply_overlay",
     "load_models_cfg",

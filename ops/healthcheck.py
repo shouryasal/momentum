@@ -1,8 +1,14 @@
 """5-minute watchdog: container heartbeats (+restart with an hourly cap), data
-staleness flag, missed-run rerun-once, gate-breach and proposal-failure alerts, TCA
-threshold alert, mode/bless consistency, alert-outbox drain, KILL processing, and the
-21:00 daily digest (silence is an alert — the optional healthchecks.io dead-man ping
-makes that silence machine-detected).
+staleness flag, missed-run rerun-once, **autonomy liveness**, gate-breach and
+proposal-failure alerts, TCA threshold alert, mode/bless consistency, alert-outbox drain,
+KILL processing, and the 21:00 daily digest (silence is an alert — the optional
+healthchecks.io dead-man ping makes that silence machine-detected).
+
+The autonomy check (:meth:`Healthcheck.check_autonomy`) is the one that would have caught
+this host's real state: bots notionally switched on, ``ops/crontab`` rendered but never
+installed, so nothing ever fired by itself and no page said so. It is a critical, and the
+missed-run check now asks the same gate first — a job the operator has deliberately
+switched off is not a missed run.
 
 Three bugs this file used to have, all fixed here:
 
@@ -29,8 +35,9 @@ from __future__ import annotations
 import fcntl
 import subprocess
 import sys
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from croniter import croniter
@@ -43,6 +50,12 @@ from ops.lib import kill as killlib
 from ops.lib import locks, paths, tg
 from ops.lib.freqtrade_api import BotApi
 
+#: Fallback display timezone. The *configured* one is ``cfg.meta.display_timezone``, which
+#: is also what ``ops.gen_ops_files`` writes as ``CRON_TZ`` into the rendered crontab — and
+#: cron evaluates every expression in it. This watchdog derives fire times from those same
+#: expressions, so reading a different zone here made it look for artifacts in the wrong
+#: hour (and, at a day boundary, the wrong day) for any operator not in the Gulf.
+#: :func:`display_tz` resolves the configured zone and falls back to this.
 GULF = timezone(timedelta(hours=4))
 
 # job -> (envwrap job name, module) for the rerun path. The lock name comes from
@@ -51,7 +64,9 @@ RERUN_CMDS = {
     "ingest": ("ingest", "runs.ingest"),
     "scanner": ("scanner", "runs.signals"),
     "nav_tick": ("nav_tick", "runs.nav_tick"),
-    "reconcile": ("reconcile", "runs.reconcile"),
+    # `runs.reconcile` does not exist — the module is `runs.reconcile_job`, which is what
+    # ops/crontab runs. A rerun used to die with ModuleNotFoundError into logs/.
+    "reconcile": ("reconcile", "runs.reconcile_job"),
     "tca_job": ("tca", "runs.tca_job"),
     "nav_job": ("nav", "runs.nav_job"),
     "research_run": ("research", "runs.research_run"),
@@ -67,6 +82,21 @@ STILL_MISSING_GRACE_MIN = 10
 #: Strategy name that means "this bot cannot trade" — a live bot reporting it is a bug
 #: serious enough to kill (fix #1 in section 11).
 DEAD_STRATEGY = "Scaffold"
+
+
+def display_tz(cfg: EarnConfig) -> tzinfo:
+    """``cfg.meta.display_timezone`` — the one cron itself uses via ``CRON_TZ``.
+
+    An unknown or missing zone name falls back to :data:`GULF` rather than raising: a
+    watchdog that cannot parse a timezone must still run every other check.
+    """
+    name = getattr(getattr(cfg, "meta", None), "display_timezone", None)
+    if not name:
+        return GULF
+    try:
+        return ZoneInfo(str(name))
+    except (ZoneInfoNotFoundError, ValueError):
+        return GULF
 
 
 def _iso(dt: datetime) -> str:
@@ -97,6 +127,9 @@ class Healthcheck:
         #: ``paths.state_root()``. Healthcheck both ENGAGES (mode mismatch) and READS the
         #: switch, so it has to agree with ``console/routers/kill.py`` on where it lives.
         self.state_root = Path(state_root) if state_root is not None else paths.state_root()
+        #: the zone cron itself runs in (``CRON_TZ``, rendered from the same config key).
+        #: Every fire time, artifact name and local window below is computed in it.
+        self.tz = display_tz(cfg)
         self.now = now or datetime.now(UTC)
         self.runner = runner or self._real_runner
         self.spawner = spawner or self._real_spawner
@@ -273,14 +306,14 @@ class Healthcheck:
                 (fire_utc.strftime("%Y-%m-%d"),)).fetchone()
             return row is not None
         if kind == "proposals_file":
-            gulf = fire_utc.astimezone(GULF)
+            gulf = fire_utc.astimezone(self.tz)
             name = f"{gulf.strftime('%Y-%m-%d')}-{gulf.strftime('%H%M')}.json"
             return (self.root / self.cfg.paths.proposals_dir / name).exists()
         if kind == "report_file":
-            week = fire_utc.astimezone(GULF).strftime("%G-W%V")
+            week = fire_utc.astimezone(self.tz).strftime("%G-W%V")
             return (self.root / "reports" / f"review-{week}.md").exists()
         if kind == "daily_report":
-            day = (fire_utc.astimezone(GULF) - timedelta(days=1)).strftime("%Y-%m-%d")
+            day = (fire_utc.astimezone(self.tz) - timedelta(days=1)).strftime("%Y-%m-%d")
             return (self.root / "reports" / "daily" / f"{day}.md").exists()
         if kind == "maintenance_row":
             row = self.jdb.execute(
@@ -305,8 +338,12 @@ class Healthcheck:
             return [self.cfg.ops.schedules[job].cron]
 
     def last_fire(self, job: str, before: datetime) -> datetime | None:
-        """Newest fire time of ``job`` at or before ``before`` (Gulf-time expressions)."""
-        base = before.astimezone(GULF)
+        """Newest fire time of ``job`` at or before ``before``.
+
+        The expressions are evaluated in :attr:`tz` because that is what ``CRON_TZ`` in
+        the rendered crontab makes cron do with them.
+        """
+        base = before.astimezone(self.tz)
         fires: list[datetime] = []
         for cron in self.crons_for(job):
             try:
@@ -362,7 +399,7 @@ class Healthcheck:
         elif job == "scanner":
             inner = [".venv/bin/python", "-m", module, "scan"]
         elif job == "research_run":
-            slot = fire_utc.astimezone(GULF).strftime("%H%M")
+            slot = fire_utc.astimezone(self.tz).strftime("%H%M")
             inner = [".venv/bin/python", "-m", module, slot]
         else:
             inner = [".venv/bin/python", "-m", module]
@@ -370,11 +407,31 @@ class Healthcheck:
                 "timeout", "-k", "30", str(sched.deadline_s),
                 "bash", "ops/envwrap.sh", wrap_job, "--", *inner]
 
+    def _permitted(self, job: str) -> bool:
+        """Is ``job`` allowed to run at the current autonomy level?
+
+        A job the autonomy gate is deliberately skipping has no missing artifact to alert
+        about — it has a *reason*, recorded in its heartbeat. Alerting on it, or reraning
+        it detached, would be the watchdog fighting the operator's own setting.
+
+        A failure to answer is treated as "permitted", so a broken gate can never silence
+        the missed-run alarm as well.
+        """
+        try:
+            from ops import autonomy
+
+            return autonomy.check(job, cfg=self.cfg, root=self.state_root,
+                                  now=self.now).allowed
+        except Exception:  # noqa: BLE001 - never let this module break the watchdog
+            return True
+
     def check_missed_runs(self) -> None:
         grace = timedelta(minutes=self.cfg.ops.missed_run_grace_min)
         floor = self.install_floor()
         for job, sched in self.cfg.ops.schedules.items():
             if sched.artifact == "none":
+                continue
+            if not self._permitted(job):
                 continue
             # "output missing `grace` after schedule": look at the newest fire time that is
             # already at least `grace` old, so fast-cadence jobs get their full window.
@@ -417,6 +474,33 @@ class Healthcheck:
                 flagslib.set_flag(self.flags_path, "missed_run", severity="info",
                                   reason=f"{job} {slot}", set_by="healthcheck",
                                   now=self.now, audit_conn=self.kdb)
+
+    # ------------------------------------------------------------- autonomy liveness
+
+    def check_autonomy(self) -> None:
+        """Shout when the system believes it is autonomous and nothing is scheduled.
+
+        This is the exact state this host was in before ``ops/autonomy.py`` existed: the
+        crontab was rendered but never installed, ``crontab -l`` was empty, and every run
+        so far had been typed by a human. Nothing said so. A trading system that thinks it
+        has a heartbeat and does not is worse than one that is honestly switched off, so
+        this is a *critical* — the same severity as a stale-data block — and it repeats
+        hourly until it is fixed.
+
+        It never engages the kill switch. There is nothing to stop: the problem is that
+        nothing is running.
+        """
+        from ops import autonomy
+
+        view = autonomy.liveness(self.cfg, root=self.state_root, now=self.now)
+        verdict = view["verdict"]
+        if verdict in ("alive", "off"):
+            return
+        severity = "critical" if verdict in ("not_scheduled", "never_ran") else "warn"
+        self.sender(f"AUTONOMY {verdict.upper()}: {view['headline']}", severity,
+                    key=f"autonomy_{verdict}", ttl=60)
+        if verdict in ("not_scheduled", "never_ran"):
+            self._incident("autonomy_not_running", view["headline"])
 
     # ------------------------------------------------------------- gate + proposals
 
@@ -479,45 +563,88 @@ class Healthcheck:
         killlib.stop_entries(api)
 
     def check_mode_consistency(self) -> None:
-        """A running bot must agree with the signed mode file — or the switch goes.
+        """A running bot must agree with the mode this job can *prove* — or the switch goes.
 
         Two ways this can be wrong and both are unrecoverable-by-alert: a bot reporting
-        ``dry_run: false`` while the mode file says TEST is placing *real* orders nobody
-        authorised, and a bot running ``Scaffold`` never trades at all, so the gate is
-        never exercised and every "all good" is meaningless. Either engages KILL.
-        """
-        from ops.lib import mode_state
+        ``dry_run: false`` while the sleeve is provably TEST is placing *real* orders
+        nobody authorised, and a bot running ``Scaffold`` while real money is on the line
+        leaves its book unmanaged behind a green dashboard. Either engages KILL.
 
-        state = mode_state.load()
+        **It used to kill a legitimately live sleeve every five minutes.** ``expect_live``
+        was ``state.verified and state.is_live(sleeve)`` off ``mode_state.load()``, and this
+        job runs under ``ops/envwrap.sh healthcheck``, whose allowlist has no
+        ``EARN_CONSOLE_SECRET`` — by design, per ``docs/contracts.md`` §1. So ``verified``
+        was *always* False, ``expect_live`` *always* False, and a genuinely armed sleeve
+        reporting ``dry_run=false`` landed in the KILL branch on every tick. The asymmetry
+        was visible two functions down: :meth:`check_config_bless` already returns early on
+        ``no_secret`` because "a job cannot verify".
+
+        The mode now comes from :mod:`ops.lib.mode_view`, which answers LIVE, TEST or
+        **UNKNOWN**. KILL requires a *proof*: either the sleeve is provably TEST while the
+        bot trades real money, or the bot is provably trading real money with a strategy
+        that cannot manage it. On UNKNOWN the mismatch is a critical alert and nothing
+        else — this job cannot show the sleeve was meant to be dry-run, and killing an
+        authorised live sleeve is itself the incident.
+
+        **And "provably TEST" now means corroborated.** The evidence behind it is
+        unsigned — the very ``var/runtime`` overlay the container was started from — so a
+        single stale or hand-edited file could make an authorised live sleeve look like an
+        unauthorised one and have its book flattened automatically. ``mode_view`` checks
+        that overlay's provenance (``generated_at`` against the newest completed
+        transition, ``config_sha`` against the config on disk) and exposes
+        :attr:`~ops.lib.mode_view.SleeveView.corroborated`; this destructive branch demands
+        it, and an uncorroborated TEST is an alert like UNKNOWN. ``docs/contracts.md``
+        §1.2 is the decision. The *other* KILL case — a live bot running ``Scaffold`` —
+        rests on the bot's own ``dry_run`` report rather than on any overlay, so it stands
+        alone.
+        """
+        from ops.lib import mode_view
+
+        view = mode_view.load(jdb=self.jdb, root=self.state_root)
         for sleeve, api in self.apis.items():
             if not api.ping():
                 continue
             shown = self._show_config(api)
             if shown is None:
                 continue
-            expect_live = state.verified and state.is_live(sleeve)
+            mv = view.sleeve(sleeve)
             actual_dry = shown.get("dry_run")
             strategy = shown.get("strategy")
             problems: list[str] = []
-            if actual_dry is False and not expect_live:
+            # Provably TEST + real orders: nobody authorised those. This is the KILL case,
+            # and it needs corroboration — one unsigned file may not flatten a book.
+            unauthorised_live = actual_dry is False and mv.is_test and mv.corroborated
+            if unauthorised_live:
                 problems.append(
-                    f"bot {sleeve} reports dry_run=false but mode state says "
-                    f"{state.state_of(sleeve)} ({state.reason})")
-            if actual_dry is True and expect_live:
+                    f"bot {sleeve} reports dry_run=false but the sleeve is TEST "
+                    f"(via {mv.source}, overlay {mv.overlay})")
+            elif actual_dry is False and mv.is_test:
                 problems.append(
-                    f"bot {sleeve} reports dry_run=true but mode state says "
-                    f"{state.state_of(sleeve)}")
+                    f"bot {sleeve} reports dry_run=false and the only evidence for TEST is "
+                    f"uncorroborated ({mv.source}, overlay {mv.overlay}; mode state "
+                    f"{mv.state_reason}) — alerting, NOT engaging KILL")
+            elif actual_dry is False and mv.unknown:
+                problems.append(
+                    f"bot {sleeve} reports dry_run=false and this job cannot prove the "
+                    f"sleeve's mode ({mv.reason}; mode state {mv.state_reason}) — "
+                    f"alerting, NOT engaging KILL")
+            if actual_dry is True and mv.is_live:
+                problems.append(
+                    f"bot {sleeve} reports dry_run=true but the sleeve is "
+                    f"{mv.state or 'LIVE'} (via {mv.source})")
             dead_live = False
             if strategy == DEAD_STRATEGY:
                 problems.append(f"bot {sleeve} is running {DEAD_STRATEGY} — it cannot trade")
                 # A *live* sleeve running a strategy that emits no signals is worse than
                 # useless: its open positions are unmanaged while the dashboard says the
                 # bot is healthy. In TEST it is only a wasted run, so it alerts instead.
-                dead_live = expect_live or actual_dry is False
+                # ``actual_dry is False`` is the bot's own report, not a mode claim, so it
+                # stands on its own even when liveness is UNKNOWN.
+                dead_live = mv.is_live or actual_dry is False
             if not problems:
                 continue
             detail = "; ".join(problems)
-            if dead_live or (actual_dry is False and not expect_live):
+            if dead_live or unauthorised_live:
                 killlib.engage(self.cfg, f"mode mismatch: {detail}", self.state_root)
                 try:
                     self._stop_entry(api)
@@ -623,7 +750,7 @@ class Healthcheck:
     # ------------------------------------------------------------- daily digest
 
     def daily_summary(self) -> None:
-        gulf = self.now.astimezone(GULF)
+        gulf = self.now.astimezone(self.tz)
         hh, mm = self.cfg.ops.summary_time_local.split(":")
         window_start = gulf.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
         in_window = window_start <= gulf < window_start + timedelta(minutes=10)
@@ -673,7 +800,8 @@ class Healthcheck:
 
     def run(self) -> int:
         for check in (self.check_containers, self.check_data_freshness,
-                      self.check_missed_runs, self.check_gate_and_proposals,
+                      self.check_missed_runs, self.check_autonomy,
+                      self.check_gate_and_proposals,
                       self.check_tca_threshold, self.check_mode_consistency,
                       self.check_config_bless, self.check_kill, self.daily_summary,
                       self.drain_alert_outbox, self.ping_deadman):

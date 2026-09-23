@@ -57,6 +57,11 @@ TOPICS: frozenset[str] = frozenset(
         "job",
         "reconcile",
         "backtest",
+        # Published in-process by console.services.claude_signin_service while a
+        # `claude setup-token` run is live: starting -> url_ready -> awaiting_code ->
+        # exchanging -> done/failed:<reason>. The payload is the session state, and never
+        # the token or the code the operator pastes back.
+        "claude_auth",
     }
 )
 LOG_TOPIC_PREFIX = "log:"

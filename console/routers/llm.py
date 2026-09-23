@@ -1,9 +1,12 @@
-"""``/api/llm`` — provider health, Ollama, the routing matrix, usage, switches, playground.
+"""``/api/llm`` — provider health, Ollama, the routing matrix, usage, switches, playground,
+the Claude sign-in flow and the read-only local-model line.
 
-Thin by design: every answer is assembled in :mod:`console.services.llm_service`, and the
-only jobs this module has are auth, the error envelope and the audit rows.
+Thin by design: every answer is assembled in :mod:`console.services.llm_service`,
+:mod:`console.services.claude_signin_service` or
+:mod:`console.services.local_model_service`, and the only jobs this module has are auth,
+the error envelope and the audit rows.
 
-Two routes do more than read:
+Four routes do more than read:
 
 ``POST /llm/providers/{key}/circuit/reset``
     closes a breaker by hand. Audited, because it is a deliberate override of a safety
@@ -13,6 +16,18 @@ Two routes do more than read:
     cap and **no artefacts** — it writes no proposal, no signal, no file. It exists so the
     owner can see what a prompt actually returns before changing the prompt that runs at
     08:30, and its calls land in ``llm_calls`` like any other so the cost is visible.
+``POST /llm/claude/signin`` / ``POST /llm/claude/signin/code`` / ``DELETE /llm/claude/signin``
+    start, feed and cancel ``claude setup-token`` under a pseudo-terminal. Starting is
+    step-up protected — it ends in a credential being written — and **no response body or
+    SSE frame on this path can carry the token**: :class:`SignInStatus` has no field for
+    one, and ``GET /llm/claude/signin`` reports ``present``/``last4`` like the rest of the
+    secret surface. ``/code`` exists because the CLI's ``redirect_uri`` is the
+    *platform.claude.com* callback page rather than a loopback port: the browser ends by
+    showing an authorization code that has to be typed back into the waiting CLI, and the
+    console is the thing holding that CLI's terminal.
+
+``GET /llm/local-model`` is deliberately read-only: detection, model choice and the pull
+are the backend's business, so there is nothing on it for an operator to type.
 """
 
 from __future__ import annotations
@@ -31,6 +46,7 @@ from console.deps import (
     http_error,
     journal_db,
     knowledge_db,
+    require_step_up,
 )
 from console.services import llm_service
 from ops.config import EarnConfig
@@ -40,6 +56,7 @@ router = APIRouter(prefix="/llm", tags=["llm"])
 
 #: ``Annotated`` dependency aliases: one definition each, and no call in a default.
 Actor = Annotated[HumanActor, Depends(current_actor)]
+SteppedUpActor = Annotated[HumanActor, Depends(require_step_up)]
 Cfg = Annotated[EarnConfig, Depends(cfg_dep)]
 
 
@@ -347,3 +364,204 @@ def playground(
         ],
         "max_usd_per_run": task_cfg.max_usd_per_run,
     }
+
+
+# --------------------------------------------------------------------------- claude sign-in
+
+
+class SignInStartRequest(_Dto):
+    replace: bool = Field(
+        False,
+        description="Confirm overwriting a credential that is already present.")
+
+
+class SignInCodeRequest(_Dto):
+    """The authorization code the browser showed after the link was approved.
+
+    Untyped on purpose (no ``min_length``/pattern): a pydantic 422 echoes the offending
+    input back in its envelope, and the one thing this body carries should not come back
+    out. The service validates it and refuses with a plain 400.
+    """
+
+    code: str = Field(..., description="Pasted from the platform.claude.com callback page.")
+
+
+class SignInSessionDto(_Dto):
+    """One attempt, as the modal renders it. There is no field a token could live in,
+    and none the pasted code could live in either."""
+
+    id: str
+    state: Literal["starting", "url_ready", "awaiting_code", "exchanging", "done",
+                   "failed", "cancelled"]
+    phase: str = Field(
+        "", description="The state, or `failed:<reason>` — one string per distinct phase.")
+    message: str = ""
+    url: str | None = Field(None, description="The claude.com link to open in Windows.")
+    reason: str | None = Field(None, description="One of claude_signin_service.REASONS.")
+    actor: str = ""
+    started_at: str
+    updated_at: str
+    finished_at: str | None = None
+    last4: str | None = Field(None, description="Of the stored credential, after success.")
+    deadline_at: str | None = None
+    exit_code: int | None = None
+    attempts: int = Field(0, description="Codes handed to the CLI so far.")
+    attempts_left: int = 0
+    terminal: bool = False
+
+
+class SignInCli(_Dto):
+    present: bool
+    path: str | None = None
+    version: str | None = None
+    pty: bool = Field(True, description="Whether this host can give the CLI a terminal.")
+
+
+class SignInCredential(_Dto):
+    """Presence only, exactly like ``/api/secrets`` — never a value."""
+
+    name: str
+    present: bool = False
+    last4: str | None = None
+    updated_at: str | None = None
+
+
+class SignInStatus(_Dto):
+    state: str
+    phase: str = Field(
+        "idle",
+        description="`starting`/`url_ready`/`awaiting_code`/`exchanging`/`done`/"
+                    "`failed:<reason>` — what the modal renders while it polls.")
+    session: SignInSessionDto | None = None
+    cli: SignInCli
+    credential: SignInCredential
+
+
+def _signin(request: Request, cfg: EarnConfig) -> Any:
+    from console.services import claude_signin_service
+
+    return claude_signin_service.manager(request.app, cfg=cfg)
+
+
+@router.get("/claude/signin", response_model=SignInStatus,
+            summary="Sign-in state, CLI presence and whether a credential is stored")
+def claude_signin_status(
+    request: Request,
+    _actor: Actor,
+    cfg: Cfg,
+) -> SignInStatus:
+    return SignInStatus(**_signin(request, cfg).status())
+
+
+@router.post("/claude/signin", response_model=SignInStatus,
+             summary="Run `claude setup-token` under a pty (step-up)")
+def claude_signin_start(
+    request: Request,
+    body: SignInStartRequest,
+    actor: SteppedUpActor,
+    cfg: Cfg,
+) -> SignInStatus:
+    """Starts the flow and returns immediately; progress arrives on the ``claude_auth`` topic.
+
+    Step-up because it ends in a credential being written, which is the same bar as
+    ``PUT /api/secrets/{name}``.
+    """
+    from console.services import claude_signin_service
+
+    manager = _signin(request, cfg)
+    try:
+        manager.start(actor=actor.actor, replace=body.replace)
+    except claude_signin_service.SignInError as e:
+        raise http_error(409 if e.reason == "conflict" else 400, e.reason, str(e)) from e
+    return SignInStatus(**manager.status())
+
+
+@router.post("/claude/signin/code", response_model=SignInStatus,
+             summary="Give the waiting CLI the code from the browser")
+def claude_signin_code(
+    request: Request,
+    body: SignInCodeRequest,
+    actor: Actor,
+    cfg: Cfg,
+) -> SignInStatus:
+    """Writes the pasted code to the CLI's terminal and moves the flow on.
+
+    Not step-up protected, unlike starting: the step-up that started this run is what
+    authorises the write, and asking for the console token again — while the operator is
+    in another window copying a code — is how a flow times out three feet from the end. A
+    code is worthless without the session it belongs to, and only one session exists.
+
+    The code is never echoed back: the response is the same :class:`SignInStatus` every
+    other route on this path returns.
+    """
+    from console.services import claude_signin_service
+
+    manager = _signin(request, cfg)
+    try:
+        manager.submit_code(body.code, actor=actor.actor)
+    except claude_signin_service.SignInError as e:
+        status = {"conflict": 409, "not_found": 404}.get(e.reason, 400)
+        raise http_error(status, e.reason, str(e)) from e
+    return SignInStatus(**manager.status())
+
+
+@router.delete("/claude/signin", response_model=SignInStatus,
+               summary="Cancel a running sign-in and clean up the pty")
+def claude_signin_cancel(
+    request: Request,
+    actor: Actor,
+    cfg: Cfg,
+) -> SignInStatus:
+    from console.services import claude_signin_service
+
+    manager = _signin(request, cfg)
+    try:
+        manager.cancel(actor=actor.actor)
+    except claude_signin_service.SignInError as e:
+        raise http_error(404 if e.reason == "not_found" else 400, e.reason, str(e)) from e
+    return SignInStatus(**manager.status())
+
+
+# --------------------------------------------------------------------------- local model
+
+
+class LocalModelPull(_Dto):
+    job_id: str
+    progress: float = 0.0
+    message: str | None = None
+
+
+class LocalModelStatusDto(_Dto):
+    """One sentence and the facts behind it. Read-only: nothing here is a form field."""
+
+    state: Literal["connected", "pulling", "missing", "unreachable", "disabled", "unknown"]
+    line: str
+    model: str | None = None
+    base_url: str | None = None
+    version: str | None = None
+    tok_per_s: float | None = None
+    reason: str | None = None
+    fix_command: str | None = Field(
+        None, description="The one command that makes it reachable, when it is not.")
+    fix_shell: str | None = None
+    pull: LocalModelPull | None = None
+    tried: list[str] = Field(default_factory=list)
+    configurable: bool = Field(
+        False, description="Always false: local models are a backend concern.")
+
+
+@router.get("/local-model", response_model=LocalModelStatusDto,
+            summary="Auto-detected local model status — one line, nothing to configure")
+def local_model(
+    request: Request,
+    actor: Actor,
+    cfg: Cfg,
+) -> LocalModelStatusDto:
+    from console.services import local_model_service
+
+    _journal, knowledge = _paths(cfg)
+    payload = local_model_service.status(
+        _models_cfg(), knowledge=knowledge, client=_http_client(request),
+        jobs=getattr(request.app.state, "jobs", None), actor=actor.actor,
+    )
+    return LocalModelStatusDto(**payload)

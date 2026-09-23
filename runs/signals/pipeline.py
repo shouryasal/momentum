@@ -66,6 +66,10 @@ class ScanReport:
     planned: list[str] = field(default_factory=list)
     expired: list[str] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
+    #: ``{detector: n_dropped}`` from the per-detector cap, and how wide this cycle looked.
+    capped: dict[str, int] = field(default_factory=dict)
+    watchlist: int = 0
+    rich: int = 0
 
 
 @dataclass
@@ -159,7 +163,12 @@ def scan(cfg: EarnConfig, jdb: sqlite3.Connection, kdb: sqlite3.Connection, *,
          root: Path | None = None, now: datetime | None = None,
          models_cfg: Any | None = None, spawn=None, runner=None,
          screen_fn=None, plan_fast_path: bool = True) -> ScanReport:
-    """One scanner cycle. Never raises: every failure is a field on the report."""
+    """One scanner cycle. Every *operational* failure is a field on the report.
+
+    Detector errors, a screener that is down, a model that answered badly: all of those
+    land in ``report.errors`` / ``screen_ok`` and the cycle finishes. A programming error
+    at the LLM seam is not one of those and is left to propagate — see ``screener.screen``.
+    """
     root = root or REPO_ROOT
     now = now or datetime.now(UTC)
     spawn = spawn or (lambda cmd: _detached(cmd, root))
@@ -171,6 +180,9 @@ def scan(cfg: EarnConfig, jdb: sqlite3.Connection, kdb: sqlite3.Connection, *,
     candidates = detectorslib.run_all(ctx)
     report.candidates = len(candidates)
     report.errors.update(ctx.errors)
+    report.capped = dict(ctx.capped)
+    report.watchlist = len(features.pairs)
+    report.rich = len(features.rich)
 
     taken = {r["signal_id"] for r in jdb.execute(
         "SELECT signal_id FROM signals WHERE ts_utc >= ?",
@@ -194,12 +206,20 @@ def scan(cfg: EarnConfig, jdb: sqlite3.Connection, kdb: sqlite3.Connection, *,
             report.fast_path.append(sid)
     jdb.commit()
 
+    # Under a wide watchlist ``max_candidates_per_cycle`` is a TOKEN budget, so the order
+    # it is spent in matters: highest priority first (fast path, then core, then tradeable,
+    # then strength) rather than whichever detector happens to be registered first. The
+    # sort is stable, so detector order still breaks ties.
     to_screen = [sid for sid in report.new if sid not in report.fast_path]
+    to_screen.sort(key=lambda sid: ctx.priority(rows[sid]))
     to_screen = to_screen[:scfg.max_candidates_per_cycle]
     if to_screen:
         payload = [_candidate_payload(sid, rows[sid]) for sid in to_screen]
         screen_call = screen_fn or screenerlib.screen
-        kwargs: dict[str, Any] = {"models_cfg": models_cfg, "root": root}
+        # jdb/kdb are the router's journal and breaker store, not decoration: the scan
+        # task's llm_calls rows, provider_switches rows and monthly budget all need them.
+        kwargs: dict[str, Any] = {"models_cfg": models_cfg, "root": root, "jdb": jdb,
+                                  "kdb": kdb, "scan_id": report.scan_id}
         if runner is not None:
             kwargs["runner"] = runner
         outcome = screen_call(cfg, payload, features, **kwargs)

@@ -121,3 +121,14 @@ export function useSession(): SessionState {
   if (!context) throw new Error('useSession must be used inside <SessionProvider>');
   return context;
 }
+
+/**
+ * The session when there is one, `null` otherwise.
+ *
+ * Shared components (`ConfirmDialog`) need the step-up window and the step-up call, but
+ * they are also rendered standalone in unit tests and in storybook-style harnesses. This
+ * is the only way to read the session without making every such caller wrap a provider.
+ */
+export function useOptionalSession(): SessionState | null {
+  return useContext(SessionContext);
+}

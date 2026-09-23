@@ -3,6 +3,8 @@
 # files + retention (14 daily, 8 weekly), optional mirror and rclone cloud copy.
 # Alert on failure comes from healthcheck's missed-run probe (logs/backup.stamp); an
 # unusable destination raises one backup_dest incident instead of a nightly cascade.
+# Data resolves against $EARN_STATE_ROOT (ops.lib.paths.state_root()), committed source
+# and ft_userdata/ against this checkout — see ops/backup.py. Restore: ops/restore.sh.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"

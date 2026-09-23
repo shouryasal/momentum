@@ -193,12 +193,62 @@ def autonomy_matrix(cfg: EarnConfig, *, root: Path | None = None) -> dict[str, A
         "kinds": kinds,
         "mode": mode,
         "effective": effective,
-        "invariants": [
-            "a skill_new touching scripts/** is always held for a human",
-            "a model promotion is always held for a human",
-            "the weekly auto-merge cap is a ceiling, not a target",
-        ],
+        "invariants": autonomy_invariants(cfg),
     }
+
+
+#: Change kinds ``apply_changes.check`` holds on a ``scripts/**`` file whatever the matrix
+#: says. Read from the module so a new kind joining that branch cannot leave this text stale.
+SCRIPTS_HOLD_KEYS = ("skill_new", "skill_edit")
+
+
+def autonomy_invariants(cfg: EarnConfig) -> list[str]:
+    """The holds that outrank the autonomy matrix, derived from the rules that apply them.
+
+    This list used to be three hand-written sentences, and the first of them —
+    "a ``skill_new`` touching ``scripts/**`` is always held" — had been true of one change
+    kind since ``apply_changes.check`` grew the ``skill_edit`` branch and the
+    ``skills.policy`` reader. An operator reading the page therefore believed *less* was
+    enforced than is: exactly the direction a safety list must never drift in. Every line
+    below is now computed from ``runs.apply_changes`` and ``cfg.skills.policy``, so a rule
+    that changes takes its sentence with it.
+    """
+    lines = [
+        f"a {' or '.join(SCRIPTS_HOLD_KEYS)} commit touching scripts/** is always held for"
+        " a human — the skill folder's tier is not consulted, the commit's file list is",
+    ]
+    for name, parts in sorted(_human_only_policy(cfg).items()):
+        lines.append(
+            f"skills.policy marks {', '.join(parts)} of {name} human-only:"
+            " a change touching one is always held"
+        )
+    lines.append("a model promotion is always held for a human")
+    if cfg.autonomy.live_forces_human:
+        lines.append(
+            "autonomy.live_forces_human is on: while any sleeve is live every kind but"
+            " revert reads the 'live' column, and 'auto' there still means approve"
+        )
+    lines.append(
+        f"the weekly auto-merge cap ({int(cfg.autonomy.max_auto_merges_per_week)}) is a"
+        " ceiling, not a target"
+    )
+    return lines
+
+
+def _human_only_policy(cfg: EarnConfig) -> dict[str, list[str]]:
+    """``{skill or 'every skill (default)' -> parts marked human}`` from ``skills.policy``.
+
+    ``apply_changes.human_only_parts`` reads the same table with the same fallback, so what
+    the page promises and what the gate enforces cannot disagree.
+    """
+    table = (getattr(getattr(cfg, "skills", None), "policy", None) or {})
+    out: dict[str, list[str]] = {}
+    for name, entry in table.items():
+        parts = [p for p in apply_changes.SKILL_PARTS
+                 if str(getattr(entry, p, "gated")) == "human"]
+        if parts:
+            out["every skill (default)" if name == "default" else name] = parts
+    return out
 
 
 def autonomy_patch(body: Mapping[str, Any]) -> list[dict[str, Any]]:

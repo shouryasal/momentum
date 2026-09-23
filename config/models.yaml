@@ -3,22 +3,66 @@
 # The tier-1 overlay config/models-auto.yaml (written by auto-shadow / auto-promotion)
 # merges on top; it may change only `tasks.<t>.chain[0]` and the `shadow:` block, and is
 # rejected at load if it touches anything else. Escalation is explicit and journaled —
-# never a silent downgrade or upgrade. The reasoning-effort floor is "high" (clamped in
-# code); decide/review run at "max".
+# never a silent downgrade or upgrade.
 #
 # Reading this file
 # -----------------
 # `chain:` is an ORDERED fallback, not a preference: the first entry that (a) clears the
-# task's min_tier, (b) has the capabilities the task needs and (c) is not behind an open
-# circuit breaker or an exhausted budget serves the call. Every move down a chain writes a
-# provider_switches row and shows up on the AI & Models page — there is no silent
-# substitution anywhere in this system.
+# task's min_tier, (b) has the capabilities the task needs, (c) can hold the prompt in its
+# context window and (d) is not behind an open circuit breaker or an exhausted budget
+# serves the call. Every move down a chain writes a provider_switches row and shows up on
+# the AI & Models page — there is no silent substitution anywhere in this system.
 #
-# Two floors are CODE, not config (runs/llm/types.py: MIN_TIER_FLOOR, chain_for):
-#   decide   needs tier >= 4 and may never be served by a local model — no proposal is
-#            ever written by an 8B model on this laptop;
-#   validate needs tier >= 3.
-# Lowering min_tier below those here, or through the overlay, changes nothing.
+# THE TIER MATRIX: one row per task, with a MODEL and an EFFORT
+# ------------------------------------------------------------
+# Effort is the cheaper lever and it is pulled first. Moving a task from Sonnet to Opus
+# multiplies the price of every token; moving it from `high` to `max` buys more thinking on
+# the same tokens at the same per-token price. So each row says where it sits and `why:`
+# says why, and `escalation_effort:` re-runs the SAME model harder before `escalation:`
+# reaches for a bigger one. The `why:` lines are config, not comments, because the console
+# shows them beside the row they explain and the weekly review tunes rows within bounds.
+#
+#   task            model            effort   escalates to
+#   extract         haiku            low      — (host re-checks every field)
+#   classify        haiku            low      haiku @ medium
+#   holdings_watch  local_small      low      haiku @ medium (raises a flag, never acts)
+#   scan            local_small      low      haiku @ medium
+#   flags           haiku            low      haiku @ medium
+#   brief           sonnet           medium   sonnet @ high
+#   validate        sonnet           high     sonnet @ max, then opus
+#   discover        sonnet           high     sonnet @ max, then opus
+#   decide          opus             max      fable @ max (panel)
+#   adjudicate      fable            max      —
+#   review          fable            max      —
+#   daily_review    fable            max      —
+#
+# Three floors are CODE, not config:
+#   min_tier  (runs/llm/types.py: MIN_TIER_FLOOR, chain_for)
+#             decide needs tier >= 4 and may never be served by a local model — no
+#             proposal is ever written by an 8B model on this laptop; validate needs
+#             tier >= 3. Lowering min_tier here, or through the overlay, changes nothing,
+#             and it binds every panel pass exactly as it binds a chain entry.
+#   effort    (runs/router.py: effort_floor_for, AUTHORING_TASKS, INPUT_TASKS)
+#             `high` for anything that AUTHORS — decide, validate, discover, review,
+#             daily_review, adjudicate, approve_change. `low` for the tasks whose output is
+#             re-checked by deterministic host code (a JSON schema, the cited-feature
+#             verification in runs/signals, the two-source corroboration rule,
+#             `on_all_failed: rule`) before anything acts on it. A task in NEITHER set
+#             gets the high floor, so adding a row here can never quietly buy a cheap one.
+#   context   a model is SKIPPED, never starved, when the prompt will not fit in its
+#             declared capabilities.<alias>.max_ctx. Silent truncation is how the local
+#             screener ran for weeks on a fifth of its input, inventing signal ids that
+#             host verification then discarded — with nothing anywhere saying so.
+#
+# `tools:` is a PROFILE NAME, resolved in code, not a tool list:
+#   none       no tools at all;
+#   read_only  Read, Glob, Grep;
+#   skill_rw   read-only plus Write, Skill and the explicit Bash rules in
+#              runs/decision_core.py: AUTOMATED_BASH_ALLOWLIST — named git subcommands and
+#              named tier-2 scripts only. It is NOT a bare `Bash` grant (it used to expand
+#              to one, which would have given the brief/review/daily_review sessions
+#              `python -c` over the live checkout), and it never includes pytest over a
+#              skill's model-writable tests/**.
 
 version: 2
 
@@ -50,10 +94,208 @@ models:                        # alias -> {provider, exact id, capability tier}
   local_small: { provider: ollama, id: "llama3.1:8b",             tier: 1 }
 
 capabilities:                  # claude defaults to all true; ollama to structured output
+  # max_ctx is ENFORCED now (runs/llm/chain.py): a prompt that will not fit skips this
+  # model with a journaled `skipped_capability` instead of being silently truncated by
+  # Ollama. It must therefore stay equal to providers.ollama.options.num_ctx — raise one
+  # and you must raise the other, or the router will either skip work the model could do
+  # or hand it work it cannot.
   local_small: { tools: false, skills: false, structured_output: true, max_ctx: 8192 }
 
 tasks:
+  # --- input side: cheap models, LOW effort, output always re-checked by host code -----
+
+  extract:
+    why: >-
+      Pulling named fields out of a document of known shape. There is no judgement in it,
+      so effort buys nothing: the answer at max is the answer at low, four times dearer.
+      Every field is re-checked against the source text by host code before it is stored.
+    chain: [haiku, local_small]
+    tools: none
+    min_tier: 1
+    retry: 0
+    effort: low
+    escalation_effort: medium    # a malformed extraction is re-read harder, same model
+    max_turns: 1
+    max_usd_per_run: 0.10
+    monthly_budget_usd: 4
+    deadline_s: 120
+    on_all_failed: rule
+
+  classify:
+    why: >-
+      One label from a fixed set, on Haiku because the two local generators are not
+      schema-reliable — qwen3.5:4b answers 0-100 where the schema says 0-1, 0 of 3 valid.
+      Invalid labels are discarded and `on_all_failed: rule` falls back to the keyword
+      rules, so a wrong answer costs nothing but the call.
+    chain: [haiku, local_small]
+    escalation: haiku
+    tools: none
+    min_tier: 1
+    retry: 0
+    effort: low
+    escalation_effort: medium
+    max_turns: 1
+    max_usd_per_run: 0.20
+    monthly_budget_usd: 5
+    deadline_s: 120
+    on_all_failed: rule
+
+  holdings_watch:
+    why: >-
+      The live check over what we already hold. Python computes every number — price,
+      drawdown, weight drift, days held, distance to stop; the model is asked only the
+      fuzzy half: does anything here contradict the thesis we bought on. It can RAISE a
+      flag and nothing else. Acting on the flag is `decide`, at tier 4, which is why this
+      may sit on an 8B model at low effort and still be safe.
+    chain: [local_small, haiku]
+    escalation: haiku            # a raised flag is confirmed on the cloud model, not by
+    tools: none                  # asking the same local one again
+    min_tier: 1
+    retry: 0
+    effort: low
+    # No escalation_effort, for the same reason as `scan`: the chain head is local and has
+    # no effort dial. `escalation: haiku` is the whole escalation.
+    max_turns: 1
+    max_usd_per_run: 0.10
+    monthly_budget_usd: 4
+    deadline_s: 90
+    on_all_failed: skip_screen
+
+  scan:
+    why: >-
+      Screening detector output for plausibility. Local-first because it is high volume
+      and every cited feature key and signal id is verified against the pack afterwards —
+      an invented one is dropped. The gray-zone re-run goes to the CLOUD model: re-running
+      the identical chain entry makes the second opinion the first one.
+    chain: [local_small, haiku]
+    escalation: haiku
+    # NO escalation_effort: the chain head is a local model and Ollama has no
+    # reasoning-effort dial, so "the same model thinking harder" does not exist here.
+    # Re-running it would ask the identical question and call the identical answer a
+    # second opinion. The escalation is the cloud model, deliberately.
+    tools: none
+    min_tier: 1
+    retry: 0
+    effort: low
+    max_turns: 1
+    max_usd_per_run: 0.05
+    monthly_budget_usd: 3
+    deadline_s: 90
+    prompt: research.stage_prompts.scan
+    on_all_failed: skip_screen
+
+  flags:
+    why: >-
+      Reading the archive for conditions the risk gate already knows how to act on. The
+      gate re-derives every flag it enforces from `knowledge/flags.json`, so this is a
+      suggestion, not an instruction. Haiku at low effort; `keep_last` on failure.
+    chain: [haiku, local_small]
+    escalation: haiku
+    escalation_effort: medium
+    tools: read_only
+    min_tier: 1
+    local_mode: context_pack
+    skills_from: skills.bindings
+    retry: 1
+    effort: low
+    max_usd_per_run: 0.40
+    max_turns: 6
+    monthly_budget_usd: 4
+    deadline_s: 240
+    on_all_failed: keep_last
+
+  # --- synthesis: a middle model at a middle effort ------------------------------------
+
+  brief:
+    why: >-
+      Synthesis over an archive whose facts are already corroborated by the two-source
+      rule, read by a decision stage that re-reads the underlying numbers itself. Sonnet at
+      medium is the point of this matrix: it is a real step up from Haiku in what it can
+      hold together, without paying Opus prices for prose. Escalates by EFFORT first —
+      a thin brief is re-run on Sonnet at high before anything bigger is considered.
+    chain: [sonnet, haiku, local_small]
+    escalation_effort: high
+    tools: skill_rw
+    min_tier: 1
+    local_mode: context_pack   # a local model gets the pre-assembled inputs, not tools
+    short_on_fallback: true
+    retry: 1
+    effort: medium
+    max_usd_per_run: 1.00
+    max_turns: 10
+    monthly_budget_usd: 12
+    deadline_s: 360
+    on_all_failed: keep_last
+
+  # --- authoring: the effort floor is `high` here and no config lowers it --------------
+
+  validate:
+    why: >-
+      A signal that survived screening is worth a real look, but most of them resolve
+      cleanly and Opus on all of them is waste. Sonnet at high, then the SAME Sonnet at
+      max (escalation_effort) — the cheap lever first — and only then Opus. A panel of
+      three runs when the answer is consequential; see `panel:`.
+    chain: [sonnet, opus]
+    escalation: opus
+    escalation_effort: max
+    tools: read_only
+    min_tier: 3                # code floor too: no local model validates a signal
+    retry: 0
+    effort: high
+    max_usd_per_run: 1.50
+    max_turns: 12
+    monthly_budget_usd: 30
+    deadline_s: 600
+    on_all_failed: drop_signal
+    panel:
+      enabled: true
+      # Two votes and one adjudicator: cross-EFFORT on the same model, then cross-MODEL.
+      # If both Sonnet passes agree the signal is settled at Sonnet prices; they disagree
+      # about as often as the signal is genuinely ambiguous, which is when Opus is worth
+      # paying for. The disagreement rate per row is journaled so this can be measured
+      # rather than argued about.
+      passes:
+        - { model: sonnet, effort: high, label: sonnet_high, role: vote }
+        - { model: sonnet, effort: max,  label: sonnet_max,  role: vote }
+        - { model: opus,   effort: high, label: opus_adjudicator, role: adjudicator }
+      quorum: 2
+      min_confidence: 0.6
+      verdicts: [valid, invalid, abstain]
+
+  discover:
+    why: >-
+      The system doing its OWN research instead of being handed a build-time agent's
+      finished config: pick a question, pre-register a falsifier, measure it costed and
+      walk-forward, and publish the negative. It AUTHORS — a survivor becomes a
+      changes/*.json — so the code effort floor is `high` here and `discover` is deliberately
+      absent from router.INPUT_TASKS. min_tier 3 with allow_local false for the standing
+      reason: a local model may never author a proposal or a validation. Sonnet at high
+      first, the SAME Sonnet at max next (the cheap lever), and only then Opus — this is a
+      long tool-using session over the repo's own data, and the thing that makes it correct
+      is the discipline in the hypothesis-lab skill, not the size of the model. Every number
+      it reports is a CLAIM until evals/verify_change.py recomputes it.
+    chain: [sonnet, opus]
+    escalation: opus
+    escalation_effort: max
+    tools: skill_rw
+    min_tier: 3
+    allow_local: false
+    skills_from: skills.bindings
+    retry: 0
+    effort: high
+    max_usd_per_run: 6.00
+    max_turns: 60
+    monthly_budget_usd: 35
+    deadline_s: 3000
+    on_all_failed: abstain
+
   decide:
+    why: >-
+      The only task that moves money. Opus at max, always, and never a local model — the
+      code floor says tier >= 4 and ALWAYS_LOCAL_FORBIDDEN says not Ollama, whatever this
+      file says. A panel runs it three ways on the same code-computed inputs; unanimity
+      acts, disagreement goes to Fable rather than being averaged into a compromise weight
+      nobody argued for.
     chain: [opus]
     escalation: fable
     allow_local: false         # belt and braces: the code floor already forbids it
@@ -66,68 +308,51 @@ tasks:
     monthly_budget_usd: 60
     deadline_s: 900
     on_all_failed: hold_last
-  brief:
-    chain: [sonnet, haiku, local_small]
-    tools: skill_rw
-    min_tier: 1
-    local_mode: context_pack   # a local model gets the pre-assembled inputs, not tools
-    short_on_fallback: true
-    retry: 1
-    effort: high
-    max_usd_per_run: 1.00
-    max_turns: 10
-    monthly_budget_usd: 12
-    deadline_s: 360
-    on_all_failed: keep_last
-  flags:
-    chain: [haiku, local_small]
+    panel:
+      enabled: true
+      # The same principle as the rest of the matrix, applied to the panel itself: the
+      # cross-EFFORT axis is the cheap one, so it is the one that always runs. Opus at max
+      # is the primary; Opus at high is the control. When they agree, the extra thinking
+      # changed nothing — and that is information, not a wasted call. Only when they differ
+      # is a different MODEL worth paying for, and then it is the best one in the matrix.
+      #
+      # Note what could NOT go here: Sonnet. `min_tier: 4` binds every pass exactly as it
+      # binds a chain entry (ops/models_config.py: _validate_panel refuses the file at
+      # load, runs/llm/types.py: chain_for refuses the pass at run time), so there is no
+      # cross-model vote available below tier 4 and a panel is not a way round the floor.
+      # A third vote on fable@high is the natural next step, once the journaled
+      # disagreement rate says whether two passes are already enough.
+      passes:
+        - { model: opus,  effort: max,  label: opus_max,          role: vote }
+        - { model: opus,  effort: high, label: opus_high,         role: vote }
+        - { model: fable, effort: max,  label: fable_adjudicator, role: adjudicator }
+      quorum: 2
+      min_confidence: 0.6
+      # The verdict is the SHAPE of the action, not the numbers: target weights stay in
+      # the proposal body and the risk gate still validates them. Agreeing on "rotate" is
+      # what a panel can meaningfully do; averaging three weight vectors is not.
+      verdicts: [hold, add, trim, rotate, exit, abstain]
+
+  adjudicate:
+    why: >-
+      The tie-breaker, and the reviewer of a change the system proposes for itself. Fable
+      at max because it is called rarely and only when something already disagreed — the
+      one place where paying the most is obviously right.
+    chain: [fable, opus]
     tools: read_only
-    min_tier: 1
-    local_mode: context_pack
-    skills_from: skills.bindings
-    retry: 1
-    effort: high
-    max_usd_per_run: 0.40
-    max_turns: 6
-    monthly_budget_usd: 4
-    deadline_s: 240
-    on_all_failed: keep_last
-  scan:
-    chain: [local_small, haiku]
-    tools: none
-    min_tier: 1
+    min_tier: 4
     retry: 0
-    effort: high
-    max_turns: 1
-    max_usd_per_run: 0.05
-    monthly_budget_usd: 3
-    deadline_s: 90
-    prompt: research.stage_prompts.scan
-    on_all_failed: skip_screen
-  validate:
-    chain: [sonnet, opus]
-    escalation: opus
-    tools: read_only
-    min_tier: 3                # code floor too: no local model validates a signal
-    retry: 0
-    effort: high
-    max_usd_per_run: 1.50
-    max_turns: 12
-    monthly_budget_usd: 30
-    deadline_s: 600
-    on_all_failed: drop_signal
-  classify:
-    chain: [local_small, haiku]
-    tools: none
-    min_tier: 1
-    retry: 0
-    effort: high
-    max_turns: 1
-    max_usd_per_run: 0.20
-    monthly_budget_usd: 5
-    deadline_s: 120
-    on_all_failed: rule
+    effort: max
+    max_usd_per_run: 6.00
+    max_turns: 20
+    monthly_budget_usd: 25
+    deadline_s: 1200
+    on_all_failed: abstain
+
   review:
+    why: >-
+      The weekly review reads the whole week and may propose changes to the system itself.
+      Fable at max, with tools; a change it authors is still gated, replayed and held.
     chain: [fable, opus]
     tools: skill_rw
     min_tier: 4
@@ -138,7 +363,11 @@ tasks:
     monthly_budget_usd: 70
     deadline_s: 6000
     on_all_failed: abstain
+
   daily_review:
+    why: >-
+      The same job at a day's scope. Same tier and effort as the weekly review because it
+      reaches the same conclusions on less evidence, which is the harder problem.
     chain: [fable, opus]
     tools: skill_rw
     min_tier: 4
@@ -154,7 +383,7 @@ switching:
   "on": { error: next, timeout: next, rate_limited: next, quota_exhausted: next,   # quoted: YAML 1.1 reads a bare `on` as true
         budget_exhausted: next, provider_down: skip, auth_error: next,
         schema_invalid: retry_then_next, empty_output: next }
-  prefer_local_when_rate_limited: [scan, classify]
+  prefer_local_when_rate_limited: [scan, classify, extract, holdings_watch]
   escalate_on: [hard_case, trigger, gray_zone, low_confidence]
   circuit_breaker: { failures: 3, window_min: 15, open_min: 15 }
   max_attempts_per_call: 4

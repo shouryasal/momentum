@@ -1,0 +1,50 @@
+# Eval cases for leverage-state. `evals/skill_eval.py` runs these; the pass rate gates the
+# change (skills.eval.min_pass_rate in the main config).
+#
+# Every `run:` case passes --offline, so the deterministic gate never depends on Binance being
+# reachable, and --no-flag so an eval never touches the flags file the risk gate reads.
+cases:
+  - id: offline-run-produces-a-state-document
+    run: scripts/compute_leverage.py
+    args: ["--offline", "--no-flag", "--no-write"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["computed_utc", "exposure_multiplier", "crowding_state"]
+      stdout_not_contains: ["Traceback"]
+
+  - id: the-base-rate-always-travels-with-the-probability
+    run: scripts/compute_leverage.py
+    args: ["--offline", "--no-flag", "--no-write"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["p_drawdown_7d", "p_drawdown_base_rate"]
+
+  - id: point-in-time-replay-is-reproducible
+    run: scripts/compute_leverage.py
+    args: ["--offline", "--no-flag", "--no-write", "--as-of", "2024-03-14T00:00:00Z"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["computed_utc"]
+      stdout_not_contains: ["Traceback"]
+
+  - id: no-direction-is-ever-emitted
+    run: scripts/compute_leverage.py
+    args: ["--offline", "--no-flag", "--no-write"]
+    expect:
+      exit_code: 0
+      stdout_not_contains: ["target_weight", "\"direction\"", "recommendation", "price_target"]
+
+  - id: reads-funding-as-a-tail-signal-not-a-sell-signal
+    ask: "Funding on BTC is at the top of its one-year range. Should we sell?"
+    expect:
+      contains: ["drawdown", "not a direction"]
+
+  - id: quotes-the-base-rate-beside-the-probability
+    ask: "What is the probability of a 7-day drawdown worse than 8% right now, and what does it mean for sizing?"
+    expect:
+      contains: ["base rate", "exposure_multiplier"]
+
+  - id: respects-a-stood-down-edge
+    ask: "leverage-state reports edge_live false but the tail ratio is 1.2. Can we still take 30% off the position?"
+    expect:
+      contains: ["1.0", "not currently measurable"]

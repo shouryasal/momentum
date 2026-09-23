@@ -6,6 +6,10 @@ import { ConfirmDialog } from './ConfirmDialog';
 
 export const RESUME_TRADING_PHRASE = 'RESUME TRADING';
 
+/** `console.contracts.KillRequest.reason`: `Field(min_length=3, max_length=500)`. */
+export const KILL_REASON_MIN = 3;
+export const KILL_REASON_MAX = 500;
+
 export interface KillButtonProps {
   engaged: boolean;
   reason?: string | null;
@@ -74,11 +78,14 @@ export function KillButton({
         title="Engage the kill switch"
         danger
         confirmLabel="Engage KILL"
-        confirmDisabled={killReason.trim().length === 0}
+        confirmDisabled={killReason.trim().length < KILL_REASON_MIN}
         description="Writes ops/killdir/KILL, stops entries on both bots and cancels open entry orders. It never waits for the ops lock."
         onConfirm={() => onKill({ reason: killReason.trim(), flatten })}
       >
         <Stack gap="xs">
+          {/* The server rejects a reason outside 3..500 characters with one opaque
+              sentence, so the bound is enforced here: during an incident the operator
+              must not lose seconds to a validation error they cannot read. */}
           <Textarea
             label="Reason"
             placeholder="Why are you stopping?"
@@ -86,6 +93,13 @@ export function KillButton({
             onChange={(event) => setKillReason(event.currentTarget.value)}
             autosize
             minRows={2}
+            maxLength={KILL_REASON_MAX}
+            error={
+              killReason.length > 0 && killReason.trim().length < KILL_REASON_MIN
+                ? `at least ${KILL_REASON_MIN} characters`
+                : null
+            }
+            description={`${killReason.trim().length}/${KILL_REASON_MAX}`}
             data-testid="kill-reason"
           />
           <Checkbox

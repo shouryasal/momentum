@@ -14,12 +14,18 @@ from runs.decision_core import StageMeta, StageResult
 from runs.research_run import ResearchRun
 
 NOW = datetime(2026, 9, 22, 4, 30, tzinfo=UTC)  # 08:30 Gulf
+#: The universe snapshot the run resolves its tradeable set from. A v4 proposal must quote
+#: it back, so the scripted answer has to carry it exactly like a real model's would.
+SNAPSHOT_REF = load_config().universe.snapshot_ref
 GOOD = {
-    "run_id": "2026-09-22T08:30+04:00", "prompt_version": "research.v3",
+    "run_id": "2026-09-22T08:30+04:00", "prompt_version": "research.v4",
     "module": "trend", "targets": {"BTC": 0.45, "ETH": 0.25, "USDT": 0.30},
     "exposure_scale": 0.8, "confidence": 0.6, "abstain": False, "horizon_days": 7,
     "rationale": ["BTC above 200d"], "invalidation": "BTC daily close below 200d MA",
 }
+if SNAPSHOT_REF:
+    GOOD["schema_version"] = 4
+    GOOD["universe_snapshot"] = dict(SNAPSHOT_REF)
 
 
 class FakeRunner:
@@ -55,6 +61,27 @@ def fail(subtype="error_during_execution", err="boom") -> StageResult:
     return StageResult(False, None, StageMeta(subtype=subtype, error=err))
 
 
+def _render_runtime(root, sleeve, state, *, run_id=None):
+    """The two ``var/runtime`` overlays a real transition leaves behind.
+
+    Every deployment has these — ``gen_freqtrade_config --check`` is part of the release
+    gate — and they are the only mode evidence a job under ``ops/envwrap.sh research`` can
+    read, since its allowlist is ``CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY``.
+    """
+    d = root / "var" / "runtime"
+    d.mkdir(parents=True, exist_ok=True)
+    live = state.startswith("LIVE")
+    (d / f"runtime-{sleeve}.json").write_text(json.dumps({
+        "version": 1, "sleeve": sleeve, "mode": "live" if live else "test",
+        "state": state, "submode": "propose" if state == "LIVE_PROPOSE" else (
+            "execute" if live else None),
+        "run_id": run_id or f"{'live' if live else 'test'}-{sleeve}-01",
+        "seed_usdt": 10000.0,
+        "require_approval": state == "LIVE_PROPOSE",
+    }))
+    (d / f"freqtrade-{sleeve}.mode.json").write_text(json.dumps({"dry_run": not live}))
+
+
 @pytest.fixture
 def rr(tmp_path):
     cfg = load_config()
@@ -64,7 +91,8 @@ def rr(tmp_path):
     (tmp_path / "prompts" / "stages").mkdir(parents=True)
     for p in (REPO_ROOT / "prompts" / "stages").iterdir():
         (tmp_path / "prompts" / "stages" / p.name).write_text(p.read_text())
-    for v in ("research.v1.md", "research.v2.md", "research.v3.md"):
+    for v in ("research.v1.md", "research.v2.md", "research.v3.md",
+              "research.v4.md"):
         (tmp_path / "prompts" / v).write_text(
             (REPO_ROOT / "prompts" / v).read_text())
     (tmp_path / "lessons.md").write_text("none\n")
@@ -76,6 +104,10 @@ def rr(tmp_path):
     dst.mkdir(parents=True)
     (dst / "compute_state.py").write_text((skills_src / "compute_state.py").read_text())
     (tmp_path / cfg.paths.proposals_dir).mkdir()
+    # A real deployment always has these rendered; without them the run cannot prove the
+    # sleeves are in TEST and correctly refuses to journal a proposal as needing no human.
+    for sleeve in ("a", "b"):
+        _render_runtime(tmp_path, sleeve, "TEST")
     ff = tmp_path / cfg.paths.flags_file
     from ops.lib import flags as flagslib
 
@@ -321,7 +353,9 @@ def test_signal_reaches_acted_and_the_rows_carry_its_id(rr):
     prop = jdb.execute("SELECT * FROM proposals WHERE shadow=0").fetchone()
     assert prop["signal_id"] == "sig-1" and prop["approval_status"] == "n/a"
     written = json.loads((root / prop["path"]).read_text())
-    assert written["signal_id"] == "sig-1" and written["schema_version"] == 3
+    # v4 once the run has a universe snapshot to cite; v3 (signal_id only) before that
+    assert written["signal_id"] == "sig-1"
+    assert written["schema_version"] == (4 if SNAPSHOT_REF else 3)
 
 
 def test_a_scheduled_run_writes_no_signal_block(rr):
@@ -333,30 +367,61 @@ def test_a_scheduled_run_writes_no_signal_block(rr):
     assert "null" in (snap / "rendered_prompt.md").read_text()
     written = json.loads(
         (root / cfg.paths.proposals_dir / "2026-09-22-0830.json").read_text())
-    assert "signal_id" not in written and "schema_version" not in written
+    assert "signal_id" not in written
+    if SNAPSHOT_REF:
+        # a v4 proposal always names the universe it saw; that is the whole point
+        assert written["schema_version"] == 4
+        assert written["universe_snapshot"] == dict(SNAPSHOT_REF)
+    else:
+        assert "schema_version" not in written
 
 
-def test_propose_mode_writes_to_the_pending_directory(rr, monkeypatch):
+def test_propose_mode_marks_the_proposal_pending_in_the_flat_directory(rr):
+    """Verified HIGH: the LIVE_PROPOSE approval queue was permanently empty.
+
+    ``proposal_destination`` read ``mode_state.load()``, and this job runs under
+    ``ops/envwrap.sh research`` with no ``EARN_CONSOLE_SECRET``, so ``verified`` was always
+    False and every proposal was journalled ``n/a``. The container refused each one for
+    want of a signed approval while the console's queue and the overview tile — both
+    filtered on ``approval_status='pending'`` — showed nothing to approve.
+
+    The old "correct" branch was broken too: it wrote ``proposals/pending/``, which
+    ``proposal_loader.load_newest_valid`` does not recurse into and
+    ``approvals.proposal_file_for`` never looks in. The path stays flat; the *status* is
+    the gate."""
     r, runner, _, jdb, root, cfg = rr
     runner.script["decide:claude-opus-5"] = [ok(GOOD)]
-
-    class _Sleeve:
-        requires_approval = True
-
-    class _State:
-        verified = True
-
-        def sleeve(self, _name):
-            return _Sleeve()
-
-    from ops.lib import mode_state
-
-    monkeypatch.setattr(mode_state, "load", lambda *a, **k: _State())
+    _render_runtime(root, "a", "TEST")
+    _render_runtime(root, "b", "LIVE_PROPOSE")
     assert r.main_flow("0830") == 0
-    assert (root / cfg.paths.proposals_dir / "pending" / "2026-09-22-0830.json").exists()
-    assert not (root / cfg.paths.proposals_dir / "2026-09-22-0830.json").exists()
+    flat = root / cfg.paths.proposals_dir / "2026-09-22-0830.json"
+    assert flat.exists(), "an approved proposal must be where the loader looks"
+    assert not (root / cfg.paths.proposals_dir / "pending").exists()
     prop = jdb.execute("SELECT * FROM proposals WHERE shadow=0").fetchone()
     assert prop["approval_status"] == "pending"
+    assert prop["path"] == f"{cfg.paths.proposals_dir}/2026-09-22-0830.json"
+
+
+def test_an_unprovable_mode_still_requires_an_approval(rr):
+    """No evidence at all is not proof of TEST: a proposal stays a request."""
+    r, runner, _, jdb, root, cfg = rr
+    runner.script["decide:claude-opus-5"] = [ok(GOOD)]
+    for sleeve in ("a", "b"):
+        for name in (f"runtime-{sleeve}.json", f"freqtrade-{sleeve}.mode.json"):
+            (root / "var" / "runtime" / name).unlink()
+    assert r.main_flow("0830") == 0
+    prop = jdb.execute("SELECT * FROM proposals WHERE shadow=0").fetchone()
+    assert prop["approval_status"] == "pending"
+
+
+def test_live_execute_needs_no_per_proposal_approval(rr):
+    r, runner, _, jdb, root, cfg = rr
+    runner.script["decide:claude-opus-5"] = [ok(GOOD)]
+    _render_runtime(root, "a", "TEST")
+    _render_runtime(root, "b", "LIVE_EXECUTE")
+    assert r.main_flow("0830") == 0
+    prop = jdb.execute("SELECT * FROM proposals WHERE shadow=0").fetchone()
+    assert prop["approval_status"] == "n/a"
 
 
 def test_stage_prompts_come_from_files(rr):
@@ -370,3 +435,51 @@ def test_stage_prompts_come_from_files(rr):
 
     assert stage_text(cfg, "flags", root).startswith("Run the reg-watch procedure")
     assert not stage_text(cfg, "flags", root).startswith("<!--")
+
+
+# ---------------------------------------------------------- v4 wide-universe wiring
+
+@pytest.mark.skipif(not SNAPSHOT_REF, reason="no universe snapshot resolved")
+def test_a_proposal_against_a_different_universe_snapshot_is_refused(rr):
+    """The run resolved its tradeable set from one snapshot; an answer citing another
+    was decided against a universe it was not shown, so it is not usable."""
+    r, runner, _, jdb, root, cfg = rr
+    stale = dict(GOOD, universe_snapshot={"date": "2026-09-16", "sha256": "a" * 64})
+    runner.script["decide:claude-opus-5"] = [ok(stale), ok(stale)]
+    assert r.main_flow("0830") == 1
+    assert not (root / cfg.paths.proposals_dir / "2026-09-22-0830.json").exists()
+    prop = jdb.execute("SELECT * FROM proposals WHERE shadow=0").fetchone()
+    assert "universe_snapshot" in prop["invalid_reason"]
+
+
+@pytest.mark.skipif(not SNAPSHOT_REF, reason="no universe snapshot resolved")
+def test_a_sparse_proposal_naming_a_satellite_is_accepted_end_to_end(rr):
+    r, runner, _, jdb, root, cfg = rr
+    satellite = next(a for a in cfg.universe.assets if a not in cfg.universe.core)
+    sparse = dict(GOOD, targets={"BTC": 0.40, satellite: 0.05, "USDT": 0.55})
+    runner.script["decide:claude-opus-5"] = [ok(sparse)]
+    assert r.main_flow("0830") == 0
+    written = json.loads(
+        (root / cfg.paths.proposals_dir / "2026-09-22-0830.json").read_text())
+    assert "ETH" not in written["targets"]        # absent means zero, not "unchanged"
+    assert written["targets"][satellite] == 0.05
+    assert written["universe_snapshot"] == dict(SNAPSHOT_REF)
+
+
+@pytest.mark.skipif(not SNAPSHOT_REF, reason="no universe snapshot resolved")
+def test_a_proposal_naming_a_watchlist_only_coin_is_refused(rr):
+    """Watched is not tradeable. The gate would reject it; the schema rejects it first."""
+    r, runner, _, jdb, root, cfg = rr
+    import json as _json
+    from pathlib import Path
+
+    snap = _json.loads(
+        (Path(REPO_ROOT) / "knowledge" / "universe" / f"{SNAPSHOT_REF['date']}.json")
+        .read_text())
+    watch_only = next(rec["base"] for rec in snap["pairs"].values()
+                      if rec["tier"] == "watchlist")
+    bad = dict(GOOD, targets={"BTC": 0.40, watch_only: 0.05, "USDT": 0.55})
+    runner.script["decide:claude-opus-5"] = [ok(bad), ok(bad)]
+    assert r.main_flow("0830") == 1
+    prop = jdb.execute("SELECT * FROM proposals WHERE shadow=0").fetchone()
+    assert "outside the tradeable universe" in prop["invalid_reason"]

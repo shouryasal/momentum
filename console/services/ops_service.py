@@ -16,11 +16,13 @@ Two rules this module exists to enforce:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import sqlite3
 import subprocess
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
@@ -30,6 +32,20 @@ from typing import Any
 from croniter import croniter
 
 GULF = timezone(timedelta(hours=4))
+
+#: Where a detached job leaves its exit code, so the row it owns can be closed truthfully.
+#: One file per ``console_jobs`` row id; removed as soon as the row is closed.
+JOB_RC_DIR = Path("var") / "console-jobs"
+
+#: Serialises the whole check-lock-then-spawn sequence. Two near-simultaneous
+#: ``POST /api/ops/jobs/{job}/run`` calls (two tabs, or a double click) run in Starlette's
+#: threadpool, so without this both saw the flock free, both spawned, and the loser died
+#: inside ``flock -n`` leaving a second ``running`` row behind.
+_SPAWN_LOCK = threading.Lock()
+
+#: The last pid this process spawned per ``(state root, job)``, so the window between our
+#: spawn and the child taking its ``flock`` is not a hole in the "already running" check.
+_LAST_SPAWN: dict[tuple[str, str], int] = {}
 
 #: Jobs the console may launch. Anything not listed is refused: this is the allowlist an
 #: attacker would need to get past to run arbitrary code as the console user.
@@ -278,46 +294,188 @@ def job_command(cfg: Any, job: str, *, root: Path, slot: str | None = None) -> l
             "bash", "ops/envwrap.sh", envwrap, "--", *inner]
 
 
+def pid_alive(pid: int | None) -> bool:
+    """True while ``pid`` is a live process this user can signal."""
+    if not pid or int(pid) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover - alive, owned by somebody else
+        return True
+    except OSError:  # pragma: no cover
+        return False
+    return True
+
+
+def rc_path(root: Path, job_id: int) -> Path:
+    return root / JOB_RC_DIR / f"{int(job_id)}.rc"
+
+
 def run_job(cfg: Any, job: str, *, root: Path, jdb: sqlite3.Connection | None = None,
             actor: str = "human:console", slot: str | None = None,
             spawner=None, now: datetime | None = None) -> dict[str, Any]:
-    """Spawn a job detached, exactly as cron would. Returns the ``console_jobs`` row."""
+    """Spawn a job detached, exactly as cron would. Returns the ``console_jobs`` row.
+
+    The row is inserted **before** the spawn, so the child's exit-code file can be named
+    after it and :func:`reap_jobs` can close it later; a spawn that fails closes the row as
+    ``failed`` rather than leaving it ``running`` for ever. The whole check-and-spawn runs
+    under :data:`_SPAWN_LOCK`, which is what stops two simultaneous posts both spawning.
+    """
     ts = now or datetime.now(UTC)
     argv = job_command(cfg, job, root=root, slot=slot)
     _, lock, log_name = _job_meta(job)
-    if lock_held(root, lock):
-        raise OpsServiceError("locked", f"{job} is already running (lock held)")
     log_path = root / "logs" / log_name
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    (root / "ops" / "locks").mkdir(parents=True, exist_ok=True)
+    claim = (str(root), job)
+    with _SPAWN_LOCK:
+        if lock_held(root, lock) or pid_alive(_LAST_SPAWN.get(claim)):
+            raise OpsServiceError("locked", f"{job} is already running (lock held)")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        (root / "ops" / "locks").mkdir(parents=True, exist_ok=True)
+        (root / JOB_RC_DIR).mkdir(parents=True, exist_ok=True)
 
-    spawn = spawner or _spawn_detached
-    pid = spawn(argv, root, log_path)
+        job_id: int | None = None
+        if jdb is not None:
+            cur = jdb.execute(
+                "INSERT INTO console_jobs(job, args_json, started_utc, status, log_path,"
+                " actor) VALUES (?,?,?,'running',?,?)",
+                (job, _args_json(slot=slot), _iso(ts),
+                 str(log_path.relative_to(root)) if log_path.is_relative_to(root)
+                 else str(log_path),
+                 actor))
+            jdb.commit()
+            job_id = cur.lastrowid
 
-    job_id = None
-    if jdb is not None:
-        cur = jdb.execute(
-            "INSERT INTO console_jobs(job, args_json, started_utc, status, log_path, actor)"
-            " VALUES (?,?,?,'running',?,?)",
-            (job, None if slot is None else f'{{"slot": "{slot}"}}', _iso(ts),
-             str(log_path.relative_to(root)) if log_path.is_relative_to(root) else str(log_path),
-             actor))
-        jdb.commit()
-        job_id = cur.lastrowid
+        spawn = spawner or _spawn_detached
+        try:
+            pid = spawn(argv, root, log_path,
+                        **({} if job_id is None else {"status_path": rc_path(root, job_id)}))
+        except OpsServiceError:
+            if jdb is not None and job_id is not None:
+                _close_row(jdb, job_id, "failed", None, ts)
+            raise
+        if pid:
+            _LAST_SPAWN[claim] = int(pid)
+        else:
+            _LAST_SPAWN.pop(claim, None)
+        if jdb is not None and job_id is not None:
+            jdb.execute("UPDATE console_jobs SET args_json=? WHERE id=?",
+                        (_args_json(slot=slot, pid=pid), job_id))
+            jdb.commit()
     return {"id": job_id, "job": job, "pid": pid, "status": "running",
             "started_utc": _iso(ts), "log": log_name, "argv": argv}
 
 
-def _spawn_detached(argv: Sequence[str], cwd: Path, log_path: Path) -> int | None:
+def _args_json(*, slot: str | None, pid: int | None = None) -> str | None:
+    """``console_jobs.args_json`` — the slot plus the detached pid that owns the row.
+
+    The pid lives here because ``console_jobs`` has no column for it; ``reap_jobs`` reads
+    it back to decide whether a ``running`` row still has a process behind it.
+    """
+    payload: dict[str, Any] = {}
+    if slot is not None:
+        payload["slot"] = slot
+    if pid:
+        payload["pid"] = int(pid)
+    return json.dumps(payload, sort_keys=True) if payload else None
+
+
+def job_args(raw: Any) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _close_row(jdb: sqlite3.Connection, job_id: int, status: str, exit_code: int | None,
+               ts: datetime) -> None:
+    jdb.execute(
+        "UPDATE console_jobs SET status=?, exit_code=?, finished_utc=COALESCE(finished_utc,?)"
+        " WHERE id=? AND status='running'",
+        (status, exit_code, _iso(ts), int(job_id)))
+    jdb.commit()
+
+
+def reap_jobs(jdb: sqlite3.Connection | None, *, root: Path,
+              now: datetime | None = None) -> list[dict[str, Any]]:
+    """Close every detached ``console_jobs`` row whose process is gone.
+
+    ``running -> ok | failed | killed`` is a lifecycle the schema declares and nothing used
+    to honour for a detached spawn: ``run_job`` inserted the row and no one ever came back
+    for it, so the Operations timeline claimed a job was still going until the next console
+    restart stamped it ``killed`` regardless of what really happened.
+
+    The verdict comes from the exit-code file the wrapper writes. When there is none the
+    row is closed ``failed`` with a null exit code — the job's outcome cannot be proven, and
+    claiming success is the one answer that must never be guessed. Rows with no recorded
+    pid belong to the in-process ``JobRunner`` and are left alone.
+    """
+    if jdb is None:
+        return []
+    ts = now or datetime.now(UTC)
+    try:
+        rows = jdb.execute(
+            "SELECT id, job, args_json FROM console_jobs WHERE status='running'").fetchall()
+    except sqlite3.Error:  # pragma: no cover - a missing table is not this call's problem
+        return []
+    closed: list[dict[str, Any]] = []
+    for row in rows:
+        pid = job_args(row["args_json"]).get("pid")
+        if not pid or pid_alive(pid):
+            continue
+        status, exit_code = _read_rc(rc_path(root, row["id"]))
+        _close_row(jdb, int(row["id"]), status, exit_code, ts)
+        closed.append({"id": int(row["id"]), "job": row["job"], "status": status,
+                       "exit_code": exit_code})
+    return closed
+
+
+def _read_rc(path: Path) -> tuple[str, int | None]:
+    """``(status, exit_code)`` from the wrapper's exit-code file; fail closed without it."""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "failed", None
+    try:
+        code = int(text)
+    except ValueError:
+        return "failed", None
+    try:
+        path.unlink()
+    except OSError:  # pragma: no cover
+        pass
+    if code == 0:
+        return "ok", 0
+    # `timeout` reports 124 when it had to kill the job; that is a kill, not a failure.
+    return ("killed" if code in (124, 137) else "failed"), code
+
+
+#: The exit code of the job is written to ``$EARN_JOB_RC_FILE`` after it returns. ``"$@"``
+#: is the job's own argv, passed as positional parameters — never interpolated into the
+#: script text, so no part of it is ever parsed as shell.
+_RC_WRAPPER = '"$@"; rc=$?; printf %s "$rc" > "$EARN_JOB_RC_FILE"; exit $rc'
+
+
+def _spawn_detached(argv: Sequence[str], cwd: Path, log_path: Path,
+                    status_path: Path | None = None) -> int | None:
     """Own session, own deadline: the console exiting must not kill a 45-minute job."""
     try:
         handle = open(log_path, "a", encoding="utf-8")
     except OSError:  # pragma: no cover
         handle = None
+    env = dict(os.environ)
+    spawn_argv = list(argv)
+    if status_path is not None:
+        env["EARN_JOB_RC_FILE"] = str(status_path)
+        spawn_argv = ["bash", "-c", _RC_WRAPPER, "earn-job", *argv]
     try:
         p = subprocess.Popen(  # noqa: S603 - fixed argv from an allowlist, no shell
-            list(argv), cwd=str(cwd), start_new_session=True,
-            stdin=subprocess.DEVNULL,
+            spawn_argv, cwd=str(cwd), start_new_session=True,
+            stdin=subprocess.DEVNULL, env=env,
             stdout=handle or subprocess.DEVNULL, stderr=subprocess.STDOUT)
     except OSError as e:
         raise OpsServiceError("spawn_failed", f"could not start {argv[0]}: {e}") from e

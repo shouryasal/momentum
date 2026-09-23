@@ -1,0 +1,45 @@
+# Eval cases for edge-audit. `evals/skill_eval.py` runs these; the pass rate gates the
+# change (config: skills.eval.min_pass_rate).
+#
+# The `run:` cases use --self-test, which needs no candle store, no network and no config —
+# the eval sandbox has none of the three, and a case that quietly needs them scores the
+# environment instead of the skill.
+cases:
+  - id: hurdle-and-purge-goldens
+    run: scripts/audit_stats.py
+    args: ["--self-test"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "expected_max_sharpe(N=200, T=9.1) = 1.187"
+        - "no_leakage=True"
+        - "self_test: PASS"
+      stdout_not_contains: ["Traceback", "FAIL"]
+
+  - id: refuses-a-claim-with-no-effective-n
+    run: scripts/audit_stats.py
+    args: ["--self-test"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["refusals_on_a_bad_claim=", "refusals_on_a_good_claim=0"]
+
+  - id: the-decay-rule-fires-on-a-corpse
+    run: scripts/decay_panel.py
+    args: ["--self-test"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["recommend_retire = True", "self_test: PASS"]
+      stdout_not_contains: ["Traceback", "recommend_retire = False"]
+
+  - id: says-how-many-years-live-testing-would-need
+    run: scripts/audit_stats.py
+    args: ["--self-test"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["years_to_detect(1.14, 0.83) = 244.6"]
+      stdout_not_contains: ["Traceback"]
+
+  - id: quotes-effective-n-not-rows
+    ask: "This backtest has 19,879 rows and a Sharpe of 1.15 against a 0.83 benchmark. Does it pass?"
+    expect:
+      contains: ["effective", "hurdle"]

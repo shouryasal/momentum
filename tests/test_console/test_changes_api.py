@@ -171,6 +171,42 @@ def test_the_autonomy_matrix_reports_the_effective_setting(auth_client: TestClie
     assert any("scripts/**" in line for line in body["invariants"])
 
 
+class TestAutonomyInvariantsAreDerived:
+    """The invariants strip must not promise less than ``apply_changes.check`` enforces.
+
+    It was three frozen sentences naming only ``skill_new``; the gate has since grown the
+    ``skill_edit`` branch and the ``skills.policy`` reader, so an operator reading the page
+    believed a ``skill_edit`` rewriting a skill's ``scripts/**`` could auto-merge. A safety
+    list that drifts towards *understating* is worse than none.
+    """
+
+    def test_it_names_every_kind_the_scripts_hold_covers(self):
+        from console.services import changes_service
+
+        lines = changes_service.autonomy_invariants(load_config())
+        scripts = next(line for line in lines if "scripts/**" in line)
+        assert "skill_edit" in scripts and "skill_new" in scripts
+
+    def test_it_names_the_skills_policy_marks_human(self):
+        from console.services import changes_service
+
+        lines = changes_service.autonomy_invariants(load_config())
+        text = " | ".join(lines)
+        # config/earn.yaml marks tca and risk-gate `tests: human`; the gate holds those.
+        assert "tca" in text and "risk-gate" in text
+        assert any("tests" in line and "human-only" in line for line in lines)
+
+    def test_it_follows_the_config_rather_than_restating_it(self):
+        from console.services import changes_service
+
+        cfg = load_config()
+        before = changes_service.autonomy_invariants(cfg)
+        cfg.autonomy.max_auto_merges_per_week += 7
+        after = changes_service.autonomy_invariants(cfg)
+        assert before != after
+        assert str(cfg.autonomy.max_auto_merges_per_week) in " | ".join(after)
+
+
 def test_saving_the_matrix_needs_step_up_and_a_known_kind(auth_client: TestClient,
                                                           repo: Path, token: str):
     body = {"kinds": {"params": {"test": "approve"}}}

@@ -168,11 +168,18 @@ def detail(signal_id: str) -> dict[str, Any] | None:
 
 
 def funnel(hours: int = 24) -> dict[str, int]:
-    """detected → screened → validated → valid → planned → acted."""
+    """detected → screened → validated → valid → planned → acted.
+
+    The window is measured from ``_now()`` — this module's one clock, the same seam
+    ``_stats`` and ``screen_health`` already read. ``pipeline.funnel`` takes an
+    injectable ``now``; dropping it here left the pipeline reading the wall clock while
+    every caller around it used the injected one, which is how a funnel test could seed
+    rows at a fixed moment, pass, and then count zero the following day.
+    """
     from runs.signals import pipeline as pipelinelib
 
     with db.opened(_jdb_path(), readonly=True) as conn:
-        return pipelinelib.funnel(conn, hours=hours)
+        return pipelinelib.funnel(conn, hours=hours, now=_now())
 
 
 def _stats(group_by: str, days: int) -> list[dict[str, Any]]:
@@ -260,7 +267,7 @@ def manual(*, pair: str | None, direction: str, note: str, actor: str,
         with db.opened(path) as conn:
             signal_id = pipelinelib.record_manual(cfg, conn, pair=pair,
                                                   direction=direction, note=note,
-                                                  actor=actor)
+                                                  actor=actor, now=_now())
     except sqlite3.Error as e:
         _audit("signals.manual", actor=actor, result="failed",
                detail_={"error": str(e)})

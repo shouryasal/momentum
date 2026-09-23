@@ -379,6 +379,9 @@ def default_pollers(
         # topic in ``console.sse.TOPICS`` that a *table* can source is here; ``alert``,
         # ``kill``, ``mode`` and ``bot`` come from the file and bot pollers above, and
         # ``config`` doubles up because a config save writes both a file and a row.
+        # ``claude_auth`` is absent on purpose: a sign-in is a live pty this process is
+        # supervising, not a row anything could poll for, so
+        # ``console.services.claude_signin_service.SignInManager`` publishes it itself.
         # ``column`` is ``rowid`` for the three tables whose primary key is not an
         # INTEGER: MAX() of a TEXT key is not a cursor, and ``nav_points`` has no key
         # column at all. Every one of these is an ordinary rowid table.

@@ -36,14 +36,98 @@ from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk import query as _sdk_query
 
 from ops.config import REPO_ROOT
+from runs.llm.schema_wire import wire_schema
 
 _query = _sdk_query  # tests monkeypatch this
 
 READ_ONLY_TOOLS = ["Read", "Glob", "Grep"]
 ALWAYS_DISALLOWED = ["WebFetch", "WebSearch", "Task", "Edit", "NotebookEdit"]
 
+#: **The** Bash grant for an automated session — the one list every automated caller
+#: builds from (``runs.review_run``, ``runs.daily_review`` and the ``skill_rw`` tool
+#: profile in ``runs.llm.providers.claude_sdk``).
+#:
+#: Every rule names either a read-only git subcommand or an explicit script that lives in
+#: a **tier-2** path, so nothing here can run code the model itself wrote. A bare
+#: ``Bash`` rule is never granted: ``config/models.yaml`` declares ``tools: skill_rw``
+#: for the brief, review and daily_review tasks, and that profile used to expand to an
+#: unrestricted ``Bash``, which would have handed the weekly session ``python -c`` over
+#: the live checkout the moment those tasks were routed through ``runs.llm.chain``.
+#:
+#: ``Bash(pytest .claude/skills/*)`` is deliberately absent. A skill's ``tests/**`` is
+#: tier 1 — the session may write it — so running pytest over it is the session executing
+#: its own code as the owner, outside every hook. Skill tests are recomputed by the change
+#: gate (``evals.skill_eval``) under containment instead.
+AUTOMATED_SKILL_SCRIPT_BASH = [
+    "Bash(python3 .claude/skills/asset-dossier/scripts/*)",
+    "Bash(python3 .claude/skills/post-mortem/scripts/*)",
+    "Bash(python3 .claude/skills/risk-gate/scripts/*)",
+    "Bash(python3 .claude/skills/skill-smith/scripts/*)",
+    "Bash(python3 .claude/skills/strategy-lab/scripts/*)",
+    "Bash(python3 .claude/skills/tca/scripts/*)",
+]
+AUTOMATED_BASH_ALLOWLIST = [
+    "Bash(git add *)",
+    "Bash(git commit *)",
+    "Bash(git diff *)",
+    "Bash(git status *)",
+    "Bash(git log *)",
+    "Bash(git rev-parse *)",
+    *AUTOMATED_SKILL_SCRIPT_BASH,
+    "Bash(python3 -m evals.replay *)",
+    "Bash(python3 -m evals.skill_lint *)",
+    "Bash(python3 -m evals.skill_eval *)",
+]
+
 #: tools whose input names a file we must check against the tier-2 list
 _WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+
+def _usage_work(entry: object) -> tuple[float, float]:
+    """``(output_tokens, cost_usd)`` from one ``model_usage`` value, whatever its shape.
+
+    The SDK has reported this as a dict and as an object across versions, and the key
+    spellings differ (``outputTokens`` / ``output_tokens``). Metadata never fails a stage,
+    so anything unreadable simply scores zero.
+    """
+    def get(*names: str) -> float:
+        for name in names:
+            value = (entry.get(name) if isinstance(entry, dict)
+                     else getattr(entry, name, None))
+            if isinstance(value, int | float):
+                return float(value)
+        return 0.0
+
+    return (get("outputTokens", "output_tokens"), get("costUSD", "cost_usd", "cost"))
+
+
+def pick_served_model(model_usage: dict, requested: str | None = None) -> str | None:
+    """Which model in a per-session ``model_usage`` map actually did the work.
+
+    ``next(iter(model_usage))`` was wrong and wrong in a way that mattered. The CLI runs a
+    small housekeeping model (titles, summaries, quota probes) alongside the model the
+    caller asked for, and both land in the same map in whatever order the session happened
+    to touch them — so a run decided by Opus was routinely journalled as served by Haiku.
+    Everything downstream inherited it: ``runs.served_model``, the AI & Models page, the
+    trace, and — the one that bites — ``evals.verify_change``, which HOLDS a change whose
+    ``author_model`` does not equal ``runs.served_model`` for its run. A correct,
+    Opus-authored change was being held because the journal named the wrong author.
+
+    The requested model is preferred, matched loosely because the CLI may answer an
+    undated alias with a dated id (``claude-opus-5`` -> ``claude-opus-5-20260114``).
+    Failing that, the entry that produced the most output and cost the most is the one
+    that did the thinking; a housekeeping turn is a few dozen tokens next to it.
+    """
+    if not model_usage:
+        return None
+    keys = list(model_usage)
+    if requested:
+        if requested in model_usage:
+            return requested
+        loose = [k for k in keys if k.startswith(requested) or requested.startswith(k)]
+        if loose:
+            return max(loose, key=lambda k: _usage_work(model_usage[k]))
+    return max(keys, key=lambda k: _usage_work(model_usage[k]))
 
 
 @dataclass
@@ -112,9 +196,9 @@ def tier2_denial(tool_name: str, tool_input: dict, cwd: Path) -> str | None:
                     " changes/*.json instead")
         return None
     if tool_name == "Bash":
-        hit = mod.bash_touches_tier2(tool_input.get("command", "") or "")
-        if hit:
-            return f"bash write touching tier-2 path '{hit}' is human-only (spec §7)"
+        # The full Bash rule, not just the write-token half: inline interpreters and
+        # heredocs are refused outright, and naming a tier-2 path needs a read-only verb.
+        return mod.bash_denial(tool_input.get("command", "") or "")
     return None
 
 
@@ -175,7 +259,13 @@ def _options(*, model: str, max_turns: int, max_usd: float, cwd: Path,
     if effort is not None:
         kwargs["effort"] = effort          # "high" floor enforced by the router
     if output_schema is not None:
-        kwargs["output_format"] = {"type": "json_schema", "schema": output_schema}
+        # The CLI validates this with a draft-07 Ajv, so a 2020-12 `$schema` (or any
+        # unresolvable $ref) makes it refuse the call before a model ever sees it —
+        # every stage failed this way until it was caught by running a real research run.
+        # runs/llm/providers/claude_sdk.py sanitises the copy it sends; this path talks to
+        # the SDK directly, so it must do the same. The strict check of the RESULT still
+        # uses the full schema, which is untouched here.
+        kwargs["output_format"] = {"type": "json_schema", "schema": wire_schema(output_schema)}
     if skills:
         kwargs["skills"] = skills
     if cli_path is not None:
@@ -187,7 +277,8 @@ def _options(*, model: str, max_turns: int, max_usd: float, cwd: Path,
 
 
 async def _run_stage_async(prompt: str, opts: ClaudeAgentOptions,
-                           deadline_s: float) -> StageResult:
+                           deadline_s: float,
+                           requested_model: str | None = None) -> StageResult:
     meta = StageMeta()
     text: str | None = None
 
@@ -219,7 +310,7 @@ async def _run_stage_async(prompt: str, opts: ClaudeAgentOptions,
                 meta.cache_write_tokens = usage.get("cache_creation_input_tokens")
                 model_usage = getattr(message, "model_usage", None) or {}
                 if model_usage:
-                    meta.served_model = next(iter(model_usage.keys()))
+                    meta.served_model = pick_served_model(model_usage, requested_model)
                 result = getattr(message, "result", None)
                 if result is not None:
                     text = result
@@ -251,7 +342,7 @@ def run_stage(prompt: str, *, model: str, max_turns: int, max_usd: float,
                     output_schema=output_schema, skills=skills, effort=effort,
                     env=env, cli_path=cli_path)
     try:
-        return asyncio.run(_run_stage_async(prompt, opts, deadline_s))
+        return asyncio.run(_run_stage_async(prompt, opts, deadline_s, model))
     except RuntimeError as e:
         print(f"decision_core: event loop error: {e}", file=sys.stderr)
         return StageResult(False, None, StageMeta(error=str(e)))

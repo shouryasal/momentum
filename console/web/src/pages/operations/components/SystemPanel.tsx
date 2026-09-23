@@ -2,7 +2,8 @@ import { Alert, Badge, Button, Card, Code, Grid, Group, Stack, Text } from '@man
 import { IconDatabase, IconDeviceFloppy, IconPlugConnected } from '@tabler/icons-react';
 import { useCallback, useState } from 'react';
 
-import { DataTable, StatCard, type DataTableColumn } from '@/components';
+import { errorMessage } from '@/api';
+import { ConfirmDialog, DataTable, StatCard, type DataTableColumn } from '@/components';
 import { formatRelative } from '@/lib/format';
 
 import {
@@ -129,7 +130,16 @@ export function ContainersPanel({
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
 
+  /**
+   * `POST /api/ops/containers/{service}/restart` is step-up guarded.
+   *
+   * It used to fire from the Restart button's bare `onClick`, so outside the step-up
+   * window every click painted "re-enter the console token to continue" into a red alert
+   * with no way to step up from this panel — and inside the window a freqtrade container
+   * restart was one unconfirmed click. `ConfirmDialog` supplies both.
+   */
   const restart = useCallback(
     async (service: string) => {
       setBusy(service);
@@ -138,7 +148,8 @@ export function ContainersPanel({
         await opsApi.restartContainer(service);
         onChanged();
       } catch (e) {
-        setError((e as Error).message);
+        setError(errorMessage(e));
+        throw e; // the dialog shows it too, and stays open
       } finally {
         setBusy(null);
       }
@@ -166,7 +177,8 @@ export function ContainersPanel({
                 variant="light"
                 leftSection={<IconPlugConnected size={14} />}
                 loading={busy === c.service}
-                onClick={() => void restart(c.service)}
+                onClick={() => setConfirming(c.service)}
+                data-testid={`restart-${c.service}`}
               >
                 Restart
               </Button>
@@ -174,6 +186,19 @@ export function ContainersPanel({
           </Group>
         </Card>
       ))}
+      <ConfirmDialog
+        opened={confirming !== null}
+        onClose={() => setConfirming(null)}
+        title={`Restart ${confirming ?? ''}?`}
+        confirmLabel="Restart"
+        requireStepUp
+        danger
+        description="The bot stops and comes back on the same generated config. Open positions are left alone; entries pause while it is down. It takes the ops lock."
+        onConfirm={async () => {
+          if (confirming) await restart(confirming);
+          setConfirming(null);
+        }}
+      />
     </Stack>
   );
 }

@@ -54,6 +54,46 @@ def actor_for(actor: Any) -> modes.HumanActor:
 # --------------------------------------------------------------------------- snapshot
 
 
+#: How a sleeve's results may be described. The Mode page, the header badge and every
+#: performance surface read this rather than re-deriving it, so a demo run cannot be
+#: rendered as live performance by one of them disagreeing with the others.
+PNL_BASIS: dict[str, str] = {"live": "live", "demo": "demo", "test": "paper"}
+
+
+def pnl_basis_for(state_name: str) -> str:
+    """``paper`` | ``demo`` | ``live`` | ``unknown`` for one sleeve state word.
+
+    A transient state answers ``unknown`` rather than borrowing ``test``'s ``paper``: a
+    sleeve mid-ARMING may already have orders on a venue, and calling that paper is the
+    mistake, not the caution.
+    """
+    if state_name in ms.TRANSIENT_MODES:
+        return "unknown"
+    return PNL_BASIS[modes.mode_word_for(state_name)]
+
+
+#: What the badge says. Four words, all different, none a prefix of another — an operator
+#: must be able to tell DEMO from TEST and from LIVE at a glance, across the room.
+BADGE: dict[str, str] = {"live": "LIVE", "demo": "DEMO", "test": "TEST"}
+
+
+def badge_for(state_name: str, *, transitioning: bool = False) -> str:
+    """``TEST`` | ``DEMO`` | ``LIVE`` | ``TRANSITIONING`` for one sleeve state word."""
+    if transitioning or state_name in ms.TRANSIENT_MODES:
+        return "TRANSITIONING"
+    return BADGE[modes.mode_word_for(state_name)]
+
+
+def venue_of(state_name: str) -> Any:
+    """The venue a state reaches, or ``None`` — never raising for a transient state."""
+    from ops.lib.exchange_endpoints import VenueBindingError, venue_for_mode
+
+    try:
+        return venue_for_mode(state_name)
+    except VenueBindingError:
+        return None
+
+
 def snapshot(
     cfg: EarnConfig,
     conn: sqlite3.Connection | None = None,
@@ -61,7 +101,12 @@ def snapshot(
     state: ms.ModeState | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Per-sleeve ``{state, submode, run_id, seed, since, days, transition_in_progress}``."""
+    """Per-sleeve mode, venue, badge, seed ceilings and the phrase each target needs.
+
+    One function serves the Mode page and the header badge on purpose: the two cannot then
+    disagree about which venue a sleeve is on, and "DEMO" cannot render as "LIVE" in one
+    corner of the screen and not the other.
+    """
     st = state if state is not None else ms.load()
     ts = now or datetime.now(UTC)
     running: set[str] = set()
@@ -88,21 +133,51 @@ def snapshot(
                 days = round(max(0.0, (ts - started).total_seconds() / 86400), 2)
             except ValueError:
                 days = None
+        seed = (
+            float(sl.seed_usdt) if sl.seed_usdt is not None
+            else seed_for(cfg, sleeve, state=st)
+        )
+        targets = allowed_targets(st, sleeve)
+        venue = venue_of(sl.state)
+        mode_word = run["mode"] if run else modes.mode_word_for(sl.state)
         sleeves.append(
             {
                 "sleeve": sleeve,
                 "state": sl.state,
                 "submode": sl.submode,
                 "run_id": sl.run_id,
-                "seed_usdt": (
-                    float(sl.seed_usdt) if sl.seed_usdt is not None else seed_for(cfg, sleeve, state=st)
-                ),
+                "seed_usdt": seed,
                 "label": run["label"] if run else None,
-                "mode": run["mode"] if run else ("live" if sl.is_live else "test"),
+                "mode": mode_word,
                 "since": since,
                 "days": days,
                 "transition_in_progress": sleeve in running,
-                "max_seed_usdt": float(cfg.modes.live.max_seed_usdt.get(sleeve, 0.0)),
+                "max_seed_usdt": pf.max_seed_for(cfg, sleeve, sl.state)[0],
+                "venue": venue.value if venue is not None else None,
+                "venue_host": _venue_host(venue),
+                # ``is_live`` is real money and nothing else. A demo sleeve answers False
+                # here and True to ``is_demo``, which is what keeps demo results out of
+                # every live performance surface.
+                "is_live": sl.is_live,
+                "is_demo": sl.is_demo,
+                "badge": badge_for(sl.state, transitioning=sleeve in running),
+                # From the *signed state*, never from the active run row. The two agree in
+                # every reachable state (step 12 opens the run under the same word), and
+                # when they do not it is because the run row is stale — in which case the
+                # safe reading of a DEMO_* sleeve is "demo", not the run row's older,
+                # gentler "test". Defaulting to the less alarming label on a disagreement
+                # is exactly how a real book gets described as paper.
+                "pnl_basis": pnl_basis_for(sl.state),
+                "seed_ceilings": {
+                    t: pf.max_seed_for(cfg, sleeve, t)[0] for t in targets
+                },
+                "confirm_phrases": {
+                    t: modes.confirm_phrase_for(
+                        cfg, sleeve=sleeve, from_state=sl.state, target=t, seed_usdt=seed,
+                    )
+                    for t in targets
+                },
+                "allowed_targets": targets,
             }
         )
     return {
@@ -111,8 +186,18 @@ def snapshot(
         "phase": st.phase,
         "set_at": st.set_at,
         "set_by": st.set_by,
+        "any_live": st.any_live(),
+        "any_demo": st.any_demo(),
         "sleeves": sleeves,
     }
+
+
+def _venue_host(venue: Any) -> str | None:
+    if venue is None:
+        return None
+    from ops.lib.exchange_endpoints import endpoints_for
+
+    return endpoints_for(venue).rest_host
 
 
 def allowed_targets(state: ms.ModeState, sleeve: str) -> list[str]:
@@ -179,7 +264,7 @@ def build_deps(
         bot=bot,
         compose_runner=compose_runner,
         preflight=run_preflight,
-        reconcile=reconcile or _default_reconcile(cfg, conn, root),
+        reconcile=reconcile or _default_reconcile(cfg, conn, root, env=env),
         progress=progress,
         alert=alert or _default_alert(cfg),
         now=now,
@@ -190,12 +275,21 @@ def build_deps(
 
 
 def _default_reconcile(
-    cfg: EarnConfig, conn: sqlite3.Connection, root: Path
+    cfg: EarnConfig, conn: sqlite3.Connection, root: Path, *, env: Mapping[str, str] | None = None
 ) -> Callable[[str, str], tuple[str, str]]:
-    """Step 10: ledger vs exchange before a live sleeve is declared open."""
+    """Step 11: ledger vs exchange before a venue-bound sleeve is declared open.
+
+    **Venue-aware, and it has to be.** This used to build a ``BinanceClient`` from
+    ``keys_for(sleeve)`` — the *live* env names — against the module default
+    ``api.binance.com``. Run for a demo transition, that is a signed request to
+    PRODUCTION carrying whatever key happens to sit in ``BINANCE_KEY_<S>``. The venue is
+    now read from the sleeve's freshly-written mode state, the credential from that
+    venue's own env names, and the base URL from the venue table.
+    """
 
     def run(sleeve: str, run_id: str) -> tuple[str, str]:
         from ops.lib import binance_check
+        from ops.lib.exchange_endpoints import Venue, endpoints_for
         from runs import reconcile_job
 
         knowledge = db.knowledge_path(cfg)
@@ -203,7 +297,17 @@ def _default_reconcile(
         if knowledge.exists():
             with db.opened(knowledge, readonly=True) as kdb:
                 prices = reconcile_job.candle_prices(kdb, cfg)
-        client = binance_check.BinanceClient(binance_check.keys_for(sleeve))
+        from console.services.preflight_service import keypair_for
+
+        state = ms.load(env=env)
+        venue = venue_of(state.sleeve(sleeve).state) or Venue.LIVE
+        keys = keypair_for(sleeve, venue, env)
+        if not keys.present:
+            raise ModeServiceError(
+                f"cannot reconcile sleeve {sleeve} against {venue.value}: "
+                f"{keys.key_env} is not set"
+            )
+        client = binance_check.BinanceClient(keys, base_url=endpoints_for(venue).rest_base)
         balances = binance_check.total_balances(
             client.account(), [*cfg.universe.assets, cfg.universe.quote]
         )
@@ -211,7 +315,11 @@ def _default_reconcile(
         seed = float(row["seed_usdt"]) if row else seed_for(cfg, sleeve)
         result = reconcile_job.reconcile_sleeve(
             cfg, conn, sleeve=sleeve, run_id=run_id, seed_usdt=seed, balances=balances,
-            prices=prices, flags_path=root / cfg.paths.flags_file, source="binance",
+            prices=prices, flags_path=root / cfg.paths.flags_file,
+            # Tag the snapshot with the venue it came from. A demo balance is a real
+            # Binance balance, but it is not a live one, and the two must never be
+            # aggregated into one performance record.
+            source=f"binance-{venue.value}",
         )
         return result.status, result.detail
 
@@ -375,11 +483,15 @@ def rollback(
 
 
 __all__ = [
+    "BADGE",
     "MODE_TOPIC",
+    "PNL_BASIS",
     "TRANSITION_TOPIC",
     "ModeServiceError",
     "actor_for",
     "allowed_targets",
+    "badge_for",
+    "pnl_basis_for",
     "build_deps",
     "expected_phrase",
     "recover_on_start",
@@ -387,4 +499,5 @@ __all__ = [
     "rollback",
     "snapshot",
     "transition",
+    "venue_of",
 ]

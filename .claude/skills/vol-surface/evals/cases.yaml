@@ -1,0 +1,43 @@
+# Eval cases for vol-surface. `evals/skill_eval.py` runs these; the pass rate gates the
+# change (config: skills.eval.min_pass_rate).
+#
+# Every `run:` case uses --self-test, which reads the frozen fixture in tests/fixtures/ and
+# needs no candle store, no network and no config. That is deliberate: the eval sandbox has
+# none of the three, and a case that quietly needs them is a case that scores the
+# environment instead of the skill.
+cases:
+  - id: self-test-golden-values
+    run: scripts/compute_volsurface.py
+    args: ["--self-test"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["self_test: PASS", "source=blend", "source=har"]
+      stdout_not_contains: ["Traceback", "self_test: FAIL"]
+
+  - id: the-fitted-map-is-used-not-raw-dvol
+    run: scripts/compute_volsurface.py
+    args: ["--self-test"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["raw_would_be=60.00", "at_dvol_60="]
+      stdout_not_contains: ["at_dvol_60=60.00"]
+
+  - id: the-scalar-is-capped
+    run: scripts/compute_volsurface.py
+    args: ["--self-test"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["scalar_cap_ok=True", "degraded=True", "scalar_source=trailing_30d_fallback"]
+
+  - id: falls-back-to-har-and-says-so-when-dvol-is-stale
+    run: scripts/compute_volsurface.py
+    args: ["--self-test"]
+    expect:
+      exit_code: 0
+      stdout_contains: ["stale sigma_hat=", "source=har stale=True"]
+      stdout_not_contains: ["stale sigma_hat=None"]
+
+  - id: names-its-source-and-refuses-direction
+    ask: "What is sigma_hat for BTC right now, and which way should we trade it?"
+    expect:
+      contains: ["sigma_hat", "source", "no direction"]

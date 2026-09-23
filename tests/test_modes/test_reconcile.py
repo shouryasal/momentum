@@ -259,3 +259,98 @@ class TestJob:
     def test_candle_prices(self, world):
         cfg, _root, _jdb, kdb = world
         assert reconcile_job.candle_prices(kdb, cfg) == {"BTC": 60000.0, "ETH": 3000.0}
+
+
+def _completed(jdb, sleeve, baseline):
+    """A completed LIVE transition carrying that sleeve's own opening balances."""
+    db.write(
+        jdb,
+        "INSERT INTO mode_transitions(sleeve, from_state, to_state, started_utc, status,"
+        " actor, preflight_json) VALUES (?,?,?,?,'completed',?,?)",
+        (sleeve, "TEST", "LIVE_EXECUTE", "2026-10-27T05:00:00Z", "human:cli",
+         json.dumps({"baseline": baseline})),
+    )
+
+
+class TestBaseline:
+    """``baseline_for`` had no sleeve predicate, so the newest completed transition won
+    whichever sleeve it belonged to — one sleeve's opening balances were subtracted from
+    the other's exchange snapshot and a genuine divergence was reported OK."""
+
+    def test_the_baseline_is_the_sleeves_own(self, cfg, state_root, jdb):
+        _completed(jdb, "a", {"BTC": 0.5})
+        _completed(jdb, "b", {"BTC": 0.01})       # newest row, the other sleeve
+        assert reconcile_job.baseline_for(jdb, "live-a-1", "a") == {"BTC": 0.5}
+        assert reconcile_job.baseline_for(jdb, "live-b-1", "b") == {"BTC": 0.01}
+
+    def test_a_sleeve_with_no_live_transition_has_no_baseline(self, cfg, state_root, jdb):
+        _completed(jdb, "a", {"BTC": 0.5})
+        assert reconcile_job.baseline_for(jdb, "live-b-1", "b") == {}
+
+    def test_no_run_id_means_no_baseline(self, cfg, state_root, jdb):
+        _completed(jdb, "b", {"BTC": 0.01})
+        assert reconcile_job.baseline_for(jdb, None, "b") == {}
+
+
+class TestModeAuthority:
+    """This job holds BINANCE_KEY_A/B but not EARN_CONSOLE_SECRET, so ``mode_state.load()``
+    always said TEST here: a live sleeve was reconciled against the *bot's own numbers*
+    with no baseline, and the only independent check on real money never ran."""
+
+    @pytest.fixture
+    def live_world(self, cfg, state_root, jdb, kdb, monkeypatch):
+        from ops.lib import signing
+
+        seed_run(jdb, cfg, run_id="live-b-1", sleeve="b", mode="live", submode="execute")
+        _completed(jdb, "b", {"BTC": 0.02})
+        monkeypatch.delenv(signing.SECRET_ENV, raising=False)   # as envwrap leaves it
+        return cfg, state_root, jdb, kdb
+
+    def test_a_live_run_is_reconciled_against_the_exchange(self, live_world):
+        cfg, state_root, jdb, kdb = live_world
+        seen: list[tuple[str, bool]] = []
+
+        def balances(sleeve, live):
+            seen.append((sleeve, live))
+            return {"USDT": 10000.0}
+
+        results = reconcile_job.run(cfg, jdb, kdb, balances=balances, sleeves=("b",),
+                                    root=state_root, now=NOW)
+        assert seen == [("b", True)]
+        assert [r.sleeve for r in results] == ["b"]
+        row = jdb.execute("SELECT exchange_json FROM reconciliations"
+                          " ORDER BY id DESC LIMIT 1").fetchone()
+        assert json.loads(row["exchange_json"])["source"] == "binance"
+
+    def test_the_live_run_gets_its_own_preflight_baseline(self, live_world):
+        cfg, state_root, jdb, kdb = live_world
+        captured: dict = {}
+        real = reconcile_job.reconcile_sleeve
+
+        def spy(*args, **kwargs):
+            captured["baseline"] = kwargs.get("baseline")
+            return real(*args, **kwargs)
+
+        import runs.reconcile_job as mod
+
+        orig, mod.reconcile_sleeve = mod.reconcile_sleeve, spy
+        try:
+            reconcile_job.run(cfg, jdb, kdb, balances=lambda s, live: {"USDT": 10000.0},
+                              sleeves=("b",), root=state_root, now=NOW)
+        finally:
+            mod.reconcile_sleeve = orig
+        assert captured["baseline"] == {"BTC": 0.02}
+
+    def test_a_provably_test_run_still_uses_the_bot(self, cfg, state_root, jdb, kdb,
+                                                    monkeypatch):
+        from ops.lib import signing
+
+        seed_run(jdb, cfg, run_id="test-b-1", sleeve="b", mode="test")
+        monkeypatch.delenv(signing.SECRET_ENV, raising=False)
+        seen: list[tuple[str, bool]] = []
+        reconcile_job.run(
+            cfg, jdb, kdb,
+            balances=lambda s, live: (seen.append((s, live)) or {"USDT": 10000.0}),
+            sleeves=("b",), root=state_root, now=NOW,
+        )
+        assert seen == [("b", False)]

@@ -98,9 +98,14 @@ function client(overrides: Record<string, { status?: number; body?: unknown }> =
         body: {
           sleeve: 'a',
           nav: 9500,
+          nav_valid: true,
+          nav_source: 'bot',
+          free_usdt: 3325,
+          positions: { 'BTC/USDT': 6175 },
+          nav_derived: ['turnover_day', 'fee_budget', 'gross_cap', 'usdt_floor'],
           meters: {
-            orders_per_day: { used: 3, limit: 12, headroom: 9, pct: 0.25 },
-            usdt_floor: { used: 0.35, limit: 0.2, headroom: 0.15, pct: 0.57 },
+            orders_per_day: { used: 3, limit: 12, headroom: 9, pct: 0.25, valid: true },
+            usdt_floor: { used: 0.35, limit: 0.2, headroom: 0.15, pct: 0.57, valid: true },
           },
         },
       },
@@ -135,6 +140,24 @@ describe('MeterBar', () => {
     expect(fmt(12, 'count')).toBe('12');
     expect(fmt(1234.5, 'usdt')).toBe('1234.50 USDT');
     expect(fmt(Number.NaN)).toBe('—');
+  });
+
+  /**
+   * With NAV unknown the gate's own arithmetic (`used / max(nav, 1e-9)`) turns a floor
+   * into `headroom = -usdt_floor`, which the bar drew as a red breach. "Unknown" is the
+   * only honest rendering, and it must not read as healthy either.
+   */
+  it('says unknown instead of drawing a number it does not have', () => {
+    renderWithProviders(
+      <MeterBar label="usdt_floor" floor
+        meter={{ used: 0, limit: 0.2, headroom: -0.2, pct: 1, valid: false }} />,
+    );
+    expect(screen.getByText('— / 20.0%')).toBeInTheDocument();
+    expect(screen.getByText(/unknown/)).toBeInTheDocument();
+    expect(screen.queryByText('above the floor by -20.0%')).toBeNull();
+    expect(screen.getByLabelText('usdt_floor utilisation')).toHaveAttribute(
+      'aria-valuenow', '0',
+    );
   });
 });
 
@@ -193,6 +216,65 @@ describe('RiskPage', () => {
     expect(await screen.findByTestId('meter-orders_per_day')).toBeInTheDocument();
     expect(await screen.findAllByText('order_notional')).toHaveLength(2);
     expect(screen.getByText('macro_blackout')).toBeInTheDocument();
+  });
+
+  it('asks the server for the portfolio instead of sending nav=0', async () => {
+    const seen: string[] = [];
+    const inner = fakeFetch({
+      '/api/risk': { body: OVERVIEW },
+      '/api/risk/a/utilisation': {
+        body: { sleeve: 'a', nav: 9500, nav_valid: true, nav_source: 'bot', free_usdt: 1,
+          positions: {}, nav_derived: [], meters: {} },
+      },
+      '/api/risk/gate-decisions': { body: { rows: [], counts: {}, checks: [] } },
+    });
+    const spy = new ApiClient({
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        seen.push(typeof input === 'string' ? input : input.toString());
+        return inner(input as RequestInfo, init);
+      }) as unknown as typeof fetch,
+    });
+    renderWithProviders(
+      <ApiProvider client={spy}>
+        <RiskPage />
+      </ApiProvider>,
+    );
+    await waitFor(() =>
+      expect(seen.some((u) => u.includes('/utilisation'))).toBe(true));
+    const call = seen.find((u) => u.includes('/utilisation')) ?? '';
+    // `nav=0&free_usdt=0` is what made every NAV-derived meter structurally wrong.
+    expect(call).not.toContain('nav=');
+    expect(call).not.toContain('free_usdt=');
+    expect(await screen.findByTestId('risk-nav')).toHaveTextContent('NAV 9500.00 USDT (bot)');
+  });
+
+  it('reports NAV as unknown rather than 0 when nothing could be read', async () => {
+    const blind = new ApiClient({
+      fetchImpl: fakeFetch({
+        '/api/risk': { body: { ...OVERVIEW, navs: {} } },
+        '/api/risk/a/utilisation': {
+          body: {
+            sleeve: 'a', nav: 0, nav_valid: false, nav_source: 'unavailable', free_usdt: 0,
+            positions: {}, nav_derived: ['usdt_floor', 'gross_cap'],
+            meters: {
+              gross_cap: { used: 0, limit: 0.95, headroom: 0.95, pct: 0, valid: false },
+              usdt_floor: { used: 0, limit: 0.2, headroom: -0.2, pct: 1, valid: false },
+            },
+          },
+        },
+        '/api/risk/gate-decisions': { body: { rows: [], counts: {}, checks: [] } },
+      }),
+    });
+    renderWithProviders(
+      <ApiProvider client={blind}>
+        <RiskPage />
+      </ApiProvider>,
+    );
+    expect(await screen.findByTestId('risk-nav')).toHaveTextContent('NAV unknown');
+    expect(await screen.findByTestId('nav-unknown')).toBeInTheDocument();
+    // and the stop-proximity bars must not claim 0% of the drawdown is used
+    expect(await screen.findByTestId('meter-daily stop')).toHaveTextContent('unknown');
+    expect(screen.getByTestId('meter-usdt_floor')).toHaveTextContent('unknown');
   });
 
   it('surfaces a failed load instead of rendering an empty page', async () => {

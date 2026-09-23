@@ -132,7 +132,9 @@ def knowledge_db(cfg: EarnConfig | None = None) -> Path:
 def _open_ro(path: Path) -> Iterator[sqlite3.Connection]:
     if not path.exists():
         raise http_error(503, "unavailable", f"database not initialised: {path.name}")
-    conn = db.connect(path, readonly=True)
+    # same_thread=False: FastAPI opens this dependency on one threadpool thread and runs
+    # the endpoint that uses it on another, which SQLite's default check rejects.
+    conn = db.connect(path, readonly=True, same_thread=False)
     try:
         yield conn
     finally:

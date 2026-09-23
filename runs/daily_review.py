@@ -59,20 +59,10 @@ from runs.review_run import (
 LINK_RE = re.compile(r"https?://[^\s)\]>\"']+")
 
 #: Explicit script paths instead of ``Bash(python3 *)`` / ``Bash(bash *)`` (spec §10).
-DAILY_BASH_ALLOWLIST = [
-    "Bash(git add *)",
-    "Bash(git commit *)",
-    "Bash(git diff *)",
-    "Bash(git status *)",
-    "Bash(git log *)",
-    "Bash(git rev-parse *)",
-    "Bash(python3 .claude/skills/post-mortem/scripts/*)",
-    "Bash(python3 .claude/skills/strategy-lab/scripts/*)",
-    "Bash(python3 .claude/skills/asset-dossier/scripts/*)",
-    "Bash(python3 .claude/skills/skill-smith/scripts/*)",
-    "Bash(python3 -m evals.skill_lint *)",
-    "Bash(pytest .claude/skills/*)",
-]
+#: One list, shared with the weekly review — see
+#: ``runs.decision_core.AUTOMATED_BASH_ALLOWLIST`` for why ``Bash(pytest ...)`` is not
+#: in it any more.
+DAILY_BASH_ALLOWLIST = list(decision_core.AUTOMATED_BASH_ALLOWLIST)
 
 
 class DailyReview:

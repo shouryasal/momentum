@@ -88,8 +88,17 @@ def test_bot_config_content(cfg):
         assert bc["dry_run"] is True               # committed file is ALWAYS dry-run
         assert bc["dry_run_wallet"] == cfg.modes.test.seed_usdt[sleeve]
         assert bc["timeframe"] == cfg.trading.timeframe
-        assert bc["telegram"] == {"enabled": False}
-        assert bc["exchange"]["pair_whitelist"] == ["BTC/USDT", "ETH/USDT"]
+        # An optional block is disabled by ABSENCE: freqtrade's CONF_SCHEMA requires
+        # [enabled, token, chat_id] whenever "telegram" exists, so {"enabled": false}
+        # put both bots in a restart loop. Same for the "" jwt_secret_key (minLength 32).
+        assert "telegram" not in bc
+        assert "jwt_secret_key" not in bc["api_server"]
+        # The whitelist IS the universe snapshot's tradeable tier, core first. Live and
+        # backtest read one artefact because every dynamic freqtrade pairlist is
+        # SupportsBacktesting.NO (wide-universe.md §5.3).
+        assert bc["exchange"]["pair_whitelist"] == list(cfg.universe.pairs)
+        assert bc["exchange"]["pair_whitelist"][:2] == ["BTC/USDT", "ETH/USDT"]
+        assert bc["pairlists"] == [{"method": "StaticPairList"}]
         assert bc["exchange"]["key"] == "" and bc["exchange"]["secret"] == ""
         assert "order_types" not in bc  # config order_types would clobber the strategy's dict
         assert bc["unfilledtimeout"]["entry"] == cfg.execution.entry_unfilled_timeout_min
@@ -97,7 +106,9 @@ def test_bot_config_content(cfg):
         assert bc["api_server"]["username"] == "earn"
         assert bc["api_server"]["password"] == ""  # env-injected, never in JSON
         assert bc["bot_name"] == f"earn-{sleeve}"
-        assert bc["max_open_trades"] == 2
+        # Concurrency is a RISK limit, not len(whitelist): under a wide universe the old
+        # expression silently became "as many positions as there are tradeable pairs".
+        assert bc["max_open_trades"] == cfg.risk.max_open_positions == 8
         assert bc["stake_amount"] == "unlimited"
 
 

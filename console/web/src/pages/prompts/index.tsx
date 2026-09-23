@@ -355,8 +355,10 @@ export default function PromptsPage() {
             without a restart.
           </Text>
         }
-        onConfirm={() => {
-          if (activating) activate.mutate(activating);
+        onConfirm={async () => {
+          // `await` matters: the dialog reports the failure and stays open, and — since
+          // it performs the step-up itself — the PUT now goes out inside the window.
+          if (activating) await activate.mutateAsync(activating);
           setActivating(null);
         }}
       />

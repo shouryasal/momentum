@@ -1,4 +1,5 @@
 import { screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 
 import { ApiClient } from '@/api';
@@ -84,7 +85,12 @@ describe('WalletPanel', () => {
   it('shows reserved USDT separately so ledger NAV is explainable', () => {
     renderWithProviders(<WalletPanel wallet={WALLET} />);
     expect(screen.getByText('3500.00 USDT')).toBeInTheDocument();
-    expect(screen.getByText('reconciled')).toBeInTheDocument();
+    expect(screen.getByText('books agree with the exchange')).toBeInTheDocument();
+  });
+
+  it('says so plainly instead of throwing when no money has been recorded yet', () => {
+    renderWithProviders(<WalletPanel wallet={null} />);
+    expect(screen.getByText(/Nothing has been recorded for this bot yet/)).toBeInTheDocument();
   });
 
   it('raises the alarm when the ledger and the exchange disagree', () => {
@@ -109,15 +115,17 @@ describe('slippage', () => {
 });
 
 describe('FillsTable', () => {
-  it('renders the fee and the slippage', () => {
+  it('renders the fee, and the price difference as a percentage with what it means', () => {
     renderWithProviders(<FillsTable rows={[FILL]} />);
     expect(screen.getByText('0.5 USDT')).toBeInTheDocument();
-    expect(screen.getByText('10.0')).toBeInTheDocument();
+    // 10 bps, said the way an operator reads it rather than as a bare "10.0".
+    expect(screen.getByText('+0.100%')).toBeInTheDocument();
+    expect(screen.getByText('worse than planned')).toBeInTheDocument();
   });
 });
 
 describe('PortfolioPage', () => {
-  it('loads the selected sleeve', async () => {
+  it('loads the selected bot', async () => {
     const client = new ApiClient({
       fetchImpl: fakeFetch({ '/api/portfolio/a': { body: PAYLOAD } }),
     });
@@ -126,9 +134,12 @@ describe('PortfolioPage', () => {
         <PortfolioPage />
       </ApiProvider>,
     );
-    expect(await screen.findByText('Portfolio')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText('bot up')).toBeInTheDocument());
+    expect(await screen.findByText('Trading')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('bot running')).toBeInTheDocument());
     expect(screen.getByText('ledger NAV')).toBeInTheDocument();
+    // The bots are named, not lettered.
+    expect(screen.getByRole('tab', { name: 'Rules bot (no AI)' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'AI bot (Claude)' })).toBeInTheDocument();
   });
 
   it('keeps rendering when the bot is down', async () => {
@@ -142,7 +153,46 @@ describe('PortfolioPage', () => {
         <PortfolioPage />
       </ApiProvider>,
     );
-    await waitFor(() => expect(screen.getByText('bot down')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('bot not running')).toBeInTheDocument());
     expect(screen.getByText('No open positions')).toBeInTheDocument();
+  });
+
+  it('opens the story behind a position in the detail pane, and closes it again', async () => {
+    const user = userEvent.setup();
+    const client = new ApiClient({
+      fetchImpl: fakeFetch({ '/api/portfolio/a': { body: PAYLOAD } }),
+    });
+    renderWithProviders(
+      <ApiProvider client={client}>
+        <PortfolioPage />
+      </ApiProvider>,
+    );
+    await screen.findByText('Trading');
+    expect(screen.getByTestId('master-detail')).toHaveAttribute('data-detail-open', 'false');
+
+    // The positions table is the first card, so its cell is the first match.
+    await user.click(screen.getAllByText('BTC/USDT')[0] as HTMLElement);
+    const pane = await screen.findByTestId('detail-pane');
+    expect(pane).toBeInTheDocument();
+    expect(screen.getByTestId('detail-pane-subtitle')).toHaveTextContent('where it sells out');
+    expect(screen.getByTestId('detail-pane-raw-id')).toHaveTextContent('position BTC/USDT');
+    expect(screen.getByTestId('master-detail')).toHaveAttribute('data-detail-open', 'true');
+
+    await user.click(screen.getByTestId('detail-pane-close'));
+    await waitFor(() => expect(screen.queryByTestId('detail-pane')).not.toBeInTheDocument());
+  });
+
+  it('restores the open row from the URL', async () => {
+    const client = new ApiClient({
+      fetchImpl: fakeFetch({ '/api/portfolio/a': { body: PAYLOAD } }),
+    });
+    renderWithProviders(
+      <ApiProvider client={client}>
+        <PortfolioPage />
+      </ApiProvider>,
+      { route: '/portfolio?detail=position:BTC%2FUSDT' },
+    );
+    expect(await screen.findByTestId('detail-pane')).toBeInTheDocument();
+    expect(screen.getByTestId('detail-pane-raw-id')).toHaveTextContent('position BTC/USDT');
   });
 });

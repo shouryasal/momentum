@@ -1,29 +1,36 @@
 /**
- * Secrets (spec 12, page 19).
+ * Models & Sign-in (spec 12, page 19 — still `/secrets`).
  *
  * The page is built around the same asymmetry as the API: a field can be written but
  * never read. Every input is empty on every render — there is no "current value" to
- * pre-fill, because the console does not have one — and each row shows only whether a
- * secret is present, its last four characters, when it changed and which jobs receive it
- * through `ops/envwrap.sh`.
+ * pre-fill, because the console does not have one — and a credential is only ever
+ * reported as present or absent.
  *
- * The auth-mode selector sits at the top because it is the one setting that changes which
- * credential every model job gets; it writes `models.yaml` and `.env` together, so the
- * warning next to it is about billing, not about the UI.
+ * What changed, and why: the owner said this page *"has too much content"*. Adding a key
+ * meant reading a fourteen-row table with raw variable names, an auth-mode radio group, a
+ * strip of probe buttons and two paragraphs about unattended runs and billing. So the
+ * page is now three things — sign in to Claude, add your exchange keys, and one line about
+ * the local model — and everything else lives under **Advanced**, one click down the same
+ * page. Nothing became unreachable: the same table, the same auth-mode radio, the same
+ * probes, the same warnings, all still here, all still behind `ConfirmDialog` with
+ * `requireStepUp`.
  */
 import {
   Alert, Badge, Button, Card, Code, Group, Loader, PasswordInput, Radio, Stack, Table,
-  Text, Textarea, Title, Tooltip,
+  Text, Textarea, Title, Tooltip, UnstyledButton,
 } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconAlertTriangle, IconKey, IconPlugConnected, IconTrash } from '@tabler/icons-react';
-import { useMemo, useState } from 'react';
+import {
+  IconAlertTriangle, IconChevronDown, IconChevronRight, IconKey, IconPlugConnected, IconTrash,
+} from '@tabler/icons-react';
+import { useCallback, useMemo, useState } from 'react';
 
 import { errorMessage } from '@/api';
 import { useApi } from '@/app/ApiContext';
 import { usePageCommands } from '@/app/commandRegistry';
+import { useTopicEvents } from '@/app/EventStreamContext';
 import { useSession } from '@/app/SessionContext';
-import { ConfirmDialog, EmptyState } from '@/components';
+import { ConfirmDialog, EmptyState, PageIntro } from '@/components';
 
 import {
   secretKeys,
@@ -34,6 +41,10 @@ import {
   type TestTarget,
   type TestVerdict,
 } from './api';
+import { ClaudeAccessCard, ClaudeSourcesTable } from './components/ClaudeAccessCard';
+import { ClaudeSignInModal } from './components/ClaudeSignInModal';
+import { ExchangeKeysCard, type KeyPair } from './components/ExchangeKeysCard';
+import { LocalModelCard } from './components/LocalModelCard';
 
 const AUTH_HELP: Record<AuthMode, string> = {
   subscription:
@@ -56,25 +67,61 @@ export function SecretsPage() {
   const client = useApi();
   const api = useMemo(() => secretsApi(client), [client]);
   const queryClient = useQueryClient();
-  const { stepUpActive, stepUp } = useSession();
+  const { stepUpActive } = useSession();
 
-  /** Re-authenticate first when the step-up window has lapsed, then do the write. */
-  const withStepUp = async (token: string | undefined, run: () => Promise<unknown>) => {
-    if (!stepUpActive && token) await stepUp(token);
+  /**
+   * Do the write. `ConfirmDialog` has already opened the step-up window for us — it calls
+   * `session.stepUp` itself before `onConfirm`, so re-sending the token here would only
+   * double the `POST /api/auth/step-up`. The token stays in the signature because the
+   * dialog still hands it over and a caller may need to re-present it.
+   */
+  const withStepUp = async (_token: string | undefined, run: () => Promise<unknown>) => {
     await run();
   };
 
   const [editing, setEditing] = useState<SecretRow | null>(null);
   const [draft, setDraft] = useState('');
+  const [pair, setPair] = useState<KeyPair | null>(null);
+  const [pairKey, setPairKey] = useState('');
+  const [pairSecret, setPairSecret] = useState('');
   const [deleting, setDeleting] = useState<SecretRow | null>(null);
   const [pendingMode, setPendingMode] = useState<AuthMode | null>(null);
   const [modeReason, setModeReason] = useState('');
   const [confirmMode, setConfirmMode] = useState(false);
   const [verdicts, setVerdicts] = useState<Record<string, TestVerdict>>({});
   const [error, setError] = useState<string | null>(null);
+  const [signInOpen, setSignInOpen] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
 
   const list = useQuery({ queryKey: secretKeys.list, queryFn: api.list });
   const invalidate = () => queryClient.invalidateQueries({ queryKey: secretKeys.list });
+
+  /**
+   * The sign-in status. Polled once a second *only* while a session is live — the flow is
+   * a supervised process, not a row, so there is nothing else to watch it with; the SSE
+   * topic below makes the poll a backstop rather than the mechanism.
+   */
+  const signIn = useQuery({
+    queryKey: secretKeys.signIn,
+    queryFn: api.signInStatus,
+    refetchInterval: (query) => {
+      const session = query.state.data?.session;
+      return session && !session.terminal ? 1000 : false;
+    },
+  });
+
+  const localModel = useQuery({
+    queryKey: secretKeys.localModel,
+    queryFn: api.localModel,
+    refetchInterval: (query) => (query.state.data?.state === 'pulling' ? 2000 : 30_000),
+  });
+
+  const refreshSignIn = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: secretKeys.signIn });
+    void queryClient.invalidateQueries({ queryKey: secretKeys.list });
+  }, [queryClient]);
+
+  useTopicEvents(['claude_auth'], refreshSignIn);
 
   const save = useMutation({
     mutationFn: ({ name, value }: { name: string; value: string }) =>
@@ -82,6 +129,22 @@ export function SecretsPage() {
     onSuccess: () => {
       setEditing(null);
       setDraft('');
+      setError(null);
+      invalidate();
+    },
+    onError: (e: unknown) => setError(errorMessage(e)),
+  });
+
+  /** A key and its secret are one thing to the operator, so they are saved together. */
+  const savePair = useMutation({
+    mutationFn: async ({ target, key, secret }: { target: KeyPair; key: string; secret: string }) => {
+      await api.setSecret(target.keyName, key);
+      await api.setSecret(target.secretName, secret);
+    },
+    onSuccess: () => {
+      setPair(null);
+      setPairKey('');
+      setPairSecret('');
       setError(null);
       invalidate();
     },
@@ -119,6 +182,25 @@ export function SecretsPage() {
 
   usePageCommands('secrets', [
     {
+      id: 'claude-signin',
+      title: 'Sign in to Claude',
+      subtitle: 'Runs `claude setup-token` for you and stores the result',
+      keywords: ['oauth', 'token', 'login', 'subscription'],
+      run: (ctx) => {
+        setSignInOpen(true);
+        ctx.close();
+      },
+    },
+    {
+      id: 'advanced',
+      title: 'Show the advanced credentials',
+      subtitle: 'The full credential table, the auth mode and the connection probes',
+      run: (ctx) => {
+        setAdvanced(true);
+        ctx.close();
+      },
+    },
+    {
       id: 'test-telegram',
       title: 'Test the Telegram credential',
       keywords: ['probe', 'alerts'],
@@ -129,7 +211,7 @@ export function SecretsPage() {
     },
     {
       id: 'test-binance-a',
-      title: 'Test the Binance credential for sleeve A',
+      title: 'Test the Binance key for the Rules bot',
       subtitle: 'Permission probe; the key itself never leaves the host',
       run: (ctx) => {
         test.mutate('binance_a');
@@ -138,7 +220,7 @@ export function SecretsPage() {
     },
     {
       id: 'refresh',
-      title: 'Refresh the secret presence table',
+      title: 'Refresh the credential list',
       run: (ctx) => {
         void list.refetch();
         ctx.close();
@@ -157,209 +239,261 @@ export function SecretsPage() {
 
   return (
     <Stack gap="md">
-      <div>
-        <Title order={3}>Secrets</Title>
-        <Text size="sm" c="dimmed">
-          Write-only. The console can set a credential and prove it works; it can never
-          show you one.
-        </Text>
-      </div>
+      <PageIntro
+        title="Models & Sign-in"
+        blurb="Sign in to Claude, add your exchange keys, and check the local model is there."
+      />
 
       {error ? <Alert color="red" onClose={() => setError(null)} withCloseButton>{error}</Alert> : null}
 
+      {/* This one stays on the front page even though it is technical: the two files
+          disagreeing about which credential to use is how a subscription run quietly
+          becomes a metered one, and that is money. */}
       {auth && !auth.in_sync ? (
         <Alert color="orange" icon={<IconAlertTriangle size={18} />} title="Auth mode is out of step">
           <Code>models.yaml</Code> says <b>{auth.configured}</b> but <Code>.env</Code> says{' '}
-          <b>{auth.env ?? 'nothing'}</b>. Jobs follow <Code>.env</Code> — re-save the mode
-          below to bring them back together.
+          <b>{auth.env ?? 'nothing'}</b>. Jobs follow <Code>.env</Code> — re-save the mode under
+          Advanced to bring them back together.
         </Alert>
       ) : null}
 
-      <Card withBorder padding="md" radius="md">
-        <Group justify="space-between" mb="sm">
-          <Title order={5}>Claude authentication</Title>
-          <Badge variant="light">effective: {auth?.effective ?? '—'}</Badge>
-        </Group>
-        <Radio.Group
-          value={pendingMode ?? auth?.effective ?? 'subscription'}
-          onChange={(value) => setPendingMode(value as AuthMode)}
-        >
-          <Stack gap="sm">
-            {(['subscription', 'api_key', 'auto'] as AuthMode[]).map((mode) => (
-              <Radio
-                key={mode}
-                value={mode}
-                label={mode}
-                description={AUTH_HELP[mode]}
-              />
-            ))}
-          </Stack>
-        </Radio.Group>
+      {/* 1. Claude: signed in, what it costs, one button. */}
+      <ClaudeAccessCard
+        compact
+        auth={auth}
+        signIn={signIn.data}
+        secrets={list.data?.secrets ?? []}
+        onSignIn={() => setSignInOpen(true)}
+        onTest={(target) => test.mutate(target)}
+        testing={test.isPending ? (test.variables as TestTarget) : null}
+        verdicts={verdicts}
+      />
 
-        {pendingMode && pendingMode !== auth?.effective ? (
-          <Stack gap="xs" mt="md">
-            {pendingMode !== 'subscription' ? (
-              <Alert color="yellow" variant="light" icon={<IconAlertTriangle size={16} />}>
-                This mode can spend money. Metered API usage is billed per token and is
-                bounded only by <Code>auth.api_key_monthly_cap_usd</Code>.
-              </Alert>
-            ) : null}
-            <Textarea
-              label="reason (goes into config_audit)"
-              autosize
-              minRows={2}
-              value={modeReason}
-              onChange={(event) => setModeReason(event.currentTarget.value)}
-            />
-            <Group>
-              <Button loading={setMode.isPending} onClick={() => setConfirmMode(true)}>
-                Save auth mode (step-up)
-              </Button>
-              <Button variant="subtle" onClick={() => setPendingMode(null)}>Cancel</Button>
-            </Group>
-          </Stack>
-        ) : null}
+      {/* 2. The exchange keys: added, or a button to add them. */}
+      <ExchangeKeysCard
+        secrets={list.data?.secrets ?? []}
+        onAdd={(target) => {
+          setPair(target);
+          setPairKey('');
+          setPairSecret('');
+        }}
+      />
 
-        <Stack gap={4} mt="md">
-          <Text size="xs" c="dimmed">
-            Subscription source: <Code>{auth?.subscription_source ?? 'token'}</Code>.{' '}
-            {auth?.subscription_source === 'token'
-              ? 'Run `claude setup-token` on this machine and paste the token into ' +
-                'CLAUDE_CODE_OAUTH_TOKEN below.'
-              : 'The CLI uses its own ~/.claude/.credentials.json.'}
-          </Text>
-          <Text size="xs" c={auth?.login_session.present ? 'dimmed' : 'orange'}>
-            CLI login session:{' '}
-            {auth?.login_session.present
-              ? `present${auth.login_session.expired ? ' but EXPIRED' : ''}` +
-                (auth.login_session.expires_at ? ` (until ${auth.login_session.expires_at})` : '')
-              : 'not found at ~/.claude/.credentials.json'}
-          </Text>
-          <Group gap="xs" mt={4}>
-            {(['claude_subscription', 'claude_login', 'claude_api_key', 'ollama'] as TestTarget[])
-              .map((target) => (
-                <Button
-                  key={target}
-                  size="compact-xs"
-                  variant="light"
-                  leftSection={<IconPlugConnected size={12} />}
-                  loading={test.isPending && test.variables === target}
-                  onClick={() => test.mutate(target)}
-                >
-                  {target}
-                </Button>
-              ))}
-          </Group>
-          {(['claude_subscription', 'claude_login', 'claude_api_key', 'ollama'] as TestTarget[])
-            .filter((target) => verdicts[target])
-            .map((target) => (
-              <Text key={target} size="xs" c={verdicts[target]?.ok ? 'teal' : 'red'}>
-                {target}: {verdicts[target]?.detail}
-              </Text>
-            ))}
-        </Stack>
-      </Card>
+      {/* 3. The local model: one line, read-only. */}
+      <LocalModelCard status={localModel.data} loading={localModel.isLoading} detailed={advanced} />
+
+      <ClaudeSignInModal
+        opened={signInOpen}
+        onClose={() => setSignInOpen(false)}
+        api={api}
+        status={signIn.data}
+        onChanged={refreshSignIn}
+      />
 
       {list.isLoading ? <Loader size="sm" /> : null}
-      {!list.isLoading && byGroup.size === 0 ? (
-        <EmptyState
-          title="No secrets declared"
-          description="The rows come from the declared credential list; a missing one shows as absent, not as nothing."
-        />
-      ) : null}
 
-      {[...byGroup.entries()].map(([group, rows]) => (
-        <Card key={group} withBorder padding="md" radius="md">
-          <Title order={5} mb="sm">{groupLabel(group)}</Title>
-          <Table.ScrollContainer minWidth={780}>
-            <Table data-testid={`secrets-${group}`}>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>secret</Table.Th>
-                  <Table.Th>present</Table.Th>
-                  <Table.Th>last4</Table.Th>
-                  <Table.Th>updated</Table.Th>
-                  <Table.Th>used by</Table.Th>
-                  <Table.Th />
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {rows.map((row) => {
-                  const target = TARGET_FOR_SECRET[row.name];
-                  const verdict = target ? verdicts[target] : undefined;
-                  return (
-                    <Table.Tr key={row.name}>
-                      <Table.Td>
-                        <Tooltip label={row.help || row.label} multiline w={360} withArrow>
-                          <div>
-                            <Code>{row.name}</Code>
-                            <Text size="xs" c="dimmed">{row.label}</Text>
-                          </div>
-                        </Tooltip>
-                      </Table.Td>
-                      <Table.Td>
-                        {row.present ? (
-                          <Badge color="teal" variant="light">set</Badge>
-                        ) : (
-                          <Badge color={row.required ? 'red' : 'gray'} variant="outline">
-                            {row.required ? 'required' : 'empty'}
-                          </Badge>
-                        )}
-                      </Table.Td>
-                      <Table.Td><Code>{row.last4 ? `…${row.last4}` : '—'}</Code></Table.Td>
-                      <Table.Td>
-                        <Text size="xs" c="dimmed">{row.updated_at ?? '—'}</Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="xs" c="dimmed">{row.used_by.join(', ') || '—'}</Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Group gap={4} justify="flex-end" wrap="nowrap">
-                          <Button
-                            size="compact-xs"
-                            variant="light"
-                            leftSection={<IconKey size={12} />}
-                            onClick={() => {
-                              setEditing(row);
-                              setDraft('');
-                            }}
-                          >
-                            Set
-                          </Button>
-                          {target ? (
-                            <Button
-                              size="compact-xs"
-                              variant="subtle"
-                              loading={test.isPending && test.variables === target}
-                              onClick={() => test.mutate(target)}
-                            >
-                              Test
-                            </Button>
-                          ) : null}
-                          <Button
-                            size="compact-xs"
-                            variant="subtle"
-                            color="red"
-                            disabled={!row.present}
-                            onClick={() => setDeleting(row)}
-                          >
-                            <IconTrash size={12} />
-                          </Button>
-                        </Group>
-                        {verdict ? (
-                          <Text size="xs" c={verdict.ok ? 'teal' : 'red'} ta="right">
-                            {verdict.detail}
-                          </Text>
-                        ) : null}
-                      </Table.Td>
+      {/* Everything else, one click down. */}
+      <UnstyledButton onClick={() => setAdvanced((open) => !open)} data-testid="secrets-advanced-toggle">
+        <Group gap={6}>
+          {advanced ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
+          <Text size="sm" fw={600}>
+            Advanced
+          </Text>
+          <Text size="xs" c="dimmed">
+            every credential, which one is in effect, and the connection tests
+          </Text>
+        </Group>
+      </UnstyledButton>
+
+      {advanced ? (
+        <Stack gap="md" data-testid="secrets-advanced">
+          <Card withBorder padding="md" radius="md" data-testid="auth-mode-card">
+            <Group justify="space-between" mb="sm">
+              <Title order={5}>Claude auth mode</Title>
+              <Badge variant="light">effective: {auth?.effective ?? '—'}</Badge>
+            </Group>
+            <Text size="xs" c="dimmed" mb="sm">
+              Which credential <Code>ops/envwrap.sh</Code> hands to every model job. Changing
+              it writes <Code>models.yaml</Code> and <Code>.env</Code> together.
+            </Text>
+            <Radio.Group
+              value={pendingMode ?? auth?.effective ?? 'subscription'}
+              onChange={(value) => setPendingMode(value as AuthMode)}
+            >
+              <Stack gap="sm">
+                {(['subscription', 'api_key', 'auto'] as AuthMode[]).map((mode) => (
+                  <Radio key={mode} value={mode} label={mode} description={AUTH_HELP[mode]} />
+                ))}
+              </Stack>
+            </Radio.Group>
+
+            {pendingMode && pendingMode !== auth?.effective ? (
+              <Stack gap="xs" mt="md">
+                {pendingMode !== 'subscription' ? (
+                  <Alert color="yellow" variant="light" icon={<IconAlertTriangle size={16} />}>
+                    This mode can spend money. Metered API usage is billed per token and is
+                    bounded only by <Code>auth.api_key_monthly_cap_usd</Code>.
+                  </Alert>
+                ) : null}
+                <Textarea
+                  label="reason (goes into config_audit)"
+                  autosize
+                  minRows={2}
+                  value={modeReason}
+                  onChange={(event) => setModeReason(event.currentTarget.value)}
+                />
+                <Group>
+                  <Button loading={setMode.isPending} onClick={() => setConfirmMode(true)}>
+                    Save auth mode (step-up)
+                  </Button>
+                  <Button variant="subtle" onClick={() => setPendingMode(null)}>Cancel</Button>
+                </Group>
+              </Stack>
+            ) : null}
+
+            <ClaudeSourcesTable
+              auth={auth}
+              signIn={signIn.data}
+              secrets={list.data?.secrets ?? []}
+              onTest={(target) => test.mutate(target)}
+              testing={test.isPending ? (test.variables as TestTarget) : null}
+              verdicts={verdicts}
+            />
+
+            <Stack gap={4} mt="md">
+              <Text size="xs" c="dimmed">
+                Subscription source: <Code>{auth?.subscription_source ?? 'token'}</Code>.{' '}
+                {auth?.subscription_source === 'token'
+                  ? 'Model jobs are handed CLAUDE_CODE_OAUTH_TOKEN, which the sign-in above ' +
+                    'writes for you.'
+                  : 'The CLI uses its own ~/.claude/.credentials.json.'}
+              </Text>
+              <Group gap="xs" mt={4}>
+                {(['claude_subscription', 'claude_login', 'claude_api_key', 'ollama'] as TestTarget[])
+                  .map((target) => (
+                    <Button
+                      key={target}
+                      size="compact-xs"
+                      variant="light"
+                      leftSection={<IconPlugConnected size={12} />}
+                      loading={test.isPending && test.variables === target}
+                      onClick={() => test.mutate(target)}
+                    >
+                      {target}
+                    </Button>
+                  ))}
+              </Group>
+              {(['claude_subscription', 'claude_login', 'claude_api_key', 'ollama'] as TestTarget[])
+                .filter((target) => verdicts[target])
+                .map((target) => (
+                  <Text key={target} size="xs" c={verdicts[target]?.ok ? 'teal' : 'red'}>
+                    {target}: {verdicts[target]?.detail}
+                  </Text>
+                ))}
+            </Stack>
+          </Card>
+
+          {!list.isLoading && byGroup.size === 0 ? (
+            <EmptyState
+              title="No secrets declared"
+              description="The rows come from the declared credential list; a missing one shows as absent, not as nothing."
+            />
+          ) : null}
+
+          {[...byGroup.entries()].map(([group, rows]) => (
+            <Card key={group} withBorder padding="md" radius="md">
+              <Title order={5} mb="sm">{groupLabel(group)}</Title>
+              <Table.ScrollContainer minWidth={780}>
+                <Table data-testid={`secrets-${group}`}>
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>secret</Table.Th>
+                      <Table.Th>present</Table.Th>
+                      <Table.Th>last4</Table.Th>
+                      <Table.Th>updated</Table.Th>
+                      <Table.Th>used by</Table.Th>
+                      <Table.Th />
                     </Table.Tr>
-                  );
-                })}
-              </Table.Tbody>
-            </Table>
-          </Table.ScrollContainer>
-        </Card>
-      ))}
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {rows.map((row) => {
+                      const target = TARGET_FOR_SECRET[row.name];
+                      const verdict = target ? verdicts[target] : undefined;
+                      return (
+                        <Table.Tr key={row.name}>
+                          <Table.Td>
+                            <Tooltip label={row.help || row.label} multiline w={360} withArrow>
+                              <div>
+                                <Code>{row.name}</Code>
+                                <Text size="xs" c="dimmed">{row.label}</Text>
+                              </div>
+                            </Tooltip>
+                          </Table.Td>
+                          <Table.Td>
+                            {row.present ? (
+                              <Badge color="teal" variant="light">set</Badge>
+                            ) : (
+                              <Badge color={row.required ? 'red' : 'gray'} variant="outline">
+                                {row.required ? 'required' : 'empty'}
+                              </Badge>
+                            )}
+                          </Table.Td>
+                          <Table.Td><Code>{row.last4 ? `…${row.last4}` : '—'}</Code></Table.Td>
+                          <Table.Td>
+                            <Text size="xs" c="dimmed">{row.updated_at ?? '—'}</Text>
+                          </Table.Td>
+                          <Table.Td>
+                            <Text size="xs" c="dimmed">{row.used_by.join(', ') || '—'}</Text>
+                          </Table.Td>
+                          <Table.Td>
+                            <Group gap={4} justify="flex-end" wrap="nowrap">
+                              <Button
+                                size="compact-xs"
+                                variant="light"
+                                leftSection={<IconKey size={12} />}
+                                onClick={() => {
+                                  setEditing(row);
+                                  setDraft('');
+                                }}
+                              >
+                                Set
+                              </Button>
+                              {target ? (
+                                <Button
+                                  size="compact-xs"
+                                  variant="subtle"
+                                  loading={test.isPending && test.variables === target}
+                                  onClick={() => test.mutate(target)}
+                                >
+                                  Test
+                                </Button>
+                              ) : null}
+                              <Button
+                                size="compact-xs"
+                                variant="subtle"
+                                color="red"
+                                disabled={!row.present}
+                                onClick={() => setDeleting(row)}
+                              >
+                                <IconTrash size={12} />
+                              </Button>
+                            </Group>
+                            {verdict ? (
+                              <Text size="xs" c={verdict.ok ? 'teal' : 'red'} ta="right">
+                                {verdict.detail}
+                              </Text>
+                            ) : null}
+                          </Table.Td>
+                        </Table.Tr>
+                      );
+                    })}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+            </Card>
+          ))}
+        </Stack>
+      ) : null}
 
       <ConfirmDialog
         opened={confirmMode}
@@ -381,6 +515,46 @@ export function SecretsPage() {
           })
         }
       />
+
+      <ConfirmDialog
+        opened={pair != null}
+        onCancel={() => {
+          setPair(null);
+          setPairKey('');
+          setPairSecret('');
+        }}
+        title={pair ? pair.title : ''}
+        description={
+          'Give the key Reading and Spot trading permission only, with withdrawals disabled. ' +
+          'The console can store it and prove it works; it can never show it to you again.'
+        }
+        confirmLabel="Save"
+        requireStepUp
+        stepUpSatisfied={stepUpActive}
+        confirmDisabled={!pairKey.trim() || !pairSecret.trim()}
+        onConfirm={({ stepUpToken }) =>
+          withStepUp(stepUpToken, async () => {
+            if (pair) await savePair.mutateAsync({ target: pair, key: pairKey, secret: pairSecret });
+          })
+        }
+      >
+        <Stack gap="sm">
+          <PasswordInput
+            label="API key"
+            description="Write-only: this field is never pre-filled, and no route returns it."
+            value={pairKey}
+            onChange={(event) => setPairKey(event.currentTarget.value)}
+            autoComplete="off"
+            data-autofocus
+          />
+          <PasswordInput
+            label="API secret"
+            value={pairSecret}
+            onChange={(event) => setPairSecret(event.currentTarget.value)}
+            autoComplete="off"
+          />
+        </Stack>
+      </ConfirmDialog>
 
       <ConfirmDialog
         opened={editing != null}

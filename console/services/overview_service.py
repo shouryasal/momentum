@@ -22,7 +22,15 @@ from console.services import effects as effects_engine
 from console.services.config_service import get_cfg, journal
 from ops.lib import config_guard, paths
 
-__all__ = ["overview", "gulf_day_start_utc", "nav_series"]
+__all__ = [
+    "SEED_LABELS",
+    "SEED_SOURCES",
+    "demo_account",
+    "gulf_day_start_utc",
+    "marks",
+    "nav_series",
+    "overview",
+]
 
 _GULF = timezone(timedelta(hours=4))
 
@@ -158,46 +166,134 @@ def _nav_series(conn: sqlite3.Connection | None, *, days: int = 7) -> dict[str, 
     return {"since_utc": since, "series": series}
 
 
-def _exposure_panel(cfg: Any, nav_cards: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def _amount(value: Any) -> float | None:
+    """One ``positions_json`` entry as a base-unit amount, or ``None`` when it is not one.
+
+    ``runs/nav_tick.py`` (and ``runs/nav_job.py`` for ``nav_daily``) write
+    ``{"<BASE ASSET>": <amount held>}`` — *coins*, not money. A mapping entry is read only
+    through its explicit ``amount`` key; anything else is unclassifiable and is reported as
+    unknown rather than guessed at.
+    """
+    if isinstance(value, Mapping):
+        value = value.get("amount")
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def marks(cfg: Any, root: Path | None = None) -> dict[str, float]:
+    """Latest closed-candle close per base asset — the mark ``positions`` are valued at.
+
+    ``nav_points.positions_json`` holds amounts, so turning them into weights needs a
+    price, and the only prices this repo trusts are the ones code computed: the candle
+    table. An unreachable knowledge DB or a pair with no closed candle yields no mark, and
+    a position with no mark is reported as unknown, never as zero.
+    """
+    from ops import db as ops_db
+
+    out: dict[str, float] = {}
+    try:
+        path = Path(ops_db.knowledge_path(cfg, root))
+        if not path.exists():
+            return out
+        with ops_db.opened(path, readonly=True) as conn:
+            universe = getattr(cfg, "universe", None)
+            for pair in list(getattr(universe, "pairs", []) or []):
+                row = _one(
+                    conn,
+                    "SELECT close FROM candles WHERE pair=? AND is_closed=1"
+                    " ORDER BY close_time DESC LIMIT 1",
+                    (str(pair),),
+                )
+                close = row.get("close")
+                if close is None:
+                    continue
+                try:
+                    price = float(close)
+                except (TypeError, ValueError):
+                    continue
+                if price > 0:
+                    out[str(pair).split("/")[0].upper()] = price
+    except Exception:  # noqa: BLE001 - a missing knowledge DB must not blank the dashboard
+        return out
+    return out
+
+
+def _exposure_panel(cfg: Any, nav_cards: Sequence[Mapping[str, Any]],
+                    asset_marks: Mapping[str, float] | None = None) -> dict[str, Any]:
+    """Per-asset weights and gross exposure, with the amounts actually valued.
+
+    ``positions_json`` is base-unit **amounts**; this panel used to divide them by NAV as
+    if they were USDT, so 0.04 BTC on a 10 000 NAV sleeve rendered as a weight of
+    0.000004 and the gross bar sat at zero while the sleeve was fully invested. Amounts are
+    marked here, and gross is taken from ``nav - cash`` — money the ledger already
+    reconciled, so it is right even when a mark is missing. Anything that cannot be
+    computed is ``None`` (the page shows "unknown"), never 0.
+    """
     caps = dict(getattr(cfg.risk, "max_weight", {}) or {})
     gross_cap = float(getattr(cfg.risk, "max_gross_exposure", 1.0))
+    marks_by_asset = dict(asset_marks or {})
     out: list[dict[str, Any]] = []
     for card in nav_cards:
         if card["sleeve"] == "benchmark" or not card.get("nav_usdt"):
             continue
-        positions = card.get("positions") or {}
         nav = float(card["nav_usdt"])
-        weights: dict[str, float] = {}
+        positions = card.get("positions") or {}
+        assets: list[dict[str, Any]] = []
+        valued = 0.0
+        all_priced = True
         if isinstance(positions, Mapping):
-            for asset, pos in positions.items():
-                value = pos.get("value_usdt") if isinstance(pos, Mapping) else pos
-                try:
-                    weights[str(asset)] = round(float(value) / nav, 6) if nav else 0.0
-                except (TypeError, ValueError):
-                    continue
-        gross = round(sum(weights.values()), 6)
-        out.append(
-            {
-                "sleeve": card["sleeve"],
-                "gross": gross,
-                "gross_cap": gross_cap,
-                "gross_util": round(gross / gross_cap, 4) if gross_cap else None,
-                "assets": [
-                    {
-                        "asset": asset,
-                        "weight": weight,
-                        "cap": float(caps.get(asset, caps.get("default", 1.0))),
-                        "util": round(
-                            weight / float(caps.get(asset, caps.get("default", 1.0))), 4
-                        )
-                        if caps
-                        else None,
-                    }
-                    for asset, weight in sorted(weights.items())
-                ],
-            }
-        )
+            for asset, raw in sorted(positions.items(), key=lambda kv: str(kv[0])):
+                name = str(asset)
+                amount = _amount(raw)
+                mark = marks_by_asset.get(name.upper())
+                value = amount * mark if amount is not None and mark else None
+                if value is None:
+                    all_priced = False
+                else:
+                    valued += value
+                cap = float(caps.get(name, caps.get("default", 1.0)))
+                weight = round(value / nav, 6) if value is not None and nav else None
+                assets.append({
+                    "asset": name,
+                    "amount": amount,
+                    "mark_usdt": mark,
+                    "value_usdt": round(value, 6) if value is not None else None,
+                    "weight": weight,
+                    "cap": cap,
+                    "util": round(weight / cap, 4) if weight is not None and cap else None,
+                })
+        gross = _gross(nav, card.get("cash_usdt"), valued if all_priced else None)
+        out.append({
+            "sleeve": card["sleeve"],
+            "gross": gross,
+            "gross_cap": gross_cap,
+            "gross_util": round(gross / gross_cap, 4)
+            if gross is not None and gross_cap else None,
+            "assets": assets,
+        })
     return {"sleeves": out}
+
+
+def _gross(nav: float, cash: Any, valued: float | None) -> float | None:
+    """Gross exposure as a fraction of NAV: ledger money first, marked amounts second.
+
+    ``nav - cash`` is the marked value of the book by construction (``runs/nav_tick.py``:
+    ``cash = nav - invested - unrealized``), so it needs no price at all. It is used
+    whenever ``cash_usdt`` was recorded; the sum of the marked positions is the fallback,
+    and only when *every* position could be marked. Otherwise: unknown.
+    """
+    if not nav:
+        return None
+    try:
+        if cash is not None:
+            return round(max(0.0, nav - float(cash)) / nav, 6)
+    except (TypeError, ValueError):
+        pass
+    return round(valued / nav, 6) if valued is not None else None
 
 
 def _gate_panel(conn: sqlite3.Connection | None, cfg: Any) -> dict[str, Any]:
@@ -412,6 +508,235 @@ def _mode_panel() -> dict[str, Any]:
     }
 
 
+# ------------------------------------------------------------------ what was put in
+
+#: What the card's subtitle says, keyed by where the number came from. The owner's rule is
+#: that a number on this screen is never mysterious, so every seed carries its provenance
+#: and the screen prints it verbatim — there is no branch where a figure appears unlabelled.
+SEED_SOURCES: dict[str, str] = {
+    "run": "recorded at run start",
+    "mode_file": "recorded at run start",
+    "config": "configured for the next run",
+    "account": "live demo account balance",
+    "account_live": "live account balance",
+    "none": "not set yet",
+}
+
+#: What the pot *is*, per basis. TEST money is simulated; demo money is real balances on a
+#: real matching engine that happen to be free; live money is the owner's.
+SEED_LABELS: dict[str, str] = {
+    "simulated": "Simulated starting pot",
+    "demo": "Demo account",
+    "live": "Real account",
+    "mixed": "Two bots on different kinds of money",
+}
+
+
+def _basis_of(state: str | None) -> str:
+    """``TEST`` -> simulated, ``DEMO_*`` -> demo, ``LIVE_*`` -> live."""
+    from ops.lib import mode_state
+
+    name = str(state or "TEST").upper()
+    if name in mode_state.LIVE_MODES:
+        return "live"
+    if name in mode_state.DEMO_MODES:
+        return "demo"
+    return "simulated"
+
+
+def _run_seed(conn: sqlite3.Connection | None, sleeve: str) -> dict[str, Any]:
+    """The active ``sleeve_runs`` row's seed — what was actually put in at run start."""
+    row = _one(
+        conn,
+        "SELECT run_id, seed_usdt, mode, started_utc FROM sleeve_runs"
+        " WHERE sleeve=? AND status='active' ORDER BY started_utc DESC LIMIT 1",
+        (sleeve,),
+    )
+    return row or {}
+
+
+def _seed_panel(
+    conn: sqlite3.Connection | None,
+    cfg: Any,
+    mode_panel: Mapping[str, Any],
+    *,
+    demo: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """"What did I put in", resolved per mode, with the source always stated.
+
+    The order of preference, and why each step exists:
+
+    1. **The active ``sleeve_runs`` row.** It records what was actually put in when the run
+       opened, so it wins whenever it exists — including over a later config edit, which
+       must never rewrite the past.
+    2. **The seed pinned in the signed mode file.** A transition pins the seed at arming;
+       that is also a record of a run start.
+    3. **For a demo or live sleeve with neither: the real account, read now.** This is the
+       owner's point — the demo API knows the balance whether or not we have traded there,
+       so "not set yet" was never the honest answer once a demo key exists.
+    4. **Otherwise the configured seed** (``modes.test.seed_usdt``, read through the one
+       reader ``ops.config.seed_for``). A configured seed that no run has recorded is still
+       the answer to "what did I put in" — it is simply labelled as the *next* run's.
+
+    Two totals are never added together. A demo sleeve's pot is real balances on
+    ``demo-api.binance.com``; a TEST sleeve's is a simulation. When the two bots disagree
+    the per-sleeve rows still resolve, ``total_usdt`` is ``None`` and ``mixed`` is true, and
+    the card says so instead of printing a sum that means nothing.
+    """
+    from ops.config import seed_for
+
+    sleeves = dict(mode_panel.get("sleeves") or {})
+    verified = bool(mode_panel.get("verified"))
+    rows: list[dict[str, Any]] = []
+
+    for sleeve in paths.SLEEVES:
+        if sleeve not in sleeves:
+            continue
+        entry = dict(sleeves.get(sleeve) or {})
+        state = entry.get("state")
+        basis = _basis_of(state)
+        run = _run_seed(conn, sleeve)
+        value: float | None = None
+        source = "none"
+        run_id = entry.get("run_id")
+        as_of = None
+
+        if run.get("seed_usdt") is not None:
+            value, source = float(run["seed_usdt"]), "run"
+            run_id = run.get("run_id") or run_id
+            as_of = run.get("started_utc")
+            basis = _basis_of({"test": "TEST", "demo": "DEMO_PROPOSE",
+                               "live": "LIVE_PROPOSE"}.get(str(run.get("mode") or "").lower()))
+        elif verified and entry.get("seed_usdt") is not None:
+            value, source = float(entry["seed_usdt"]), "mode_file"
+        elif basis == "simulated":
+            try:
+                value, source = float(seed_for(cfg, sleeve)), "config"
+            except Exception:  # noqa: BLE001 - a config that cannot be read is not a crash
+                value, source = None, "none"
+
+        rows.append({
+            "sleeve": sleeve,
+            "state": state,
+            "basis": basis,
+            "seed_usdt": value,
+            "source": source,
+            "source_label": SEED_SOURCES.get(source, source),
+            "run_id": run_id,
+            "as_of_utc": as_of,
+        })
+
+    bases = {r["basis"] for r in rows}
+    panel_basis = bases.pop() if len(bases) == 1 else "mixed"
+    unresolved = [r["sleeve"] for r in rows if r["seed_usdt"] is None]
+
+    # A demo or live sleeve with no recorded seed takes the account itself. There is ONE
+    # demo account behind both bots (``BINANCE_DEMO_KEY`` carries no sleeve letter), so the
+    # balance is the total once — adding it per sleeve would double the pot.
+    if panel_basis in ("demo", "live") and unresolved:
+        snapshot = dict(demo or {})
+        account_total = snapshot.get("value_usdt")
+        if snapshot.get("state") == "ok" and account_total is not None:
+            source = "account" if panel_basis == "demo" else "account_live"
+            return {
+                "basis": panel_basis,
+                "label": SEED_LABELS[panel_basis],
+                "total_usdt": float(account_total),
+                "source": source,
+                "source_label": SEED_SOURCES[source],
+                "as_of_utc": snapshot.get("as_of_utc"),
+                "mixed": False,
+                "per_sleeve": False,
+                "sleeves": rows,
+                "note": (
+                    f"One {panel_basis} account backs both bots, so this is the account "
+                    f"balance, not a sum of two pots."
+                ),
+            }
+
+    resolved = [r["seed_usdt"] for r in rows if r["seed_usdt"] is not None]
+    total = round(sum(resolved), 8) if resolved and panel_basis != "mixed" else None
+    sources = {r["source"] for r in rows if r["seed_usdt"] is not None}
+    source = sources.pop() if len(sources) == 1 else ("mixed" if sources else "none")
+    return {
+        "basis": panel_basis,
+        "label": SEED_LABELS.get(panel_basis, SEED_LABELS["simulated"]),
+        "total_usdt": total,
+        "source": source,
+        "source_label": SEED_SOURCES.get(source, "from more than one source"),
+        "as_of_utc": next((r["as_of_utc"] for r in rows if r["as_of_utc"]), None),
+        "mixed": panel_basis == "mixed",
+        "per_sleeve": True,
+        "sleeves": rows,
+        "note": (
+            "The two bots are on different kinds of money, so there is no single total to "
+            "show — simulated and demo pots are never added together."
+            if panel_basis == "mixed"
+            else None
+        ),
+    }
+
+
+# ------------------------------------------------------------------ the demo account
+
+
+def _demo_panel(
+    conn: sqlite3.Connection | None,
+    cfg: Any,
+    mode_panel: Mapping[str, Any],
+    *,
+    root: Path | None = None,
+    asset_marks: Mapping[str, float] | None = None,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """What the Binance Spot Demo account holds, and whether we have traded there.
+
+    Quiet by design. When demo is configured but no sleeve is in a demo mode this is one
+    line on Home; when a sleeve *is* on demo it becomes the source for the money cards and
+    the holdings table. It is never both at once and the numbers are never mixed.
+    """
+    from console.services import demo_account_service as demo
+
+    states = [str((v or {}).get("state") or "") for v in (mode_panel.get("sleeves") or {}).values()]
+    active = any(_basis_of(s) == "demo" for s in states)
+
+    if not demo.is_configured():
+        return {"configured": False, "active": active, "state": demo.STATE_NOT_CONFIGURED}
+
+    # Fresh when it is the money on screen; leisurely when it is a footnote. This read sits
+    # in the path of every Home paint, and Home repaints on a 60-second timer and on five
+    # SSE topics — an idle demo balance is not worth a round trip each time.
+    ttl = demo.ACCOUNT_TTL_S if active else demo.IDLE_ACCOUNT_TTL_S
+    try:
+        snapshot = demo.account_snapshot(marks=asset_marks, refresh=refresh, ttl=ttl)
+    except Exception as e:  # noqa: BLE001 - the reader degrades; Home must still answer
+        # ``account_snapshot`` is written never to raise, so reaching here is a bug in it.
+        # Home is the screen an operator opens when something is wrong; it does not get to
+        # be the second thing that is wrong.
+        return {
+            "configured": True,
+            "active": active,
+            "state": demo.STATE_UNREACHABLE,
+            "error": f"demo reader failed ({type(e).__name__})",
+        }
+    traded = _one(
+        conn,
+        "SELECT COUNT(*) AS n FROM fills WHERE mode='demo'",
+    ).get("n") or 0
+    orders = _one(
+        conn,
+        "SELECT COUNT(*) AS n FROM orders WHERE mode='demo'",
+    ).get("n") or 0
+    snapshot.update({
+        "configured": True,
+        "active": active,
+        "fills_recorded": int(traded),
+        "orders_recorded": int(orders),
+        "traded_here": bool(traded or orders or snapshot.get("open_order_count")),
+    })
+    return snapshot
+
+
 def _incidents(conn: sqlite3.Connection | None) -> list[dict[str, Any]]:
     return _rows(
         conn,
@@ -443,6 +768,33 @@ def nav_series(days: int = 7, root: Path | None = None) -> dict[str, Any]:
         return _nav_series(conn, days=days)
 
 
+def demo_account(root: Path | None = None, *, refresh: bool = False) -> dict[str, Any]:
+    """The demo account in full: balances, permissions, resting orders and the filters.
+
+    Home carries only the one quiet line; this is the screen behind it, and it is also what
+    proves the sizing rules before the first order — ``pairs[*]`` carries the venue's own
+    tick size, lot step and minimum notional beside ``risk.min_notional_usdt``, so an
+    operator can see which of the two actually binds.
+    """
+    from console.services import demo_account_service as demo
+
+    cfg = get_cfg(root)
+    with journal(readonly=True, root=root) as conn:
+        mode_panel = _mode_panel()
+        payload = _demo_panel(conn, cfg, mode_panel, root=root, asset_marks=marks(cfg, root),
+                              refresh=refresh)
+    if not payload.get("configured"):
+        return payload
+    pairs = list(getattr(getattr(cfg, "universe", None), "pairs", []) or [])
+    payload["filters"] = demo.filters_snapshot(
+        pairs,
+        gate_min_notional=getattr(cfg.risk, "min_notional_usdt", None),
+        root=root,
+        refresh=refresh,
+    )
+    return payload
+
+
 def overview(root: Path | None = None) -> dict[str, Any]:
     """The whole Overview payload — one request, one render."""
     try:
@@ -457,13 +809,18 @@ def overview(root: Path | None = None) -> dict[str, Any]:
 
     with journal(readonly=True, root=root) as conn:
         nav = _nav_panel(conn, cfg)
+        mode_panel = _mode_panel()
+        asset_marks = marks(cfg, root)
+        demo_panel = _demo_panel(conn, cfg, mode_panel, root=root, asset_marks=asset_marks)
         payload: dict[str, Any] = {
             "ok": True,
             "generated_utc": _iso(datetime.now(UTC)),
-            "mode": _mode_panel(),
+            "mode": mode_panel,
+            "seed": _seed_panel(conn, cfg, mode_panel, demo=demo_panel),
+            "demo": demo_panel,
             "nav": nav,
             "nav_series": _nav_series(conn),
-            "exposure": _exposure_panel(cfg, nav["cards"]),
+            "exposure": _exposure_panel(cfg, nav["cards"], asset_marks),
             "gate": _gate_panel(conn, cfg),
             "funnel": _funnel_panel(conn),
             "research": _research_panel(conn),

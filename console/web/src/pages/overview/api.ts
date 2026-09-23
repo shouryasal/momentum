@@ -2,6 +2,10 @@
 
 import { api } from '@/api';
 
+import type { RunDetail } from '../decisions/api';
+import type { PortfolioPayload } from '../portfolio/api';
+import type { GateDecisionsPayload } from '../risk/api';
+
 export interface NavCard {
   sleeve: string;
   run_id: string | null;
@@ -11,7 +15,8 @@ export interface NavCard {
   cash_usdt: number | null;
   reserved_usdt: number | null;
   open_trades: number | null;
-  positions: Record<string, { value_usdt?: number } | number>;
+  /** Base-unit AMOUNTS keyed by base asset (`{"BTC": 0.04}`) — see `docs/contracts.md`. */
+  positions: Record<string, { amount?: number } | number>;
   day_pct: number | null;
   week_pct: number | null;
   run_pct: number | null;
@@ -21,14 +26,21 @@ export interface NavCard {
 
 export interface ExposureAsset {
   asset: string;
-  weight: number;
+  /** Base units held — `positions_json` is coins, not money. */
+  amount: number | null;
+  /** The close the amount was valued at; `null` when no closed candle could be found. */
+  mark_usdt: number | null;
+  value_usdt: number | null;
+  /** `null` when the amount could not be marked — the page shows "unknown", never 0%. */
+  weight: number | null;
   cap: number;
   util: number | null;
 }
 
 export interface ExposureSleeve {
   sleeve: string;
-  gross: number;
+  /** `nav - cash` over NAV; `null` when neither the ledger nor the marks could give it. */
+  gross: number | null;
   gross_cap: number;
   gross_util: number | null;
   assets: ExposureAsset[];
@@ -91,6 +103,97 @@ export interface SleeveModeState {
   seed_usdt: number | null;
 }
 
+/** Where one bot's starting pot came from. The screen prints `source_label` verbatim. */
+export interface SeedSleeve {
+  sleeve: string;
+  state: string | null;
+  /** `simulated` | `demo` | `live` — which kind of money this pot is. */
+  basis: string;
+  seed_usdt: number | null;
+  /** `run` | `mode_file` | `config` | `account` | `account_live` | `none`. */
+  source: string;
+  /** "recorded at run start" / "configured for the next run" / "live demo account balance". */
+  source_label: string;
+  run_id: string | null;
+  as_of_utc: string | null;
+}
+
+/**
+ * "What did I put in", resolved per mode.
+ *
+ * `total_usdt` is `null` when the two bots are on different kinds of money (`mixed`): a
+ * simulated pot and a demo pot are never added together, so there is no single total to
+ * print and the card says which two things it is refusing to add.
+ */
+export interface SeedPanel {
+  basis: string;
+  /** "Simulated starting pot" / "Demo account" / "Real account". */
+  label: string;
+  total_usdt: number | null;
+  source: string;
+  source_label: string;
+  as_of_utc: string | null;
+  mixed: boolean;
+  per_sleeve: boolean;
+  sleeves: SeedSleeve[];
+  note: string | null;
+}
+
+export interface DemoHolding {
+  asset: string;
+  amount: number;
+  mark_usdt: number | null;
+  value_usdt: number | null;
+  /** Stablecoins are the cash half of the account, not a holding. */
+  stable: boolean;
+}
+
+/**
+ * The Binance Spot Demo account, read-only.
+ *
+ * `state` is `ok` | `not_configured` | `unreachable` | `refused`. Anything other than `ok`
+ * means the numbers are missing or old (`stale`), never that they are zero.
+ */
+export interface DemoPanel {
+  configured: boolean;
+  /** True when a bot is actually running on demo — then this drives the money cards. */
+  active: boolean;
+  state: string;
+  host?: string;
+  key_env?: string;
+  balance_reset?: string;
+  account_type?: string | null;
+  permissions?: string[];
+  can_trade?: boolean;
+  can_withdraw?: boolean;
+  balances?: Record<string, number>;
+  holdings?: DemoHolding[];
+  /** Stablecoins at par. */
+  cash_usdt?: number | null;
+  /** The whole account; `null` the moment one holding could not be marked. */
+  value_usdt?: number | null;
+  unpriced?: string[];
+  open_order_count?: number;
+  open_orders?: Array<Record<string, unknown>>;
+  /** Anything ever placed there: a resting order, or a journalled demo order or fill. */
+  traded_here?: boolean;
+  fills_recorded?: number;
+  orders_recorded?: number;
+  as_of_utc?: string;
+  stale?: boolean;
+  cached?: boolean;
+  age_s?: number;
+  error?: string | null;
+  /** Only on `/overview/demo`: the venue's own order-sizing rules per pair. */
+  filters?: {
+    state: string;
+    host?: string;
+    error?: string | null;
+    pairs?: Record<string, Record<string, unknown>>;
+    not_tradable?: string[];
+  };
+}
+
 export interface OverviewPayload {
   ok: boolean;
   config_error?: string;
@@ -102,6 +205,10 @@ export interface OverviewPayload {
     sleeves: Record<string, SleeveModeState>;
     kill: { engaged: boolean };
   };
+  /** What was put in, and where that number came from. */
+  seed?: SeedPanel;
+  /** The demo account: one quiet line when it is idle, the money source when it is live. */
+  demo?: DemoPanel;
   nav?: { cards: NavCard[] };
   nav_series?: { since_utc: string; series: Record<string, Array<{ ts: string; nav: number }>> };
   exposure?: { sleeves: ExposureSleeve[] };
@@ -174,9 +281,38 @@ export const overviewApi = {
       '/overview/nav',
       { days },
     ),
+  /**
+   * One bot's book and its trades.
+   *
+   * Home needs what the ledger cannot give it: the average price paid for each holding,
+   * and every fill.  Those live on `/portfolio/<bot>`, so Home reads them directly rather
+   * than sending the operator to another screen for the two tables they asked for.  It is
+   * a separate query per bot on purpose — a bot that is down must not blank the table for
+   * the one that is up.
+   */
+  portfolio: (sleeve: string) => api.get<PortfolioPayload>(`/portfolio/${sleeve}`),
+  /**
+   * The demo account in full, including the venue's own order-sizing filters.
+   *
+   * Home does not call this — the bundle already carries the one line it shows. It is the
+   * screen behind that line, and the place the filters are read before the first order.
+   */
+  demo: (refresh = false) => api.get<DemoPanel>('/overview/demo', { refresh }),
+  /** The whole story behind one decision, for the reasoning pane. */
+  run: (runId: string) => api.get<RunDetail>(`/runs/${encodeURIComponent(runId)}`),
+  /** What the safety checks did, narrowed to the coin the open row is about. */
+  gateDecisions: (params: { sleeve?: string; pair?: string; limit?: number }) =>
+    api.get<GateDecisionsPayload>('/risk/gate-decisions', params),
 };
 
 export const overviewKeys = {
   bundle: ['overview'] as const,
   nav: (days: number) => ['overview', 'nav', days] as const,
+  portfolio: (sleeve: string) => ['overview', 'portfolio', sleeve] as const,
+  run: (runId: string) => ['overview', 'run', runId] as const,
+  demo: ['overview', 'demo'] as const,
+  gate: (sleeve: string, pair: string) => ['overview', 'gate', sleeve, pair] as const,
 };
+
+/** The bots Home adds up. `benchmark` is a yardstick, not a bot, so it is not one. */
+export const HOME_SLEEVES = ['a', 'b'] as const;

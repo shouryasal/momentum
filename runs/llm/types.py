@@ -41,6 +41,7 @@ __all__ = [
     "CALL_STATUSES",
     "FAILURE_CLASSES",
     "MIN_TIER_FLOOR",
+    "PROVIDER_FAILURES",
     "PROVIDER_KEYS",
     "SWITCH_ACTIONS",
     "TERMINAL_FAILURES",
@@ -99,8 +100,13 @@ FAILURE_CLASSES: tuple[str, ...] = (
 )
 
 #: What an ``llm_calls`` row may say. Exactly the table's CHECK constraint.
-#: ``provider_down`` is missing on purpose: a down provider produces no attempt row — the
-#: router records ``skipped_open_circuit`` and a ``provider_switches`` row instead.
+#: ``provider_down`` IS in the list. The comment here used to claim "a down provider
+#: produces no attempt row", and that is false for the common case: a dead Ollama daemon
+#: or a missing registry entry raises :class:`ProviderDown` from inside an attempt, the
+#: router classifies it ``provider_down``, and the insert was then rejected by the CHECK
+#: constraint and swallowed — the one failure class an operator most needs to see was the
+#: one the AI & Models page could never show. (The *skipped* cases, where nothing was
+#: attempted, still record only a ``provider_switches`` row.)
 CALL_STATUSES: tuple[str, ...] = (
     "ok",
     "error",
@@ -109,6 +115,7 @@ CALL_STATUSES: tuple[str, ...] = (
     "auth_error",
     "quota_exhausted",
     "budget_exhausted",
+    "provider_down",
     "schema_invalid",
     "empty_output",
     "skipped_open_circuit",
@@ -117,6 +124,26 @@ CALL_STATUSES: tuple[str, ...] = (
 
 #: Failures that must never be retried on the same model.
 TERMINAL_FAILURES: frozenset[str] = frozenset({"budget_exhausted", "quota_exhausted"})
+
+#: Failure classes that say something about the PROVIDER — transport, credential, quota —
+#: and so move the circuit breaker in ``provider_health``.
+#:
+#: Everything else is a CALL-level failure: it advances the chain without touching the
+#: credential's health. ``schema_invalid`` is the case that forced this split: it is
+#: synthesised by the router when the *caller's* validator rejects otherwise-successful
+#: output, and recording it as provider health meant three badly-shaped JSON replies
+#: inside 15 minutes opened a breaker on ``claude:subscription`` — every task on that
+#: credential then skipped for 15 minutes. A model returning bad JSON is not a dead
+#: credential. ``budget_exhausted`` is excluded for the same reason: it is *our* spending
+#: cap, not the provider's state.
+PROVIDER_FAILURES: frozenset[str] = frozenset({
+    "error",
+    "timeout",
+    "rate_limited",
+    "auth_error",
+    "quota_exhausted",
+    "provider_down",
+})
 
 #: What ``switching.on[<class>]`` may say.
 SWITCH_ACTIONS: tuple[str, ...] = ("next", "skip", "retry_then_next", "stop")

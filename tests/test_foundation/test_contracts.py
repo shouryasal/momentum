@@ -53,11 +53,19 @@ def _req(**kwargs):
 
 
 def test_failure_vocabulary_matches_the_llm_calls_check(tmp_path):
-    """The DB CHECK and the contract must not drift: llm_calls.status is ok + the classes."""
+    """The DB CHECK and the contract must not drift: llm_calls.status is ok + the classes.
+
+    This used to carve ``provider_down`` out, on the reasoning that "a skipped provider
+    makes no attempt row". That is true of the *skipped* cases and false of the common
+    one: a dead Ollama daemon or a missing registry entry raises ProviderDown from inside
+    an ATTEMPT, so ``chain.py`` writes a row — and the CHECK rejected it while
+    ``_log_call``'s bare ``except sqlite3.Error: pass`` swallowed the IntegrityError. The
+    single failure class an operator most needs on the AI & Models page was the one the
+    journal could never hold. The two vocabularies are now identical.
+    """
     journal, _ = db.init_all(load_config(), root=tmp_path)
-    assert set(types.CALL_STATUSES) - {"ok"} <= set(types.FAILURE_CLASSES)
-    # provider_down never reaches llm_calls: a skipped provider makes no attempt row.
-    assert set(types.FAILURE_CLASSES) - set(types.CALL_STATUSES) == {"provider_down"}
+    assert set(types.CALL_STATUSES) - {"ok"} == set(types.FAILURE_CLASSES)
+    assert "provider_down" in types.CALL_STATUSES
     with db.opened(journal) as conn:
         for status in types.CALL_STATUSES:
             db.write(
@@ -359,6 +367,48 @@ def test_shadow_needs_a_declared_model(tmp_path):
     raw["shadow"] = {"enabled": True, "model": "ghost", "started": "2026-10-01", "days": 30}
     with pytest.raises(ConfigError, match="shadow"):
         load_models_cfg(_write(tmp_path, raw), overlay=None)
+
+
+class TestOverlayIsASibling:
+    """``load_models_cfg(path)`` must overlay ``path``'s sibling, never the live one.
+
+    The default was the absolute ``OVERLAY_PATH`` under the live checkout, so loading a
+    worktree's ``config/models.yaml`` through the strict loader silently merged the LIVE
+    checkout's ``models-auto.yaml`` — precisely the code path that is supposed to prove a
+    proposed model change is safe before a human applies it. ``runs.router`` already
+    resolved the sibling correctly (``path.parent / 'models-auto.yaml'``); the two now
+    agree.
+    """
+
+    def test_the_sibling_overlay_is_the_one_that_is_merged(self, tmp_path):
+        from ops.models_config import OVERLAY_NAME
+
+        base = _write(tmp_path, _raw_models())
+        (tmp_path / OVERLAY_NAME).write_text(
+            yaml.safe_dump({"shadow": {"enabled": False, "model": "opus", "days": 7}}))
+        assert load_models_cfg(base).shadow.days == 7
+
+    def test_a_worktree_copy_does_not_pick_up_the_live_overlay(self, tmp_path,
+                                                               monkeypatch):
+        import ops.models_config as mcfg
+
+        live_overlay = tmp_path / "live-models-auto.yaml"
+        live_overlay.write_text(
+            yaml.safe_dump({"shadow": {"enabled": False, "model": "opus", "days": 99}}))
+        monkeypatch.setattr(mcfg, "OVERLAY_PATH", live_overlay)
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        base = _write(worktree, _raw_models())
+        assert load_models_cfg(base).shadow.days != 99
+
+    def test_an_explicit_overlay_and_none_both_still_work(self, tmp_path):
+        base = _write(tmp_path, _raw_models())
+        explicit = tmp_path / "elsewhere.yaml"
+        explicit.write_text(
+            yaml.safe_dump({"shadow": {"enabled": False, "model": "opus", "days": 5}}))
+        assert load_models_cfg(base, overlay=explicit).shadow.days == 5
+        assert load_models_cfg(base, overlay=None).shadow.days == \
+            load_models_cfg(base, overlay=tmp_path / "missing.yaml").shadow.days
 
 
 def test_models_config_path_is_the_one_earn_yaml_names():

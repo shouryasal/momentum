@@ -14,7 +14,10 @@ export function Clock({ now }: { now?: Date }) {
   const current = now ?? tick;
   return (
     <Tooltip label="Gulf time (Asia/Dubai) over UTC">
-      <Stack gap={0} data-testid="clock">
+      {/* `wrap="nowrap"` and the fixed width keep the two lines from wrapping into six on
+          a narrow window, which used to push the header's content out of its own box and
+          over the screen below it. */}
+      <Stack gap={0} data-testid="clock" miw={92} style={{ whiteSpace: 'nowrap' }}>
         <Text size="xs" fw={600} ff="monospace" lh={1.1}>
           {formatGulfClock(current)} +04
         </Text>

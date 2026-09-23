@@ -41,7 +41,12 @@ def _write(tmp_path, raw):
 
 def test_spec_section9_defaults(cfg):
     r = cfg.risk
-    assert r.max_weight == {"BTC": 0.40, "default": 0.30}
+    # No `default` key: under a wide universe a default cap silently granted every newly
+    # listed coin 30% of NAV. An asset with neither an explicit cap here nor a tier in the
+    # snapshot caps at ZERO and the gate refuses it (wide-universe.md §2.2).
+    assert r.max_weight == {"BTC": 0.40, "ETH": 0.30}
+    assert "default" not in r.max_weight
+    assert (r.tier_caps.core, r.tier_caps.major, r.tier_caps.satellite) == (0.40, 0.15, 0.05)
     assert r.max_gross_exposure == 0.80
     assert r.usdt_floor == 0.20
     assert r.daily_loss_stop == 0.03
@@ -53,15 +58,30 @@ def test_spec_section9_defaults(cfg):
     assert r.staleness_minutes == 30
     assert r.min_notional_usdt == 25
     assert r.kill_file == "ops/killdir/KILL"
+    # The wide-universe controls (§2.3). A twenty-alt book measured ~2 independent bets,
+    # so width is bounded here rather than discovered on the demo account.
+    assert r.max_open_positions == 8
+    assert r.max_satellite_positions == 4
+    assert r.max_satellite_gross == 0.10
+    assert r.max_beta_to_btc == 1.30
+    assert r.max_avg_pairwise_corr == 0.70
+    assert r.min_position_pct_nav == 0.02
+    assert r.max_orders_per_day == 16
     assert cfg.proposal.max_age_hours == 48
     assert cfg.proposal.sum_tolerance == 0.001
 
 
-def test_universe_locked(cfg):
-    assert cfg.universe.assets == ["BTC", "ETH"]
-    assert cfg.universe.pairs == ["BTC/USDT", "ETH/USDT"]
+def test_universe_core_is_locked_and_the_rest_is_resolved(cfg):
+    """``assets``/``pairs`` are no longer stored: they are the tradeable tier of the
+    newest snapshot under ``knowledge/universe/`` (wide-universe.md §1.4). What earn.yaml
+    still pins is the core, the quote and the never-tradeable data symbols."""
+    assert cfg.universe.core == ["BTC", "ETH"]
     assert cfg.universe.quote == "USDT"
     assert "BNB/USDT" in cfg.universe.data_only_symbols
+    assert cfg.universe.pairs[:2] == ["BTC/USDT", "ETH/USDT"]      # core first, always
+    assert cfg.universe.assets == [p.split("/")[0] for p in cfg.universe.pairs]
+    assert set(cfg.universe.pairs) <= set(cfg.universe.watchlist_pairs)
+    assert "BNB/USDT" not in cfg.universe.pairs                    # data-only is never traded
 
 
 def test_locked_decisions(cfg):
@@ -126,13 +146,16 @@ def test_research_slots_are_the_single_source(cfg):
 
 def test_stage_prompts_addressable_by_key(cfg):
     assert stage_prompt(cfg, "validate") == "prompts/stages/validate.v1.md"
-    assert stage_prompt(cfg, "scan") == "prompts/stages/scan.v1.md"
+    assert stage_prompt(cfg, "scan") == "prompts/stages/scan.v2.md"
     with pytest.raises(ConfigError, match="no stage"):
         stage_prompt(cfg, "nope")
 
 
 def test_news_keywords_moved_out_of_code(cfg):
-    assert set(cfg.news.asset_keywords) >= set(cfg.universe.assets)
+    # Core only: the tradeable tier is resolved weekly from the exchange, so demanding a
+    # hand-written keyword list per asset would mean a new listing could not enter the
+    # universe without a config edit.
+    assert set(cfg.news.asset_keywords) >= set(cfg.universe.core)
     for event in cfg.signals.scanner.detectors.news_event.events:
         assert cfg.news.event_keywords.get(event), event
 
@@ -236,10 +259,37 @@ def test_cross_constraint_floor_vs_gross(tmp_path):
         load_config(_write(tmp_path, raw))
 
 
-def test_cross_constraint_pairs_match_assets(tmp_path):
+def test_cross_constraint_core_must_carry_a_cap(tmp_path):
+    """The old rule was "pairs must equal <asset>/<quote> in order" — the two-asset
+    assumption written down twice. What replaces it: a core asset with no cap anywhere is
+    a core asset the gate would refuse every order for."""
     raw = _raw()
-    raw["universe"]["pairs"] = ["BTC/USDT"]
-    with pytest.raises(ConfigError, match="pairs"):
+    raw["risk"]["max_weight"] = {"ETH": 0.30}       # BTC now falls back to the tier ceiling
+    raw["risk"]["tier_caps"]["core"] = 0.0          # ... and there is no ceiling either
+    with pytest.raises(ConfigError, match="cap of zero"):
+        load_config(_write(tmp_path, raw))
+
+
+def test_cross_constraint_tier_floors_must_nest(tmp_path):
+    raw = _raw()
+    raw["universe"]["tiers"]["satellite"]["min_median_quote_volume_usdt"] = 500_000
+    with pytest.raises(ConfigError, match="watchlist floor"):
+        load_config(_write(tmp_path, raw))
+
+
+def test_cross_constraint_score_weights_sum_to_one(tmp_path):
+    raw = _raw()
+    raw["universe"]["score"]["liquidity_weight"] = 0.9
+    with pytest.raises(ConfigError, match="sum to 1"):
+        load_config(_write(tmp_path, raw))
+
+
+def test_cross_constraint_refresh_cadence_matches_the_job_that_runs_it(tmp_path):
+    """The refresh has no cron line of its own — ops/refresh_backtest_data.sh runs it — so
+    universe.refresh.cron is documentation and has to tell the truth."""
+    raw = _raw()
+    raw["universe"]["refresh"]["cron"] = "0 6 * * 1"
+    with pytest.raises(ConfigError, match="backtest_data"):
         load_config(_write(tmp_path, raw))
 
 

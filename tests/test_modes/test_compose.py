@@ -107,3 +107,55 @@ class TestComposeInvocation:
         composelib.recreate_sleeve(cfg, "a", root=state_root, runner=docker)
         assert composelib.live_file_path().exists()
         assert cfg.ops.bots["a"].service in docker.calls[-1]
+
+
+class TestDownAndProof:
+    """``down`` and ``running_ids`` — the two calls ``ops/restore.py`` relies on.
+
+    ``ops/restore.sh`` used to run a bare ``docker compose -f ops/docker-compose.yml
+    down``, which derives project ``ops`` from the first ``-f`` file's directory while
+    everything else runs under ``-p earn``: it removed nothing, exited 0, and the restore
+    then overwrote the SQLite files under running bots.
+    """
+
+    def test_down_carries_the_project_and_every_layer(self, cfg, state_root, docker):
+        composelib.write_live_file(cfg, root=state_root)
+        (paths.runtime_dir() / "compose.override.yml").write_text("services: {}\n")
+        composelib.Compose(cfg, root=state_root, runner=docker).down()
+        argv = docker.calls[-1]
+        assert argv[:4] == ["docker", "compose", "-p", cfg.runtime.docker.compose_project]
+        assert [argv[i + 1] for i, a in enumerate(argv) if a == "-f"] == [
+            str(p) for p in composelib.compose_files(cfg)
+        ]
+        assert argv[-2:] == ["down", "--remove-orphans"]
+
+    def test_running_ids_filters_on_the_project_label(self, cfg, state_root):
+        seen: list[list[str]] = []
+
+        def runner(argv, cwd, timeout_s):
+            seen.append(list(argv))
+            return composelib.CommandResult(list(argv), 0, "abc123\ndef456\n", "")
+
+        ids = composelib.Compose(cfg, root=state_root, runner=runner).running_ids()
+        assert ids == ["abc123", "def456"]
+        project = cfg.runtime.docker.compose_project
+        assert seen[-1] == ["docker", "ps", "-q", "--filter",
+                            f"label=com.docker.compose.project={project}"]
+
+    def test_running_ids_is_empty_when_nothing_is_up(self, cfg, state_root):
+        def runner(argv, cwd, timeout_s):
+            return composelib.CommandResult(list(argv), 0, "\n", "")
+
+        assert composelib.Compose(cfg, root=state_root, runner=runner).running_ids() == []
+
+    def test_a_failed_ps_raises_rather_than_reporting_nothing_is_running(
+        self, cfg, state_root, docker
+    ):
+        """Fail closed: "docker ps errored" must never read as "no bot is running"."""
+        docker.ok = False
+        with pytest.raises(composelib.ComposeError):
+            composelib.Compose(cfg, root=state_root, runner=docker).running_ids()
+
+    def test_services_comes_from_the_config(self, cfg, state_root, docker):
+        compose = composelib.Compose(cfg, root=state_root, runner=docker)
+        assert compose.services() == [cfg.ops.bots[s].service for s in paths.SLEEVES]

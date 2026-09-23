@@ -27,7 +27,7 @@ export function ResumeMonthlyModal({
   onClose,
   sleeve,
   anchors,
-  steppedUp = false,
+  steppedUp,
   onResume,
   onResumed,
 }: ResumeMonthlyModalProps) {
@@ -39,7 +39,7 @@ export function ResumeMonthlyModal({
       title={`Resume sleeve ${sleeve.toUpperCase()} after the monthly stop`}
       confirmPhrase={anchors.confirm_phrase}
       requireStepUp
-      stepUpSatisfied={steppedUp}
+      {...(steppedUp === undefined ? {} : { stepUpSatisfied: steppedUp })}
       confirmLabel={`Resume sleeve ${sleeve.toUpperCase()}`}
       danger
       onConfirm={async () => {

@@ -31,19 +31,25 @@ import { errorMessage } from '@/api';
 import { usePageCommands } from '@/app/commandRegistry';
 import { useTopicEvents } from '@/app/EventStreamContext';
 import { useSession } from '@/app/SessionContext';
-import { DataTable, EmptyState } from '@/components';
+import { ConfirmDialog, DataTable, EmptyState } from '@/components';
 
 import {
   allowedTargets,
+  badgeFor,
   confirmPhraseFor,
   DEFAULT_CONFIRM_TEMPLATE,
+  DEFAULT_DEMO_CONFIRM_TEMPLATE,
+  isDemo,
   isLive,
   isTransient,
+  isVenueBound,
+  MODE_MEANING,
   modeApi,
   STEP_LABELS,
   stateColour,
   statusColour,
   TRANSITION_STEPS,
+  type ModeBadge,
   type ModeTarget,
   type PreflightResponse,
   type SleeveId,
@@ -68,6 +74,21 @@ export default function ModeLivePage() {
   const history = useQuery({ queryKey: ['mode', 'transitions'], queryFn: () => modeApi.history() });
 
   const [live, setLive] = useState<TransitionStep[]>([]);
+  const [recovering, setRecovering] = useState(false);
+
+  /**
+   * `POST /api/mode/recover` — step-up guarded, and until now called by nothing.
+   *
+   * An operator staring at a pulsing TRANSITIONING badge after a crash had no console
+   * path to clear it; the endpoint existed only for start-up recovery.
+   */
+  const recover = useMutation({
+    mutationFn: () => modeApi.recover(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['mode'] });
+      void history.refetch();
+    },
+  });
 
   useTopicEvents(['transition', 'mode'], (event) => {
     if (event.topic === 'mode') {
@@ -101,6 +122,8 @@ export default function ModeLivePage() {
   ]);
 
   const sleeves = mode.data?.sleeves ?? [];
+  const stuck = sleeves.filter((s) => isTransient(s.state));
+  const demoSleeves = sleeves.filter((s) => s.is_demo ?? isDemo(s.state));
 
   return (
     <Stack gap="lg">
@@ -119,6 +142,62 @@ export default function ModeLivePage() {
           </Alert>
         ) : null}
       </Group>
+
+      {demoSleeves.length > 0 ? (
+        <Alert
+          color="violet"
+          variant="light"
+          title={`Sleeve ${demoSleeves
+            .map((s) => s.sleeve.toUpperCase())
+            .join(', ')} is on DEMO — real orders, fake money`}
+          data-testid="demo-page-banner"
+        >
+          Demo Mode places genuine orders against{' '}
+          <b>{demoSleeves[0].venue_host ?? 'demo-api.binance.com'}</b>, with the live
+          venue&apos;s prices, order book, filters and rate limits — and balances that are
+          not real. Treat everything it produces as a <b>rehearsal</b>: demo P&amp;L is
+          never live performance, and a balance reset is a run boundary, so drop to TEST
+          before asking Binance for one.
+        </Alert>
+      ) : null}
+
+      {stuck.length > 0 ? (
+        <Alert
+          color="yellow"
+          variant="light"
+          title={`Sleeve ${stuck.map((s) => s.sleeve.toUpperCase()).join(', ')} is mid-transition`}
+        >
+          <Group justify="space-between" align="center">
+            <Text size="sm">
+              A crashed transition leaves a sleeve ARMING or DISARMING. Recovery forces it
+              back to TEST with entries stopped and the kill switch engaged.
+            </Text>
+            <Button
+              size="compact-sm"
+              color="yellow"
+              onClick={() => setRecovering(true)}
+              loading={recover.isPending}
+              data-testid="recover-transition"
+            >
+              Recover…
+            </Button>
+          </Group>
+        </Alert>
+      ) : null}
+
+      <ConfirmDialog
+        opened={recovering}
+        onClose={() => setRecovering(false)}
+        title="Recover the interrupted transition?"
+        confirmLabel="Recover"
+        requireStepUp
+        danger
+        description="Every stuck sleeve is forced back to TEST, entries are stopped and the kill switch is engaged. Clear KILL yourself once you have checked the exchange."
+        onConfirm={async () => {
+          await recover.mutateAsync();
+          setRecovering(false);
+        }}
+      />
 
       <Grid>
         {sleeves.map((sleeve) => (
@@ -158,7 +237,20 @@ function SleevePanel({
   onDone: () => void;
 }) {
   const { stepUpActive } = useSession();
-  const targets = allowedTargets(sleeve.state);
+  // The server's own `ops.modes.ALLOWED` decides *which* targets exist — offering one the
+  // machine will refuse is a puzzle, not a gate — while the client mirror decides the
+  // ORDER, so the safest option (propose before execute, demo before live) is the default.
+  const targets = useMemo(() => {
+    const mirror = allowedTargets(sleeve.state);
+    const server = sleeve.allowed_targets;
+    if (!server?.length) return mirror;
+    const allowed = new Set(server.filter((t) => t !== sleeve.state));
+    const ordered = mirror.filter((t) => allowed.has(t));
+    const extra = server.filter(
+      (t) => t !== sleeve.state && !ordered.includes(t as ModeTarget),
+    ) as ModeTarget[];
+    return [...ordered, ...extra];
+  }, [sleeve.state, sleeve.allowed_targets]);
   const [target, setTarget] = useState<ModeTarget>(targets[0] ?? 'TEST');
   const [seed, setSeed] = useState<number>(Math.min(sleeve.seed_usdt, sleeve.max_seed_usdt));
   const [flatten, setFlatten] = useState(true);
@@ -188,7 +280,14 @@ function SleevePanel({
   }, [preflight]);
 
   const goingLive = isLive(target);
+  const goingDemo = isDemo(target);
+  // Demo and live both arm a real exchange: both need a seed, a preflight and a phrase.
+  // What differs is what is at stake, and the page says so in words, not only in colour.
+  const arming = goingLive || goingDemo;
+  const targetCeiling = sleeve.seed_ceilings?.[target] ?? sleeve.max_seed_usdt;
   const expected = useMemo(
+    // The server's echo wins once a preflight has run for this exact seed; before that the
+    // mirror computes it locally, because the seed is still being typed.
     () =>
       preflight?.confirm_phrase ??
       confirmPhraseFor({
@@ -198,17 +297,25 @@ function SleevePanel({
         seed,
         flatten,
         template: DEFAULT_CONFIRM_TEMPLATE,
+        demoTemplate: DEFAULT_DEMO_CONFIRM_TEMPLATE,
       }),
     [preflight, sleeve.sleeve, sleeve.state, target, seed, flatten],
   );
+
+  const submodeOf = (value: ModeTarget): 'propose' | 'execute' | null =>
+    value === 'LIVE_EXECUTE' || value === 'DEMO_EXECUTE'
+      ? 'execute'
+      : value === 'LIVE_PROPOSE' || value === 'DEMO_PROPOSE'
+        ? 'propose'
+        : null;
 
   const runPreflight = useMutation({
     mutationFn: () =>
       modeApi.preflight({
         sleeve: sleeve.sleeve as SleeveId,
         target,
-        submode: target === 'LIVE_EXECUTE' ? 'execute' : target === 'LIVE_PROPOSE' ? 'propose' : null,
-        seed_usdt: goingLive ? seed : null,
+        submode: submodeOf(target),
+        seed_usdt: arming ? seed : null,
         override_reason: overrideReason || null,
       }),
     onSuccess: (result) => {
@@ -223,8 +330,8 @@ function SleevePanel({
       modeApi.transition({
         sleeve: sleeve.sleeve as SleeveId,
         target,
-        submode: target === 'LIVE_EXECUTE' ? 'execute' : target === 'LIVE_PROPOSE' ? 'propose' : null,
-        seed_usdt: goingLive ? seed : null,
+        submode: submodeOf(target),
+        seed_usdt: arming ? seed : null,
         preflight_id: preflight?.preflight_id ?? null,
         confirm_phrase: phrase,
         flatten: target === 'TEST' ? flatten : null,
@@ -238,11 +345,11 @@ function SleevePanel({
     onError: (e) => setError(errorMessage(e)),
   });
 
-  const seedTooBig = goingLive && seed > sleeve.max_seed_usdt;
+  const seedTooBig = arming && seed > targetCeiling;
   const ready =
     stepUpActive &&
     phrase.trim() === expected &&
-    (!goingLive || (preflight?.ok === true && (expiresIn ?? 0) > 0)) &&
+    (!arming || (preflight?.ok === true && (expiresIn ?? 0) > 0)) &&
     !seedTooBig;
 
   const steps = liveSteps.length > 0 ? liveSteps : transition.data?.steps ?? [];
@@ -254,7 +361,8 @@ function SleevePanel({
           <div>
             <Group gap="xs">
               <Title order={4}>Sleeve {sleeve.sleeve.toUpperCase()}</Title>
-              <Badge color={stateColour(sleeve.state)} variant="filled">
+              <ModeBadgeChip sleeve={sleeve} />
+              <Badge color={stateColour(sleeve.state)} variant="light">
                 {sleeve.state}
                 {sleeve.submode ? `·${sleeve.submode}` : ''}
               </Badge>
@@ -269,9 +377,25 @@ function SleevePanel({
               {sleeve.days !== null ? ` · day ${Math.floor(sleeve.days)}` : ''}
               {sleeve.label ? ` · ${sleeve.label}` : ''}
             </Text>
+            <VenueLine sleeve={sleeve} />
           </div>
           <StateDiagram current={sleeve.state} />
         </Group>
+
+        {sleeve.is_demo ? (
+          <Alert
+            color="violet"
+            variant="light"
+            title="DEMO — real orders, fake money"
+            data-testid="demo-banner"
+          >
+            This sleeve is trading on <b>{sleeve.venue_host ?? 'demo-api.binance.com'}</b>.
+            The orders, the book, the filters and the rate limits are the live venue&apos;s;
+            the balances are not. <b>Its P&amp;L is a rehearsal and is never reported as live
+            performance</b> — runs are filed under the <code>demo</code> mode word and stay
+            out of every live performance surface.
+          </Alert>
+        ) : null}
 
         <Radio.Group
           label="Target state"
@@ -280,25 +404,59 @@ function SleevePanel({
         >
           <Group gap="lg" mt="xs">
             {targets.map((option) => (
-              <Radio key={option} value={option} label={option} />
+              <Radio
+                key={option}
+                value={option}
+                color={stateColour(option)}
+                label={
+                  <Group gap={6} wrap="nowrap">
+                    <Text size="sm">{option}</Text>
+                    {isVenueBound(option) ? (
+                      <Badge size="xs" color={stateColour(option)} variant="light">
+                        {badgeFor(option)}
+                      </Badge>
+                    ) : null}
+                  </Group>
+                }
+              />
             ))}
           </Group>
         </Radio.Group>
 
-        {goingLive ? (
+        {arming ? (
+          <Alert
+            color={goingDemo ? 'violet' : 'red'}
+            variant="light"
+            icon={<IconAlertTriangle size={16} />}
+            title={
+              goingDemo
+                ? 'Arming DEMO on demo-api.binance.com'
+                : 'Arming LIVE on api.binance.com'
+            }
+            data-testid={`arming-notice-${goingDemo ? 'demo' : 'live'}`}
+          >
+            {MODE_MEANING[goingDemo ? 'DEMO' : 'LIVE']}
+          </Alert>
+        ) : null}
+
+        {arming ? (
           <NumberInput
-            label="Live seed (USDT)"
-            description={`Hard ceiling ${sleeve.max_seed_usdt.toLocaleString()} USDT (modes.live.max_seed_usdt)`}
+            label={goingDemo ? 'Demo seed (USDT, not real money)' : 'Live seed (USDT)'}
+            description={
+              goingDemo
+                ? `Hard ceiling ${targetCeiling.toLocaleString()} USDT. Size a demo run like the live run it rehearses — a token seed rehearses nothing.`
+                : `Hard ceiling ${targetCeiling.toLocaleString()} USDT (modes.live.max_seed_usdt)`
+            }
             value={seed}
             onChange={(value) => setSeed(Number(value) || 0)}
             min={0}
-            max={sleeve.max_seed_usdt}
+            max={targetCeiling}
             error={seedTooBig ? 'above the configured ceiling' : undefined}
             thousandSeparator
           />
         ) : null}
 
-        {target === 'TEST' && isLive(sleeve.state) ? (
+        {target === 'TEST' && isVenueBound(sleeve.state) ? (
           <Checkbox
             checked={flatten}
             onChange={(event) => setFlatten(event.currentTarget.checked)}
@@ -311,7 +469,7 @@ function SleevePanel({
           />
         ) : null}
 
-        {goingLive ? (
+        {arming ? (
           <PreflightPanel
             result={preflight}
             running={runPreflight.isPending}
@@ -351,13 +509,18 @@ function SleevePanel({
             disabled={ready}
           >
             <Button
-              color={goingLive ? 'red' : 'blue'}
+              color={goingLive ? 'red' : goingDemo ? 'violet' : 'blue'}
               rightSection={<IconArrowRight size={16} />}
               disabled={!ready || transition.isPending}
               loading={transition.isPending}
               onClick={() => transition.mutate()}
+              data-testid={`arm-${sleeve.sleeve}`}
             >
-              {goingLive ? `Arm sleeve ${sleeve.sleeve.toUpperCase()}` : 'Back to TEST'}
+              {goingLive
+                ? `Arm sleeve ${sleeve.sleeve.toUpperCase()} — LIVE`
+                : goingDemo
+                  ? `Arm sleeve ${sleeve.sleeve.toUpperCase()} — DEMO`
+                  : 'Back to TEST'}
             </Button>
           </Tooltip>
         </Group>
@@ -370,22 +533,88 @@ function SleevePanel({
 
 // --------------------------------------------------------------------------- pieces
 
-const DIAGRAM: string[] = ['TEST', 'ARMING', 'LIVE_PROPOSE', 'LIVE_EXECUTE'];
+const BADGE_COLOUR: Record<ModeBadge, string> = {
+  TEST: 'blue',
+  DEMO: 'violet',
+  LIVE: 'red',
+  TRANSITIONING: 'yellow',
+};
+
+/**
+ * The one thing an operator must be able to read across the room.
+ *
+ * Three different words, three different colours, and — because colour alone is a promise
+ * no screen keeps — the venue host printed underneath by {@link VenueLine}. DEMO is never
+ * styled as LIVE and never styled as TEST.
+ */
+function ModeBadgeChip({ sleeve }: { sleeve: SleeveModeState }) {
+  const badge = sleeve.badge ?? badgeFor(sleeve.state, sleeve.transition_in_progress);
+  return (
+    <Tooltip label={MODE_MEANING[badge]} multiline maw={360}>
+      <Badge
+        color={BADGE_COLOUR[badge]}
+        variant="filled"
+        size="lg"
+        data-testid={`mode-badge-${sleeve.sleeve}`}
+        data-badge={badge}
+      >
+        {badge}
+      </Badge>
+    </Tooltip>
+  );
+}
+
+/** Which Binance this sleeve reaches, in full, as text. Never inferred from a colour. */
+function VenueLine({ sleeve }: { sleeve: SleeveModeState }) {
+  if (!sleeve.venue_host) {
+    return (
+      <Text size="xs" c="dimmed" data-testid={`venue-${sleeve.sleeve}`}>
+        venue: none — dry run, the container holds no exchange key
+      </Text>
+    );
+  }
+  return (
+    <Text size="xs" c="dimmed" data-testid={`venue-${sleeve.sleeve}`}>
+      venue: <b>{sleeve.venue}</b> ({sleeve.venue_host}) · P&amp;L basis:{' '}
+      <b>{sleeve.pnl_basis}</b>
+    </Text>
+  );
+}
+
+/** Two ladders off TEST, because demo is not a rung on the way to live. */
+const DIAGRAM_DEMO: string[] = ['DEMO_PROPOSE', 'DEMO_EXECUTE'];
+const DIAGRAM_LIVE: string[] = ['LIVE_PROPOSE', 'LIVE_EXECUTE'];
 
 function StateDiagram({ current }: { current: string }) {
+  const chip = (state: string, label: string) => (
+    <Badge
+      key={state}
+      size="xs"
+      variant={state === current ? 'filled' : 'outline'}
+      color={state === current ? stateColour(state) : 'gray'}
+    >
+      {label}
+    </Badge>
+  );
   return (
-    <Group gap={4} wrap="nowrap">
-      {DIAGRAM.map((state) => (
-        <Badge
-          key={state}
-          size="xs"
-          variant={state === current ? 'filled' : 'outline'}
-          color={state === current ? stateColour(state) : 'gray'}
-        >
-          {state.replace('LIVE_', '')}
-        </Badge>
-      ))}
-    </Group>
+    <Stack gap={4} align="flex-end">
+      <Group gap={4} wrap="nowrap">
+        {chip('TEST', 'TEST')}
+        {chip('ARMING', 'ARMING')}
+      </Group>
+      <Group gap={4} wrap="nowrap">
+        <Text size="xs" c="dimmed">
+          demo
+        </Text>
+        {DIAGRAM_DEMO.map((state) => chip(state, state.replace('DEMO_', '')))}
+      </Group>
+      <Group gap={4} wrap="nowrap">
+        <Text size="xs" c="dimmed">
+          live
+        </Text>
+        {DIAGRAM_LIVE.map((state) => chip(state, state.replace('LIVE_', '')))}
+      </Group>
+    </Stack>
   );
 }
 

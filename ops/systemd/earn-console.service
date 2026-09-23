@@ -5,6 +5,9 @@
 # The console is the human's seat: it reads .env directly (EARN_CONSOLE_TOKEN and
 # EARN_CONSOLE_SECRET are in NO envwrap allowlist) and must never see
 # EARN_AUTOMATED_RUN=1 — it refuses to start when that is set.
+#
+# Environment=TZ below sets this PROCESS's clock only.
+# It pins no schedule; see CRON_TZ in ops/crontab for the one that does.
 [Unit]
 Description=Earn console (FastAPI + React, 127.0.0.1 only)
 After=network-online.target

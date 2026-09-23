@@ -295,6 +295,76 @@ def test_a_skill_new_containing_scripts_is_always_held(live_repo):
     assert "scripts/**" in results[0][2]
 
 
+def test_a_skill_edit_touching_scripts_is_always_held_too(live_repo):
+    """The invariant was tested under ``key == 'skill_new'`` only, and the tier-2 check
+    upstream looks at ``change['target']`` — the skill *folder* — never at the commit's
+    file list. With the shipped ``skill_edit: {test: auto}`` a commit that rewrote an
+    existing skill's executable ``scripts/**`` auto-merged with no human at all."""
+    cfg, root, jdb = live_repo
+    flagslib.touch(root / cfg.paths.flags_file, now=NOW)
+    cfg.autonomy.kinds["skill_edit"].test = "auto"
+    skill = root / ".claude" / "skills" / "tca"
+    (skill / "scripts").mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text("---\nname: tca\n---\nbody\n")
+    (skill / "scripts" / "tca_report.py").write_text("print('honest')\n")
+    commit_all(root, "seed the skill")
+    git(root, "checkout", "-b", "review/skill-edit")
+    (skill / "scripts" / "tca_report.py").write_text("print('attacker chosen bps')\n")
+    sha = commit_all(root, "rewrite the execution-cost script")
+    git(root, "checkout", LIVE_BRANCH)
+    _write_change(root, sha, id="2026-09-27-skill-edit", kind="skill",
+                  target=".claude/skills/tca",
+                  what={"summary": "tune tca", "commit": sha, "op": "edit"})
+
+    results = apply_changes.apply_all(cfg, jdb, root, NOW, verifier=passing(), mode="test")
+
+    assert results[0][1] == "held", results[0][2]
+    assert "scripts/**" in results[0][2]
+    assert (skill / "scripts" / "tca_report.py").read_text() == "print('honest')\n"
+
+
+def test_a_part_the_policy_marks_human_is_held(live_repo):
+    """``skills.policy`` was declared in ``config/earn.yaml``, rendered on the Skills page
+    and read by exactly one caller: the listing endpoint. An operator who marked a skill
+    ``human`` got a label, not a hold."""
+    cfg, root, jdb = live_repo
+    flagslib.touch(root / cfg.paths.flags_file, now=NOW)
+    cfg.autonomy.kinds["skill_edit"].test = "auto"
+    policy = cfg.skills.policy["tca"]
+    assert str(policy.tests) == "human"       # the shipped marking this test rests on
+    skill = root / ".claude" / "skills" / "tca"
+    (skill / "tests").mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text("---\nname: tca\n---\nbody\n")
+    (skill / "tests" / "test_tca.py").write_text("def test_tca():\n    assert True\n")
+    commit_all(root, "seed the skill")
+    git(root, "checkout", "-b", "review/skill-tests")
+    (skill / "tests" / "test_tca.py").write_text("def test_tca():\n    assert True  # weaker\n")
+    sha = commit_all(root, "rewrite the assertions")
+    git(root, "checkout", LIVE_BRANCH)
+    _write_change(root, sha, id="2026-09-27-policy", kind="skill",
+                  target=".claude/skills/tca",
+                  what={"summary": "tests", "commit": sha, "op": "edit"})
+
+    results = apply_changes.apply_all(cfg, jdb, root, NOW, verifier=passing(), mode="test")
+
+    assert results[0][1] == "held", results[0][2]
+    assert "skills.policy" in results[0][2] and "tests" in results[0][2]
+
+
+def test_the_policy_helpers_read_the_same_table_the_console_shows(live_repo):
+    cfg, _root, _jdb = live_repo
+    assert apply_changes.skill_policy_for(cfg, "ops-runbook") == {
+        "body": "human", "scripts": "human", "tests": "human"}
+    assert apply_changes.skill_policy_for(cfg, "post-mortem")["body"] == "gated"
+    # an unlisted skill falls back to `default`, never to "anything goes"
+    assert apply_changes.skill_policy_for(cfg, "no-such-skill")["scripts"] == "human"
+    target = ".claude/skills/tca"
+    assert apply_changes.skill_part(f"{target}/tests/test_x.py", target) == "tests"
+    assert apply_changes.skill_part(f"{target}/scripts/x.py", target) == "scripts"
+    assert apply_changes.skill_part(f"{target}/SKILL.md", target) == "body"
+    assert apply_changes.skill_part(f"{target}/evals/cases.yaml", target) == "body"
+
+
 def test_a_skill_new_without_scripts_can_merge_and_lands_incubating(live_repo):
     cfg, root, jdb = live_repo
     flagslib.touch(root / cfg.paths.flags_file, now=NOW)
@@ -409,9 +479,34 @@ def test_merge_tier0_takes_knowledge_only_commits_and_leaves_the_rest(live_repo)
      (["reports/a.md", "changes/b.json"], True),
      (["reports/a.md", "config/params-sleeve-a.json"], False),
      (["prompts/research.v2.md"], False),
-     ([], False)])
+     ([], False),
+     # Inside TIER0_PREFIXES and tier 2 at the same time: the free path would have
+     # carried exactly the files the gate refuses, while CLAUDE.md promised this module
+     # "refuses to merge any commit touching a tier-2 path".
+     (["knowledge/flags.json"], False),
+     (["knowledge/state/market.json"], False),
+     (["evals/results/skill-smith.json"], False),
+     (["reports/a.md", "knowledge/flags.json"], False)])
 def test_is_tier0_only(files, expected):
     assert apply_changes.is_tier0_only(files) is expected
+
+
+def test_merge_tier0_refuses_a_tier_two_file_inside_a_tier_zero_prefix(live_repo):
+    cfg, root, jdb = live_repo
+    from runs import worktree
+
+    wt = worktree.create(cfg, "review", "2026-W40", live_root=root)
+    results = wt.path / "evals" / "results"
+    results.mkdir(parents=True, exist_ok=True)
+    (results / "skill-smith.json").write_text('{"pass_rate": 1.0}')
+    sha = commit_all(wt.path, "flattering eval results")
+    # not a vacuous pass: the commit really does carry the tier-2 file
+    assert apply_changes.commit_files(root, sha) == ["evals/results/skill-smith.json"]
+
+    merged = apply_changes.merge_tier0(wt.branch, cfg, root)
+
+    assert merged == [], merged
+    assert not (root / "evals" / "results" / "skill-smith.json").exists()
 
 
 # --------------------------------------------------------------------------- human actions
@@ -635,10 +730,77 @@ def test_a_tier2_target_is_rejected_before_anything_runs(live_repo):
     assert results[0][1] == "rejected" and "tier-2" in results[0][2]
 
 
-def test_effective_mode_reads_test_when_the_mode_file_is_unverified(live_repo, monkeypatch):
-    _cfg, root, _jdb = live_repo
-    monkeypatch.delenv("EARN_CONSOLE_SECRET", raising=False)
-    assert apply_changes.effective_mode(root) == "test"
+def _render_runtime(root, sleeve, state, *, run_id=None):
+    """The ``var/runtime`` overlays the human's transition rendered — the only mode
+    evidence a job under ``ops/envwrap.sh review|daily_review`` can read."""
+    d = root / "var" / "runtime"
+    d.mkdir(parents=True, exist_ok=True)
+    live = state.startswith("LIVE")
+    (d / f"runtime-{sleeve}.json").write_text(json.dumps({
+        "version": 1, "sleeve": sleeve, "mode": "live" if live else "test",
+        "state": state, "submode": "execute" if live else None,
+        "run_id": run_id or f"{'live' if live else 'test'}-{sleeve}-01",
+        "seed_usdt": 500.0,
+    }))
+    (d / f"freqtrade-{sleeve}.mode.json").write_text(json.dumps({"dry_run": not live}))
+
+
+class TestEffectiveMode:
+    """``effective_mode`` picks the autonomy *column*, and it is the one place where
+    "I cannot tell" must resolve to **live**.
+
+    ``apply_all`` is reached only from ``review_run.postflight`` and ``daily_review``,
+    both of which run under ``ops/envwrap.sh`` with allowlist
+    ``CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY`` and ``env -i``. ``EARN_CONSOLE_SECRET``
+    is deliberately absent, so ``mode_state.load()`` could never report a live sleeve:
+    the ``test`` column (params/prompt/skill_edit = ``auto``) was always the one read and
+    ``autonomy.live_forces_human`` was dead code in every unattended run."""
+
+    def test_an_unprovable_mode_selects_the_live_column(self, live_repo, monkeypatch):
+        _cfg, root, _jdb = live_repo
+        monkeypatch.delenv("EARN_CONSOLE_SECRET", raising=False)
+        assert apply_changes.effective_mode(root) == "live"
+
+    def test_a_live_runtime_overlay_selects_the_live_column(self, live_repo, monkeypatch):
+        _cfg, root, _jdb = live_repo
+        monkeypatch.delenv("EARN_CONSOLE_SECRET", raising=False)
+        _render_runtime(root, "a", "TEST")
+        _render_runtime(root, "b", "LIVE_EXECUTE")
+        assert apply_changes.effective_mode(root) == "live"
+
+    def test_only_a_provable_all_test_selects_the_test_column(self, live_repo, monkeypatch):
+        _cfg, root, _jdb = live_repo
+        monkeypatch.delenv("EARN_CONSOLE_SECRET", raising=False)
+        _render_runtime(root, "a", "TEST")
+        _render_runtime(root, "b", "TEST")
+        assert apply_changes.effective_mode(root) == "test"
+
+    def test_a_params_change_is_held_for_a_human_while_a_sleeve_is_live(
+            self, live_repo, monkeypatch):
+        """The consequence, end to end: a model-authored tier-1 params change used to
+        auto-merge onto the live branch with real money trading."""
+        cfg, root, jdb = live_repo
+        flagslib.touch(root / cfg.paths.flags_file, now=NOW)
+        monkeypatch.delenv("EARN_CONSOLE_SECRET", raising=False)
+        _render_runtime(root, "b", "LIVE_EXECUTE")
+        sha = _candidate_commit(root)
+        change = _write_change(root, sha)
+        res = apply_changes.check(change, cfg, jdb, root, verifier=passing())
+        assert res.mode == "live"
+        assert res.autonomy == "approve"
+        assert res.verdict == "hold"
+
+    def test_the_same_change_auto_merges_when_test_is_provable(
+            self, live_repo, monkeypatch):
+        cfg, root, jdb = live_repo
+        flagslib.touch(root / cfg.paths.flags_file, now=NOW)
+        monkeypatch.delenv("EARN_CONSOLE_SECRET", raising=False)
+        _render_runtime(root, "a", "TEST")
+        _render_runtime(root, "b", "TEST")
+        sha = _candidate_commit(root)
+        change = _write_change(root, sha)
+        res = apply_changes.check(change, cfg, jdb, root, verifier=passing())
+        assert res.mode == "test" and res.autonomy == "auto" and res.verdict == "pass"
 
 
 def test_the_change_file_and_the_journal_agree_on_every_outcome(live_repo):

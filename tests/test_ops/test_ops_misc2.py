@@ -160,6 +160,74 @@ class TestBackup:
         broken.write_text("not a directory")
         assert backup.run(cfg, root, dest, now=NOW, mirror_root=broken / "under") == 0
 
+    def test_the_two_roots_are_honoured_separately(self, cfg, dbs, tmp_path):
+        """Verified: every target resolved against the CHECKOUT while the rest of the
+        system resolves live data through ``ops.lib.paths.state_root()``. On a split-root
+        host — which ops/setup.sh supports and every worktree session runs under — the
+        nightly backup copied an empty checkout tree."""
+        import sqlite3
+
+        state, jdb, _ = dbs                       # dbs initialises both DBs under `state`
+        checkout = tmp_path / "checkout"
+        # data lives under the state root...
+        (state / "lessons.md").write_text("# live lessons\n")
+        (state / "proposals").mkdir(exist_ok=True)
+        (state / "proposals" / "p.json").write_text("{}\n")
+        # ...committed source and ft_userdata beside the compose file, in the checkout
+        (checkout / "config").mkdir(parents=True)
+        (checkout / "config" / "earn.yaml").write_text("x: 1\n")
+        trades = checkout / "ft_userdata" / "a" / "tradesv3.sqlite"
+        trades.parent.mkdir(parents=True)
+        with sqlite3.connect(trades) as c:
+            c.execute("CREATE TABLE t (x INT)")
+        # decoy copies in the wrong root must NOT be what gets backed up
+        (checkout / "lessons.md").write_text("# stale checkout copy\n")
+
+        dest = tmp_path / "backups"
+        assert backup.run(cfg, state, dest, now=NOW, source_root=checkout) == 0
+        day = dest / "2026-09-22"
+        assert (day / "db" / "journal.db").exists()
+        assert (day / "db" / "earn.db").exists()
+        assert (day / "db" / "ft_userdata-a-tradesv3.sqlite").exists()
+        assert (day / "files" / "lessons.md").read_text() == "# live lessons\n"
+        assert (day / "files" / "proposals" / "p.json").exists()
+        assert (day / "files" / "config" / "earn.yaml").read_text() == "x: 1\n"
+
+    def test_a_missing_database_fails_the_run_and_writes_no_stamp(self, cfg, tmp_path):
+        """The dangerous half of the split-root bug: a missing source was skipped without
+        setting ok=False, so the run still stamped logs/backup.stamp and the
+        healthcheck's backup-age probe went green over a backup of nothing."""
+        empty = tmp_path / "wrong-root"
+        empty.mkdir()
+        dest = tmp_path / "backups"
+        assert backup.run(cfg, empty, dest, now=NOW) == 1
+        assert not (empty / "logs" / "backup.stamp").exists()
+
+    def test_each_sleeve_keeps_its_own_trade_database(self, cfg, dbs, tmp_path):
+        """Both freqtrade databases are called tradesv3.sqlite. Keying the backup copy on
+        the basename had sleeve b overwrite sleeve a, and restore then wrote b's trade
+        history into both sleeves."""
+        import sqlite3
+
+        root, _jdb, _ = dbs
+        for sleeve, mark in (("a", 11), ("b", 22)):
+            p = root / "ft_userdata" / sleeve / "tradesv3.sqlite"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(p) as c:
+                c.execute("CREATE TABLE mark (x INT)")
+                c.execute("INSERT INTO mark VALUES (?)", (mark,))
+        dest = tmp_path / "backups"
+        assert backup.run(cfg, root, dest, now=NOW) == 0
+        db_dir = dest / "2026-09-22" / "db"
+        names = sorted(p.name for p in db_dir.iterdir())
+        assert "ft_userdata-a-tradesv3.sqlite" in names
+        assert "ft_userdata-b-tradesv3.sqlite" in names
+        got = {}
+        for sleeve in ("a", "b"):
+            with sqlite3.connect(db_dir / f"ft_userdata-{sleeve}-tradesv3.sqlite") as c:
+                got[sleeve] = c.execute("SELECT x FROM mark").fetchone()[0]
+        assert got == {"a": 11, "b": 22}
+
     def test_prune_keeps_daily_and_sundays(self, cfg, tmp_path):
         dest = tmp_path / "b"
         days = [(NOW - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(40)]

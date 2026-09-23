@@ -50,8 +50,15 @@ describe('confirmPhraseFor', () => {
 });
 
 describe('allowedTargets', () => {
-  it('lets TEST arm either way', () => {
-    expect(allowedTargets('TEST')).toEqual(['LIVE_PROPOSE', 'LIVE_EXECUTE']);
+  it('lets TEST arm either venue, in either sub-mode', () => {
+    // Demo joined the list when Binance Spot Demo Mode became a first-class state; the
+    // demo-specific properties (no DEMO -> LIVE edge, and so on) live in demo.test.tsx.
+    expect(allowedTargets('TEST')).toEqual([
+      'DEMO_PROPOSE',
+      'DEMO_EXECUTE',
+      'LIVE_PROPOSE',
+      'LIVE_EXECUTE',
+    ]);
   });
 
   it('only lets a stuck sleeve go back to TEST', () => {

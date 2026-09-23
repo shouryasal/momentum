@@ -10,7 +10,10 @@ beside the verified ones, but **only what this module recomputes can gate anythi
 kind         recomputed here
 ===========  =============================================================================
 all          the commit touches nothing but the declared target; no tier-2 path;
-             ``author_model`` equals ``runs.served_model`` for ``author_run_id``
+             ``author_model`` equals ``runs.served_model`` for ``author_run_id``; a
+             ``kind: skill`` commit that also rewrites its own ``tests/**`` or
+             ``evals/**`` is **held** — evidence and the thing judged cannot share an
+             author
 params       bounds and max-step recomputed from ``git show <commit>:<target>`` against the
              live file; a costed backtest over ``change_gates.backtest_min_years``;
              walk-forward candidate vs baseline out-of-sample delta
@@ -153,9 +156,22 @@ class Runners:
     skill_eval: Callable[..., Any] | None = None
 
     @classmethod
-    def default(cls) -> Runners:
+    def default(cls, *, live_root: Path | None = None, cfg: EarnConfig | None = None
+                ) -> Runners:
+        """The production runners.
+
+        The skill runners execute **model-authored** code, so they carry a
+        :class:`evals.skill_eval.Sandbox` decided here, once, from
+        ``security.agent_user`` / ``security.agent_cli_wrapper``. With neither configured
+        the sandbox refuses and both runners return a refusal, which
+        :func:`check_skill` turns into a hold — the gate never runs a candidate's own
+        tests with the owner's privileges in order to decide whether to trust it.
+        """
         from evals import skill_eval as skill_eval_mod
         from evals import skill_lint as skill_lint_mod
+
+        root = Path(live_root) if live_root is not None else REPO_ROOT
+        sandbox = skill_eval_mod.sandbox_for(cfg, root=root)
 
         def backtest(arm: str, cwd: Path, timerange: str, fee: float, strategy: str) -> dict:
             return _docker_backtest(cwd=cwd, timerange=timerange, strategy=strategy, fee=fee)
@@ -187,11 +203,14 @@ class Runners:
 
         def skill_tests(skill_dir: Path, cwd: Path, timeout_s: int) -> tuple[bool, str]:
             return skill_eval_mod.run_tests(skill_dir, cwd=cwd, timeout_s=timeout_s,
-                                            repo_root=cwd)
+                                            repo_root=cwd, sandbox=sandbox)
 
         def skill_eval(skill_dir: Path, cwd: Path, timeout_s: int) -> Any:
+            # trusted_root is the LIVE checkout: the fixtures that score the candidate
+            # live in evals/ (tier 2), where no session can have written them.
             return skill_eval_mod.evaluate(skill_dir, cwd=cwd, timeout_s=timeout_s,
-                                           repo_root=cwd)
+                                           repo_root=cwd, sandbox=sandbox,
+                                           trusted_root=root)
 
         return cls(backtest=backtest, walk_forward=walk_forward, replay=replay_runner,
                    signal_replay=signal_replay, skill_lint=skill_lint,
@@ -282,6 +301,30 @@ def find_mismatches(claimed: dict, verified: dict, *, pct: float = MISMATCH_PCT
 # --------------------------------------------------------------------------- checks
 
 
+#: Sub-paths of a skill that ARE the evidence: its pytest suite and its eval cases. A
+#: commit that rewrites them is grading its own homework.
+SELF_EVIDENCE_DIRS = ("tests", "evals")
+
+
+def self_authored_evidence(target: str, files: list[str]) -> list[str]:
+    """The evidence files a skill commit touched, if any.
+
+    ``.claude/skills/<name>/tests/**`` and ``evals/cases.yaml`` are tier 1, so one commit
+    could replace the skill body *and* replace its assertions with ``assert True`` — and
+    ``skill_tests`` would dutifully report PASS. The suite's own fixture did exactly that.
+    Evidence and the thing being judged cannot have the same author, so such a commit is
+    held for a human rather than being scored.
+    """
+    base = str(target).rstrip("/")
+    hits: list[str] = []
+    for f in files:
+        rel = f[len(base) + 1:] if f.startswith(base + "/") else f
+        head = rel.split("/", 1)[0]
+        if head in SELF_EVIDENCE_DIRS and "/" in rel:
+            hits.append(f)
+    return hits
+
+
 def check_commit_scope(change: dict, live_root: Path) -> Check:
     """The commit must exist and touch nothing outside the declared target."""
     commit = (change.get("what") or {}).get("commit") or ""
@@ -300,6 +343,13 @@ def check_commit_scope(change: dict, live_root: Path) -> Check:
         return Check("commit_scope", FAIL,
                      f"commit touches paths outside the declared target: {outside}",
                      {"files": files, "target": target})
+    if str(change.get("kind")) == "skill":
+        own = self_authored_evidence(target, files)
+        if own:
+            return Check("commit_scope", HOLD,
+                         f"the commit rewrites its own evidence ({own}) — a human decides"
+                         " whether the new assertions are honest",
+                         {"files": files, "target": target, "self_evidence": own})
     return Check("commit_scope", PASS, f"{len(files)} file(s) under {target}",
                  {"files": files})
 
@@ -545,8 +595,15 @@ def check_skill(change: dict, cfg: EarnConfig, live_root: Path, worktree: Path |
         out.append(Check("skill_tests", HOLD, "no test runner available"))
     else:
         ok, log = runners.skill_tests(skill_dir, root, timeout_s)
-        out.append(Check("skill_tests", PASS if ok else FAIL,
-                         "pytest passed" if ok else f"pytest failed: {log[-400:]}"))
+        # "refused" is not "failed": the suite was never run, because running
+        # model-authored pytest needs containment this host does not have. An
+        # unverifiable change holds for a human; it must never reject (which would throw
+        # a good change away) and must never pass.
+        if not ok and str(log).startswith(skill_eval_refused()):
+            out.append(Check("skill_tests", HOLD, str(log)))
+        else:
+            out.append(Check("skill_tests", PASS if ok else FAIL,
+                             "pytest passed" if ok else f"pytest failed: {log[-400:]}"))
 
     if runners.skill_eval is None:
         out.append(Check("skill_eval", HOLD, "no eval runner available"))
@@ -555,9 +612,19 @@ def check_skill(change: dict, cfg: EarnConfig, live_root: Path, worktree: Path |
         rate = float(getattr(res, "pass_rate", 0.0))
         floor = float(cfg.skills.eval.min_pass_rate)
         data = res.as_dict() if hasattr(res, "as_dict") else {"pass_rate": rate}
-        out.append(Check("skill_eval", PASS if rate + 1e-9 >= floor else FAIL,
-                         f"pass rate {rate:.0%} vs floor {floor:.0%}", data))
+        refused = str(getattr(res, "refused", "") or "")
+        if refused:
+            out.append(Check("skill_eval", HOLD, refused, data))
+        else:
+            out.append(Check("skill_eval", PASS if rate + 1e-9 >= floor else FAIL,
+                             f"pass rate {rate:.0%} vs floor {floor:.0%}", data))
     return out
+
+
+def skill_eval_refused() -> str:
+    from evals.skill_eval import REFUSED
+
+    return REFUSED
 
 
 # --------------------------------------------------------------------------- entry point
@@ -589,7 +656,7 @@ def verify(change: dict, cfg: EarnConfig, jdb, *, live_root: Path,
            costs: dict | None = None, skills: list[str] | None = None,
            now: datetime | None = None) -> VerifyResult:
     """Recompute every piece of evidence this change's kind requires."""
-    runners = runners or Runners.default()
+    runners = runners or Runners.default(live_root=live_root, cfg=cfg)
     now = now or datetime.now(UTC)
     kind = str(change["kind"])
     op = change_op(change)

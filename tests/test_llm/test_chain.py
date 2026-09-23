@@ -61,13 +61,25 @@ class TestChainOrder:
         assert json.loads(row["escalation_reasons"]) == ["near_stop"]
 
     def test_force_escalation_and_gray_zone_also_escalate(self, mc, jdb, kdb):
+        """`validate` escalates EFFORT before MODEL (tasks.validate.escalation_effort).
+
+        So the first thing an escalated validate tries is Sonnet at max, not Opus: the
+        same tokens thought about longer, which is far cheaper than the same thinking on a
+        dearer model. Opus is still next in line and still what serves if Sonnet fails.
+        """
         for kwargs in ({"force_escalation": ["news:hack"]}, {"gray_zone": True},
                        {"low_confidence": True}):
+            p = claude(responses=[scripted(OK)])
             res = chain_mod.run_task(
                 "validate", "p", run_ctx=ctx(stage="validate"), models_cfg=mc,
-                jdb=jdb, kdb=kdb, providers={"claude:subscription":
-                                             claude(responses=[scripted(OK)])},
-                **kwargs)
+                jdb=jdb, kdb=kdb, providers={"claude:subscription": p}, **kwargs)
+            assert res.served.alias == "sonnet", kwargs
+            assert p.requests[0].effort == "max", kwargs
+
+            failing = claude(responses=[scripted(failure="error"), scripted(OK)])
+            res = chain_mod.run_task(
+                "validate", "p", run_ctx=ctx(stage="validate"), models_cfg=mc,
+                jdb=jdb, kdb=kdb, providers={"claude:subscription": failing}, **kwargs)
             assert res.served.alias == "opus", kwargs
 
     def test_an_escalation_reason_outside_escalate_on_does_not_escalate(self, mc, jdb):
@@ -232,6 +244,75 @@ class TestCircuitBreakers:
         with db.opened(journal) as second:
             assert health_mod.is_open(second, "claude:subscription")
 
+    def test_a_host_validator_rejection_never_opens_the_breaker(self, mc, jdb):
+        """A model-output quality problem is not a dead credential.
+
+        ``schema_invalid`` is synthesised by the router when the CALLER's validator
+        rejects otherwise-successful output. record_failure was called for every failure
+        class, and the breaker is keyed on the provider_key alone, so three validator
+        rejections inside 15 minutes opened ``claude:subscription`` for 15 minutes —
+        every task on that credential (validate, scan's haiku fallback, the console
+        playground) then skipped as provider_down.
+        """
+        p = claude(default=scripted('{"cited": "ghost"}'))
+        for _ in range(4):
+            chain_mod.run_task("validate", "p", run_ctx=ctx(stage="validate"),
+                               models_cfg=mc, jdb=jdb,
+                               validator=lambda t: "ghost" not in t,
+                               providers={"claude:subscription": p})
+        rows = calls(jdb)
+        assert len(rows) >= 4 and {c["status"] for c in rows} == {"schema_invalid"}
+        state = health_mod.read_state(jdb, "claude:subscription")
+        assert state.state == "closed", "a validator rejection opened the credential"
+        assert state.consecutive_failures == 0
+        assert not health_mod.is_open(jdb, "claude:subscription")
+
+    def test_an_empty_completion_never_opens_the_breaker(self, mc, jdb):
+        p = claude(default=scripted(failure="empty_output"))
+        for _ in range(4):
+            chain_mod.run_task("validate", "p", run_ctx=ctx(stage="validate"),
+                               models_cfg=mc, jdb=jdb,
+                               providers={"claude:subscription": p})
+        assert {c["status"] for c in calls(jdb)} == {"empty_output"}
+        assert health_mod.read_state(jdb, "claude:subscription").state == "closed"
+
+    def test_our_own_spending_cap_never_opens_the_breaker(self, mc, jdb):
+        """``budget_exhausted`` is Earn's max_usd, not the provider's state."""
+        p = claude(default=scripted(failure="budget_exhausted"))
+        for _ in range(4):
+            chain_mod.run_task("decide", "p", run_ctx=ctx(), models_cfg=mc, jdb=jdb,
+                               providers={"claude:subscription": p})
+        assert health_mod.read_state(jdb, "claude:subscription").state == "closed"
+
+    @pytest.mark.parametrize("failure", ["error", "timeout", "rate_limited",
+                                         "auth_error", "quota_exhausted", "provider_down"])
+    def test_a_transport_or_credential_failure_still_opens_it(self, mc, jdb, failure):
+        p = claude(default=scripted(failure=failure))
+        for _ in range(3):
+            chain_mod.run_task("validate", "p", run_ctx=ctx(stage="validate"),
+                               models_cfg=mc, jdb=jdb,
+                               providers={"claude:subscription": p})
+        assert health_mod.read_state(jdb, "claude:subscription").state == "open", failure
+
+    def test_a_provider_down_attempt_is_journaled(self, mc, jdb):
+        """``llm_calls.status`` rejected 'provider_down' and ``_log_call`` swallowed the
+        IntegrityError, so a dead Ollama daemon — the everyday local failure — produced
+        ok=False, failure=provider_down and an EMPTY llm_calls table. The one failure
+        class the operator most needs on the AI & Models page was the one it could never
+        hold."""
+        res = chain_mod.run_task(
+            "scan", "p", run_ctx=ctx(stage="scan"), models_cfg=mc, jdb=jdb,
+            providers={
+                "ollama": local(responses=[scripted(
+                    failure="provider_down", error="connection refused: 127.0.0.1:11434")]),
+                "claude:subscription": claude(
+                    responses=[scripted(failure="provider_down")]),
+            })
+        assert not res.ok and res.failure == "provider_down"
+        rows = calls(jdb)
+        assert [r["status"] for r in rows] == ["provider_down", "provider_down"]
+        assert [r["provider"] for r in rows] == ["ollama", "claude:subscription"]
+
     def test_half_open_lets_exactly_one_call_through(self, jdb):
         from datetime import UTC, datetime, timedelta
 
@@ -267,6 +348,40 @@ class TestBudgets:
         assert mc.budget.mode == "telemetry"
         from datetime import UTC, datetime
 
+        res = chain_mod.run_task(
+            "decide", "p", run_ctx=ctx(), models_cfg=mc, jdb=jdb, kdb=kdb,
+            now=datetime(2026, 9, 22, tzinfo=UTC),
+            providers={"claude:subscription": claude(responses=[scripted(failure="error")]),
+                       "claude:api_key": claude(key="claude:api_key",
+                                                responses=[scripted(OK)])})
+        assert not res.ok
+        blocked = [c for c in calls(jdb) if c["status"] == "budget_exhausted"]
+        assert blocked and "api_key_monthly_cap_usd" in blocked[0]["error"]
+
+    def test_spend_the_cli_billed_to_the_key_counts_even_under_another_provider_key(
+        self, mc, jdb, kdb, monkeypatch
+    ):
+        """The cap is keyed on what was BILLED, not on what the router intended.
+
+        ``auth_source`` comes from the CLI's own init frame, so it is the only field that
+        knows what the child process really authenticated with. A subscription attempt on
+        a host where the plain ANTHROPIC_API_KEY leaked into the environment spends real
+        money; counting only rows whose ``provider`` is claude:api_key let that spend sit
+        outside the one hard cap that exists to bound it.
+        """
+        from datetime import UTC, datetime
+
+        monkeypatch.setenv(claude_auth.AUTH_MODE_VAR, "auto")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        jdb.execute(
+            "INSERT INTO llm_calls(ts_utc, task, provider, model, auth_source, attempt,"
+            " status, cost_usd) VALUES (?,?,?,?,?,0,'ok',?)",
+            ("2026-09-01T00:00:00Z", "decide", "claude:subscription", "m",
+             "api_key", 31.0))
+        jdb.commit()
+        assert chain_mod.month_spend(jdb, month="2026-09",
+                                     provider="claude:api_key") == 0.0
+        assert chain_mod.metered_month_spend(jdb, month="2026-09") == pytest.approx(31.0)
         res = chain_mod.run_task(
             "decide", "p", run_ctx=ctx(), models_cfg=mc, jdb=jdb, kdb=kdb,
             now=datetime(2026, 9, 22, tzinfo=UTC),

@@ -7,8 +7,26 @@ freqtrade adapter (earn_base.py) wires the callbacks to this.
 
 Fail-closed rules (canonical contracts #5/#6): an unreadable or stale flags file
 blocks entries; missing freshness data blocks entries; a NAV the adapter could not
-compute blocks entries; the monthly lock is cleared only by a human
-(``human_resume_monthly`` / ``ops.lib.risk_resume``), never by the loop.
+compute blocks entries.
+
+The monthly stop has ONE expiry and it is the thing it measures. ``monthly_loss_stop``
+is a drawdown *from the Gulf-month anchor*; when the Gulf calendar month turns, that
+anchor is re-taken at the current NAV and the condition that set the lock no longer
+exists — so the lock is released with it. A drawdown in May does not block December.
+Per mode (``GateConfig.monthly_lock_release``):
+
+* **LIVE** — ``human_or_month_end``. The sleeve is paused and a human may resume it
+  early through ``ops.lib.risk_resume`` (which also re-anchors); if nobody does, the
+  pause still ends at the Gulf month boundary. It is a visible, resumable state, never
+  a lock that outlives its own reason.
+* **TEST / backtest** — ``month_end``. There is no human, so the boundary is the only
+  release. Without this a backtest measures the lock and not the strategy: one -10%
+  month in 2021 silenced SleeveA for the remaining 5.3 years of the sample.
+
+The daily stop expires on its own ``locked_until`` timestamp (``daily_stop_lock_hours``
+from the moment it fired), the re-entry cooldown on ``reentry_cooldown_hours``, and the
+freqtrade protections on candle counts — every lock in this file is bounded by the
+condition that set it.
 """
 
 from __future__ import annotations
@@ -31,10 +49,18 @@ _EPS = 1e-9
 
 CHECK_ORDER = (
     "nav_valid", "kill", "monthly_lock", "daily_lock", "blackout", "staleness",
-    "reconcile", "trades_per_day", "orders_per_day", "turnover_day", "fee_budget",
-    "min_notional", "order_notional", "entries_per_trade", "weight_cap", "gross_cap",
-    "usdt_floor",
+    "reconcile", "exit_only", "tier", "trades_per_day", "orders_per_day", "turnover_day",
+    "fee_budget", "min_notional", "step_size", "order_notional", "entries_per_trade",
+    "min_position", "max_positions", "satellite_count", "satellite_gross", "weight_cap",
+    "beta_cap", "corr_cap", "gross_cap", "usdt_floor",
 )
+
+#: Tier names the universe snapshot may assign. ``core`` is BTC/ETH and is never rotated;
+#: ``major`` and ``satellite`` are the tradeable tiers (wide-universe.md §2.2). Anything
+#: else — including a watchlist-only name and an asset the snapshot has never heard of —
+#: resolves to a cap of zero and the ``tier`` check refuses it.
+TRADEABLE_TIERS = ("core", "major", "satellite")
+SATELLITE_TIER = "satellite"
 
 # The subset that also gates a *discretionary* exit (a trim or a TP rung). Risk exits
 # are never blocked — see mechanics.is_risk_exit.
@@ -44,13 +70,117 @@ EXIT_CHECK_ORDER = ("orders_per_day", "turnover_day", "fee_budget")
 RECONCILE_FLAG = "reconcile_mismatch"
 
 
+def default_run_id(sleeve: str) -> str:
+    """The run id used when no transition has minted one — a fresh checkout.
+
+    Stdlib mirror of ``ops.gen_freqtrade_config.default_run_id``; ``strategies/`` is
+    mounted flat into the container and may not import ``ops``, and
+    ``tests/test_strategies/test_gate_config.py`` cross-checks that the two agree.
+
+    They *must* agree, because this value is the ``risk_state`` namespace. With ``""``
+    here and ``test-<s>-000`` there, the same machine wrote the gate's anchors and locks
+    under un-namespaced keys while every host-side reader that consults the generator's
+    name looked under ``run:test-<s>-000:`` — two shapes of the same row, which is why
+    ``ops.lib.mode_view.risk_state`` has to read both. It still reads both, for rows
+    already on disk; nothing creates the second shape any more.
+    """
+    return f"test-{str(sleeve).lower()}-000"
+
+
+# --------------------------------------------------------------------------- universe
+
+@dataclass(frozen=True)
+class UniverseView:
+    """The point-in-time universe the gate enforces against, keyed by BASE ASSET.
+
+    Rendered into ``config/riskgate.json`` by ``ops.gen_freqtrade_config`` from the
+    resolver's snapshot (``knowledge/universe/<date>.json``, package U1), so the live bot
+    and the backtest read the same artefact by construction — freqtrade's dynamic
+    pairlists are all ``SupportsBacktesting.NO`` and cannot give us that
+    (wide-universe.md §5.3).
+
+    Absent a snapshot this degrades to exactly the two-asset world: every asset in
+    ``risk.max_weight`` is ``core``, nothing is a satellite, and no new check can fire.
+    That is the fallback, not the target.
+
+    ``caps`` is what the RESOLVER proposed. It is never the answer on its own —
+    :meth:`cap_for` takes the tighter of it and the human ceiling, so a corrupted or
+    over-generous snapshot can only ever shrink a cap.
+    """
+
+    tiers: dict[str, str] = field(default_factory=dict)         # asset -> tier
+    caps: dict[str, float] = field(default_factory=dict)        # asset -> resolver's cap
+    scores: dict[str, float] = field(default_factory=dict)      # asset -> satellite score
+    exit_only: frozenset[str] = frozenset()
+    filters: dict[str, dict[str, float]] = field(default_factory=dict)  # exchange filters
+    date: str = ""
+    sha256: str = ""
+
+    def tier_of(self, asset: str) -> str:
+        if asset in self.exit_only:
+            return "exit_only"
+        return self.tiers.get(asset, "")
+
+    def is_tradeable(self, asset: str) -> bool:
+        return asset not in self.exit_only and self.tiers.get(asset, "") in TRADEABLE_TIERS
+
+    def is_satellite(self, asset: str) -> bool:
+        return self.tiers.get(asset, "") == SATELLITE_TIER
+
+    def filter_floor(self, asset: str) -> float:
+        """Smallest order notional this asset's own exchange filters permit, in USDT.
+
+        ``minNotional`` is $5 for 450 pairs and $1 for 30, so Binance is rarely the binding
+        constraint — but the tail of a 100-name watchlist is not surveyed, and one step of
+        ``LOT_SIZE`` can be worth real money (``ZEC``: $1.56 of notional per step). The
+        gate re-checks both because the gate, not freqtrade's ``PrecisionFilter``, is the
+        authority (wide-universe.md §2.4).
+        """
+        f = self.filters.get(asset) or {}
+        try:
+            return max(float(f.get("min_notional", 0.0) or 0.0),
+                       float(f.get("step_notional", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+
+def _resolve_universe(uni: dict[str, Any], max_weight: dict[str, Any]) -> UniverseView:
+    """Build the :class:`UniverseView` from ``riskgate.json``'s ``universe`` block."""
+    snap = uni.get("snapshot")
+    if not isinstance(snap, dict):
+        # No snapshot: the assets that carry an explicit human cap are the whole universe,
+        # all core. This is today's BTC/ETH world and nothing about it changes.
+        return UniverseView(tiers={str(a): "core" for a in (max_weight or {})})
+    def _fmap(key: str) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for k, v in (snap.get(key) or {}).items():
+            try:
+                out[str(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        return out
+    filters: dict[str, dict[str, float]] = {}
+    for asset, spec in (snap.get("filters") or {}).items():
+        if isinstance(spec, dict):
+            filters[str(asset)] = {str(k): v for k, v in spec.items()}
+    return UniverseView(
+        tiers={str(k): str(v) for k, v in (snap.get("tiers") or {}).items()},
+        caps=_fmap("caps"),
+        scores=_fmap("scores"),
+        exit_only=frozenset(str(a) for a in (snap.get("exit_only") or [])),
+        filters=filters,
+        date=str(snap.get("date") or ""),
+        sha256=str(snap.get("sha256") or ""),
+    )
+
+
 # --------------------------------------------------------------------------- config
 
 @dataclass(frozen=True)
 class GateConfig:
     sleeve: str                      # 'a' | 'b'
     pairs: tuple[str, ...]
-    weight_caps: dict[str, float]    # PAIR-keyed, resolved from asset caps + default
+    weight_caps: dict[str, float]    # PAIR-keyed, resolved from tier ceilings + max_weight
     gross_cap: float
     usdt_floor: float
     daily_stop: float
@@ -79,8 +209,18 @@ class GateConfig:
     # --- mechanics / churn limits (spec sections 3 and 9) -------------------------
     max_entries_per_trade: int = 4
     max_order_notional_pct: float = 0.20
-    max_orders_per_day: int = 12
+    max_orders_per_day: int = 16
     max_turnover_pct_per_day: float = 0.50
+    # --- wide universe (wide-universe.md §2.2-2.4) -------------------------------
+    universe: UniverseView = field(default_factory=UniverseView)
+    tier_caps: dict[str, float] = field(default_factory=dict)   # tier -> human ceiling
+    max_weight: dict[str, float] = field(default_factory=dict)  # asset -> human ceiling
+    max_open_positions: int = 8
+    max_satellite_positions: int = 4
+    max_satellite_gross: float = 0.10
+    max_beta_to_btc: float = 1.30
+    max_avg_pairwise_corr: float = 0.70
+    min_position_pct_nav: float = 0.02
     max_fee_pct_per_month: float = 0.01
     market_entries_allowed: bool = False
     protection_drawdown_lookback: int = 6
@@ -110,6 +250,17 @@ class GateConfig:
     def is_live(self) -> bool:
         return self.mode == "live"
 
+    @property
+    def monthly_lock_release(self) -> str:
+        """How a monthly stop ends, stated per mode (see the module docstring).
+
+        ``human_or_month_end`` in LIVE — a human may resume early via
+        ``ops.lib.risk_resume``, and the Gulf month boundary releases it regardless.
+        ``month_end`` in TEST and in a backtest, where there is no human to ask.
+        Both expire; neither outlives the month the drawdown was measured over.
+        """
+        return "human_or_month_end" if self.is_live else "month_end"
+
     @classmethod
     def load(cls, path: str | Path | None = None, sleeve: str | None = None,
              runtime_path: str | Path | None = None) -> GateConfig:
@@ -117,18 +268,31 @@ class GateConfig:
 
         The runtime file (``$EARN_RUNTIME``) is the only thing that can say "live"; it
         is rendered from a signed mode state. Its absence or corruption leaves the
-        committed TEST baseline in place — fail closed by construction.
+        committed TEST baseline in place — fail closed by construction, and that baseline
+        now includes :func:`default_run_id`, the same name the generator would have
+        rendered, so the gate never writes un-namespaced ``risk_state`` rows.
         """
         p = Path(path or os.environ.get("EARN_RISKGATE", "config/riskgate.json"))
         raw = json.loads(p.read_text())
         risk, uni, ex = raw["risk"], raw["universe"], raw["execution"]
         cp = raw["container_paths"]
         sleeve_id = (sleeve or os.environ.get("EARN_SLEEVE", "a")).lower()
-        default_cap = risk["max_weight"].get("default", 0.0)
+        quote = str(uni.get("quote") or "USDT")
+        max_weight = {str(k): float(v) for k, v in (risk.get("max_weight") or {}).items()
+                      if k != "default"}
+        tier_caps = {str(k): float(v) for k, v in (risk.get("tier_caps") or {}).items()}
+        universe = _resolve_universe(uni, max_weight)
+        # Every pair the gate knows about: the whitelist plus anything the snapshot has a
+        # tier for, so a pair we still HOLD but no longer whitelist still resolves a cap
+        # (it resolves to zero, and exit_only then refuses the entry — which is the point).
+        pairs = tuple(uni["pairs"])
+        known = {p.split("/")[0] for p in pairs} | set(universe.tiers) | set(universe.exit_only)
         caps = {
-            pair: risk["max_weight"].get(pair.split("/")[0], default_cap)
-            for pair in uni["pairs"]
+            f"{asset}/{quote}": _resolve_cap(asset, universe, tier_caps, max_weight)
+            for asset in sorted(known)
         }
+        caps.update({p: _resolve_cap(p.split("/")[0], universe, tier_caps, max_weight)
+                     for p in pairs})
         trading_all = raw.get("trading") or {}
         trading = dict((trading_all.get("sleeves") or {}).get(sleeve_id) or {})
         runtime = _load_runtime(runtime_path, sleeve_id)
@@ -165,7 +329,16 @@ class GateConfig:
             phase=runtime.get("mode_phase") or raw["phase"],
             max_entries_per_trade=int(risk.get("max_entries_per_trade", 4)),
             max_order_notional_pct=float(risk.get("max_order_notional_pct", 0.20)),
-            max_orders_per_day=int(risk.get("max_orders_per_day", 12)),
+            max_orders_per_day=int(risk.get("max_orders_per_day", 16)),
+            universe=universe,
+            tier_caps=tier_caps,
+            max_weight=max_weight,
+            max_open_positions=int(risk.get("max_open_positions", 8)),
+            max_satellite_positions=int(risk.get("max_satellite_positions", 4)),
+            max_satellite_gross=float(risk.get("max_satellite_gross", 0.10)),
+            max_beta_to_btc=float(risk.get("max_beta_to_btc", 1.30)),
+            max_avg_pairwise_corr=float(risk.get("max_avg_pairwise_corr", 0.70)),
+            min_position_pct_nav=float(risk.get("min_position_pct_nav", 0.02)),
             max_turnover_pct_per_day=float(risk.get("max_turnover_pct_per_day", 0.50)),
             max_fee_pct_per_month=float(risk.get("max_fee_pct_per_month", 0.01)),
             market_entries_allowed=bool(risk.get("market_entries_allowed", False)),
@@ -188,10 +361,29 @@ class GateConfig:
             mode=str(runtime.get("mode", "test")),
             state=str(runtime.get("state", "TEST")),
             submode=runtime.get("submode"),
-            run_id=str(runtime.get("run_id") or ""),
+            run_id=str(runtime.get("run_id") or default_run_id(sleeve_id)),
             seed_usdt=float(runtime.get("seed_usdt") or 0.0),
             require_approval=bool(runtime.get("require_approval", False)),
         )
+
+    # -- wide-universe accessors ------------------------------------------------
+
+    def cap_for(self, pair: str) -> float:
+        """Weight cap for a pair. A pair the gate has never resolved caps at zero."""
+        cap = self.weight_caps.get(pair)
+        if cap is not None:
+            return cap
+        return _resolve_cap(asset_of(pair), self.universe, self.tier_caps, self.max_weight)
+
+    def tier_of(self, pair: str) -> str:
+        return self.universe.tier_of(asset_of(pair))
+
+    def is_satellite(self, pair: str) -> bool:
+        return self.universe.is_satellite(asset_of(pair))
+
+    def notional_floor(self, pair: str) -> float:
+        """The binding minimum order notional: Earn's own floor or the exchange's."""
+        return max(self.min_notional, self.universe.filter_floor(asset_of(pair)))
 
     def mechanics(self, path: str, default: Any = None) -> Any:
         """One resolved mechanics value, e.g. ``cfg.mechanics('dca.step_pct')``."""
@@ -201,6 +393,112 @@ class GateConfig:
                 return default
             node = node[part]
         return node
+
+
+def asset_of(pair: str) -> str:
+    return str(pair).split("/")[0]
+
+
+# ------------------------------------------------------- correlation / beta (stdlib)
+#
+# The gate computes these itself, from returns the adapter already has, at entry time.
+# They are not model inputs and no proposal can waive them. Pure float maths on purpose:
+# strategies/ is mounted flat into the freqtrade container and numpy is not guaranteed
+# there, and a risk check that can ImportError is not a risk check.
+
+def _pearson(a: list[float], b: list[float]) -> float | None:
+    """Pearson correlation of two equal-length series; ``None`` when undefined."""
+    n = min(len(a), len(b))
+    if n < 2:
+        return None
+    a, b = a[-n:], b[-n:]
+    ma, mb = sum(a) / n, sum(b) / n
+    cov = sum((x - ma) * (y - mb) for x, y in zip(a, b, strict=True))
+    va = sum((x - ma) ** 2 for x in a)
+    vb = sum((y - mb) ** 2 for y in b)
+    if va <= _EPS or vb <= _EPS:
+        return None            # a constant series has no correlation, not a correlation of 0
+    return cov / ((va ** 0.5) * (vb ** 0.5))
+
+
+def avg_pairwise_corr(series: dict[str, list[float]]) -> float | None:
+    """Average pairwise correlation of a held book. ``None`` when it cannot be measured.
+
+    Fewer than two measurable names is not a correlated book — it is one position, which
+    the per-asset cap already bounds — so the answer is ``None`` and the check passes.
+    """
+    names = sorted(series)
+    vals: list[float] = []
+    for i, x in enumerate(names):
+        for y in names[i + 1:]:
+            c = _pearson(series[x], series[y])
+            if c is not None:
+                vals.append(c)
+    return sum(vals) / len(vals) if vals else None
+
+
+def beta_to(series: list[float], benchmark: list[float]) -> float | None:
+    """Realised beta of ``series`` against ``benchmark`` over their common window."""
+    n = min(len(series), len(benchmark))
+    if n < 2:
+        return None
+    s, b = series[-n:], benchmark[-n:]
+    mb = sum(b) / n
+    vb = sum((y - mb) ** 2 for y in b)
+    if vb <= _EPS:
+        return None
+    ms = sum(s) / n
+    cov = sum((x - ms) * (y - mb) for x, y in zip(s, b, strict=True))
+    return cov / vb
+
+
+def portfolio_beta(weights: dict[str, float], series: dict[str, list[float]],
+                   benchmark: list[float]) -> float | None:
+    """Exposure-weighted beta of the risk book. ``None`` when nothing is measurable.
+
+    Weights are position values; the result is normalised by the measurable exposure, so
+    a name with no history neither inflates nor deflates the answer. A pure-BTC book
+    measures 1.0 and can therefore never breach a cap above 1.0 — which is the intent:
+    the cap exists to stop an eight-name alt book being a 1.5x levered BTC position
+    wearing eight names (wide-universe.md §2.3).
+    """
+    num = 0.0
+    den = 0.0
+    for name, w in weights.items():
+        if w <= 0:
+            continue
+        b = beta_to(series.get(name) or [], benchmark)
+        if b is None:
+            continue
+        num += w * b
+        den += w
+    return num / den if den > _EPS else None
+
+
+def _resolve_cap(asset: str, universe: UniverseView, tier_caps: dict[str, float],
+                 max_weight: dict[str, float]) -> float:
+    """One asset's weight cap. **Unknown means zero, never a default.**
+
+    Resolution, tightest wins (wide-universe.md §2.2):
+
+    1. ``exit_only`` ⇒ 0.0. A position being wound down can never be increased.
+    2. the human's explicit ``risk.max_weight[asset]``, if there is one;
+    3. the human's ``risk.tier_caps[tier]`` ceiling for the tier the snapshot assigned;
+    4. the resolver's own proposed cap, which can only ever shrink the answer;
+    5. no tier and no explicit entry ⇒ **0.0**, and the ``tier`` check refuses the order.
+
+    The deleted ``max_weight.default`` is the whole reason this function exists: it gave
+    every asset that appeared in the universe a 30% cap without anyone deciding so.
+    """
+    if asset in universe.exit_only:
+        return 0.0
+    tier = universe.tiers.get(asset, "")
+    ceilings = [c for c in (max_weight.get(asset),
+                            tier_caps.get(tier) if tier in TRADEABLE_TIERS else None,
+                            universe.caps.get(asset)) if c is not None]
+    if not ceilings:
+        return 0.0
+    return max(float(min(ceilings)), 0.0)
 
 
 def _default_freshness(knowledge_db: str) -> str:
@@ -438,6 +736,10 @@ class LoopActions:
     flatten_reason: str = ""
     lock_until: datetime | None = None
     monthly_lock: bool = False
+    #: The Gulf month boundary released a monthly stop on this tick. The adapter
+    #: journals it so the release is as visible in the record as the stop was.
+    monthly_unlock: bool = False
+    unlocked_month: str = ""
 
 
 @dataclass(frozen=True)
@@ -470,7 +772,8 @@ class RiskGate:
     """Pure enforcement. Providers are injected; backtests stub them out."""
 
     def __init__(self, cfg: GateConfig, store: StateStore, *,
-                 flags_provider=None, staleness_provider=None, kill_provider=None):
+                 flags_provider=None, staleness_provider=None, kill_provider=None,
+                 returns_provider=None):
         self.cfg = cfg
         self.store = NamespacedStateStore(store, cfg.run_id) if cfg.run_id else store
         self._flags = flags_provider or (
@@ -478,6 +781,48 @@ class RiskGate:
         self._age = staleness_provider or (
             lambda now: data_age_minutes(cfg.freshness_path, now))
         self._kill = kill_provider or (lambda: Path(cfg.kill_path).exists())
+        #: ``pair -> recent daily returns`` (oldest first), or ``None`` when the adapter
+        #: has no history for it. Injected so the gate stays pure and freqtrade-free; the
+        #: default answers "no history", under which the beta and correlation checks pass.
+        self._returns = returns_provider or (lambda pair: None)
+
+    # -- book shape ------------------------------------------------------------
+
+    def _held(self, ps: PortfolioState) -> dict[str, float]:
+        """Pairs actually held, in USDT. Dust is not a position for counting purposes."""
+        floor = max(self.cfg.dust_weight * max(ps.nav, _EPS), 0.0)
+        return {p: v for p, v in ps.positions.items() if v > floor}
+
+    def _book_after(self, pair: str, stake: float, ps: PortfolioState) -> dict[str, float]:
+        book = self._held(ps)
+        book[pair] = book.get(pair, 0.0) + max(stake, 0.0)
+        return book
+
+    def _series_for(self, book: dict[str, float]) -> dict[str, list[float]]:
+        out: dict[str, list[float]] = {}
+        for p in book:
+            try:
+                r = self._returns(p)
+            except Exception:  # noqa: BLE001 — a missing series must not break the gate
+                r = None
+            if r:
+                series = [float(x) for x in r]
+                if len(series) >= 2:
+                    out[p] = series
+        return out
+
+    def _benchmark_series(self) -> list[float]:
+        """BTC's returns — the benchmark the beta cap is measured against."""
+        for pair in self.cfg.pairs:
+            if asset_of(pair) == "BTC":
+                try:
+                    return [float(x) for x in (self._returns(pair) or [])]
+                except Exception:  # noqa: BLE001
+                    return []
+        try:
+            return [float(x) for x in (self._returns("BTC/USDT") or [])]
+        except Exception:  # noqa: BLE001
+            return []
 
     # -- entry -----------------------------------------------------------------
 
@@ -488,13 +833,18 @@ class RiskGate:
 
         checks["nav_valid"] = bool(ps.valid) and ps.nav > 0
         checks["kill"] = not self._kill()
-        checks["monthly_lock"] = self.store.get("monthly_locked") != "1"
+        checks["monthly_lock"] = not self._monthly_lock_active(ps.now)
         checks["daily_lock"] = not self._daily_locked(ps.now)
         blocked, flag = self._flags(pair, ps.now)
         reconcile_hit = blocked and flag == RECONCILE_FLAG
         checks["blackout"] = not (blocked and not reconcile_hit)
         checks["staleness"] = self._age(ps.now) <= cfg.staleness_minutes
         checks["reconcile"] = not (reconcile_hit and cfg.reconcile_block_on_mismatch)
+        asset = asset_of(pair)
+        checks["exit_only"] = asset not in cfg.universe.exit_only
+        # Unknown asset means cap ZERO, not a default. A name reaches this line tradeable
+        # only because the resolver put a tier on it in the point-in-time snapshot.
+        checks["tier"] = cfg.universe.is_tradeable(asset) and cfg.cap_for(pair) > 0.0
         checks["trades_per_day"] = self.trades_today(ps.now) < cfg.max_trades_per_day
         checks["orders_per_day"] = self.orders_today(ps.now) < cfg.max_orders_per_day
         nav = max(ps.nav, _EPS)
@@ -506,12 +856,42 @@ class RiskGate:
             self.fees_this_month(ps.now) / nav <= cfg.max_fee_pct_per_month + _EPS
         )
         checks["min_notional"] = stake >= cfg.min_notional
+        # The asset's OWN exchange filters, re-checked here because the gate is the
+        # authority: below one LOT_SIZE step or the symbol's minNotional there is no order.
+        checks["step_size"] = stake + _EPS >= cfg.universe.filter_floor(asset)
         checks["order_notional"] = stake / nav <= cfg.max_order_notional_pct + _EPS
         checks["entries_per_trade"] = (
             ps.entries_used.get(pair, 0) < cfg.max_entries_per_trade
         )
         pos = ps.positions.get(pair, 0.0)
-        checks["weight_cap"] = (pos + stake) / nav <= cfg.weight_caps.get(pair, 0.0) + _EPS
+        # A position smaller than min_position_pct_nav can be opened and closed but never
+        # MANAGED — at the $1,000 live seed a 2% position is $20 and a half-trim of it is
+        # $10, under the $25 min_notional floor — so it is not opened (wide-universe.md
+        # §2.4). Only OPENING is tested: an add is by definition making an existing
+        # position bigger, and refusing adds under 2% of NAV would ban the scheduled DCA
+        # from ever finishing a position it is deliberately building in chunks.
+        opening = pos <= cfg.dust_weight * nav
+        checks["min_position"] = (
+            not opening or (pos + stake) / nav >= cfg.min_position_pct_nav - _EPS
+        )
+        book = self._book_after(pair, stake, ps)
+        checks["max_positions"] = len(book) <= cfg.max_open_positions
+        sats = {p: v for p, v in book.items() if cfg.is_satellite(p)}
+        checks["satellite_count"] = len(sats) <= cfg.max_satellite_positions
+        checks["satellite_gross"] = (
+            sum(sats.values()) / nav <= cfg.max_satellite_gross + _EPS
+        )
+        checks["weight_cap"] = (pos + stake) / nav <= cfg.cap_for(pair) + _EPS
+        # Beta and correlation are measured on the book this entry would CREATE, so the
+        # gate refuses the incremental order that crosses the line rather than the book
+        # that has already crossed it. Unmeasurable (no history yet, one name, a constant
+        # series) is not a breach: it passes, and the tier cap plus max_satellite_gross
+        # are what bound the damage in that window.
+        series = self._series_for(book)
+        beta = portfolio_beta(book, series, self._benchmark_series())
+        checks["beta_cap"] = beta is None or beta <= cfg.max_beta_to_btc + _EPS
+        corr = avg_pairwise_corr(series)
+        checks["corr_cap"] = corr is None or corr <= cfg.max_avg_pairwise_corr + _EPS
         gross = ps.gross
         checks["gross_cap"] = (gross + stake) / nav <= cfg.gross_cap + _EPS
         checks["usdt_floor"] = ps.free_usdt - stake >= cfg.usdt_floor * nav - _EPS
@@ -521,28 +901,40 @@ class RiskGate:
                 qualifier = {
                     "blackout": flag, "weight_cap": pair, "gross_cap": pair,
                     "entries_per_trade": pair, "nav_valid": ps.reason or None,
+                    "exit_only": asset, "tier": asset, "step_size": pair,
                 }.get(name)
                 reason = f"{name}:{qualifier}" if qualifier else name
                 break
         return GateDecision(allowed=(reason == "ok"), reason=reason, checks=checks)
 
     def cap_stake(self, pair: str, proposed: float, ps: PortfolioState) -> float:
-        """Shrink a proposed stake to the tightest headroom; below min_notional -> 0."""
+        """Shrink a proposed stake to the tightest headroom; below the floor -> 0.
+
+        The satellite-gross headroom is here as well as in :meth:`check_entry` so a
+        satellite order is *trimmed* to what the 10% sleeve can still hold rather than
+        refused outright — the cap should shape the book, not stop it dead. Every other
+        wide-universe control (tier, exit_only, position count, beta, correlation) is a
+        yes/no about whether this order may exist at all, so it has no headroom to
+        express and stays a refusal in ``check_entry``.
+        """
         if not ps.valid:
             return 0.0
         cfg = self.cfg
         nav = max(ps.nav, _EPS)
         pos = ps.positions.get(pair, 0.0)
-        headrooms = (
-            cfg.weight_caps.get(pair, 0.0) * nav - pos,
+        headrooms = [
+            cfg.cap_for(pair) * nav - pos,
             cfg.gross_cap * nav - ps.gross,
             ps.free_usdt - cfg.usdt_floor * nav,
             cfg.max_order_notional_pct * nav,
             max(cfg.max_turnover_pct_per_day * nav - self.turnover_today(ps.now), 0.0),
             proposed,
-        )
+        ]
+        if cfg.is_satellite(pair):
+            sats = sum(v for p, v in self._held(ps).items() if cfg.is_satellite(p))
+            headrooms.append(cfg.max_satellite_gross * nav - sats)
         stake = max(min(headrooms), 0.0)
-        return stake if stake >= cfg.min_notional else 0.0
+        return stake if stake >= cfg.notional_floor(pair) else 0.0
 
     # -- exit ------------------------------------------------------------------
 
@@ -589,19 +981,27 @@ class RiskGate:
             self.store.set("day_anchor_nav", repr(ps.nav))
             self.store.set("trades_today", "0")
             self.store.set("trades_today_date", today)
+        unlocked_month = ""
         if self.store.get("month_anchor_month") != month:
+            # The month boundary re-anchors the measure AND releases what the measure
+            # locked. Doing the two together is the whole fix: a lock re-anchored but
+            # not released blocks forever, and a lock released but not re-anchored
+            # re-arms on the very next tick (verified HIGH #10).
             self.store.set("month_anchor_month", month)
             self.store.set("month_anchor_nav", repr(ps.nav))
+            unlocked_month = self._expire_monthly_lock(now)
 
         day_anchor = _fnum(self.store.get("day_anchor_nav"), ps.nav)
         month_anchor = _fnum(self.store.get("month_anchor_nav"), ps.nav)
         day_ret = ps.nav / day_anchor - 1 if day_anchor > 0 else 0.0
         month_ret = ps.nav / month_anchor - 1 if month_anchor > 0 else 0.0
 
-        if month_ret <= -self.cfg.monthly_stop and self.store.get("monthly_locked") != "1":
+        if month_ret <= -self.cfg.monthly_stop and not self._monthly_lock_active(now):
             self.store.set("monthly_locked", "1")
             self.store.set("monthly_locked_month", month)
-            return LoopActions(flatten=True, flatten_reason="risk_stop_monthly", monthly_lock=True)
+            self.store.set("monthly_unlocked_utc", "")
+            return LoopActions(flatten=True, flatten_reason="risk_stop_monthly",
+                               monthly_lock=True)
 
         if day_ret <= -self.cfg.daily_stop and self.store.get("daily_stop_fired_date") != today:
             lock_until = now + timedelta(hours=self.cfg.daily_lock_hours)
@@ -609,7 +1009,61 @@ class RiskGate:
             self.store.set("locked_until", lock_until.strftime("%Y-%m-%dT%H:%M:%SZ"))
             return LoopActions(flatten=True, flatten_reason="risk_stop_daily",
                                lock_until=lock_until)
-        return LoopActions()
+        return LoopActions(monthly_unlock=bool(unlocked_month),
+                           unlocked_month=unlocked_month)
+
+    # -- the monthly lock and its expiry ---------------------------------------
+
+    def _monthly_lock_active(self, now: datetime) -> bool:
+        """Is the monthly stop still in force at ``now``?
+
+        The stored flag alone used to be the answer, and that made the monthly stop a
+        permanent shutdown: nothing outside ``human_resume_monthly`` ever wrote it back
+        to ``"0"``, so in a backtest — where no human exists — one -10% month ended the
+        run. A real 2021-01→2026-09 SleeveA backtest stopped on 2021-05-22 with
+        ``risk_stop_monthly`` and never traded again.
+
+        The lock now carries the month it was measured over. Once the Gulf calendar
+        month has turned past ``monthly_locked_month`` the anchor that produced the
+        drawdown is gone and the lock goes with it. Read-side so it holds even before
+        the next ``loop_tick`` has written the release; ``loop_tick`` then persists it.
+
+        Fail-closed on a lock with no month recorded (only a hand-written row): a lock
+        we cannot date is a lock. Comparison is lexicographic on ``YYYY-MM``, which is
+        chronological, and uses ``<`` not ``!=`` so a clock that steps backwards — a
+        re-run backtest sharing a store — cannot release a lock early.
+        """
+        if self.store.get("monthly_locked") != "1":
+            return False
+        locked_month = self.store.get("monthly_locked_month") or ""
+        if not locked_month:
+            return True
+        return not (locked_month < _gulf_month(now))
+
+    def _expire_monthly_lock(self, now: datetime) -> str:
+        """Release a monthly lock whose month has ended. Returns the month released."""
+        if self.store.get("monthly_locked") != "1":
+            return ""
+        locked_month = self.store.get("monthly_locked_month") or ""
+        if locked_month and not (locked_month < _gulf_month(now)):
+            return ""
+        self.store.set("monthly_locked", "0")
+        self.store.set("monthly_locked_month", "")
+        self.store.set("monthly_unlocked_utc",
+                       now.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        return locked_month
+
+    def monthly_lock_status(self, now: datetime) -> dict[str, Any]:
+        """Read-only view for the console and ``ops.lib.risk_resume.status``."""
+        locked_month = self.store.get("monthly_locked_month") or ""
+        return {
+            "locked": self._monthly_lock_active(now),
+            "locked_month": locked_month,
+            "flag_set": self.store.get("monthly_locked") == "1",
+            "expires_at_month_end": locked_month,
+            "release": self.cfg.monthly_lock_release,
+            "unlocked_utc": self.store.get("monthly_unlocked_utc") or "",
+        }
 
     def _daily_locked(self, now: datetime) -> bool:
         raw = self.store.get("locked_until")
@@ -621,22 +1075,47 @@ class RiskGate:
             return False
         return now < until
 
-    def flatten_pending(self) -> str | None:
-        """Non-empty while a stop flatten is in force (drives custom_exit)."""
-        if self.store.get("monthly_locked") == "1":
+    def flatten_pending(self, now: datetime) -> str | None:
+        """Non-empty while a stop flatten is in force (drives custom_exit).
+
+        ``now`` is the caller's clock — freqtrade's ``current_time`` — never the wall
+        clock. The whole gate reads time that way (``check_entry`` uses ``ps.now``,
+        ``trades_today(now)``, …) and this method used to be the one exception: it
+        compared the stored ``locked_until`` against ``datetime.now(UTC)``. That failed
+        OPEN in the two places where the two clocks differ. In a backtest every candle
+        time is historical, so a lock written at a 2021 candle looked long expired
+        against today's wall clock and the daily stop never held for a single simulated
+        bar; and a test that pins a ``NOW`` saw the lock evaporate the moment real time
+        passed it (``test_daily_stop_fires_flatten_and_lock``). The parameter is
+        required on purpose: a safety read must not be able to fall back to a clock the
+        caller is not using.
+        """
+        if self._monthly_lock_active(now):
             return "risk_stop_monthly"
         raw = self.store.get("daily_stop_fired_date")
-        if raw and self._daily_locked(datetime.now(UTC)):
+        if raw and self._daily_locked(now):
             return "risk_stop_daily"
         return None
 
-    def monthly_locked(self) -> bool:
-        return self.store.get("monthly_locked") == "1"
+    def monthly_locked(self, now: datetime | None = None) -> bool:
+        """The monthly stop as of ``now``. Without a clock this is the raw flag — the
+        persisted state, which ``loop_tick`` writes back at the month boundary. Every
+        enforcement path passes its own clock (``check_entry`` via ``ps.now``,
+        ``flatten_pending(now)``), so the expiry can never be missed where it matters.
+        """
+        if now is None:
+            return self.store.get("monthly_locked") == "1"
+        return self._monthly_lock_active(now)
 
     # -- human-only resume -----------------------------------------------------
 
     def human_resume_monthly(self, ps: PortfolioState) -> ResumeResult:
-        """Clear the monthly stop and RE-ANCHOR the month to today's NAV (HIGH #10).
+        """Clear the monthly stop EARLY and re-anchor the month to today's NAV (HIGH #10).
+
+        This is the LIVE human gate, not the only way out: ``loop_tick`` releases the
+        lock by itself once the Gulf month it was measured over has ended. A human uses
+        this to resume *before* that boundary.
+
 
         Without the re-anchor the very next ``loop_tick`` compares the reduced NAV with
         the pre-drawdown anchor and re-locks instantly, so a resume never held. After
@@ -653,6 +1132,7 @@ class RiskGate:
         self.store.set("monthly_locked", "0")
         self.store.set("monthly_locked_month", "")
         self.store.set("monthly_resumed_utc", stamp)
+        self.store.set("monthly_unlocked_utc", "")
         # A same-day daily stop must not immediately re-flatten the resumed sleeve.
         self.store.set("locked_until", "")
         return ResumeResult(True, ps.nav, month, stamp)
@@ -711,6 +1191,15 @@ class RiskGate:
             "turnover_day": (self.turnover_today(ps.now) / nav, cfg.max_turnover_pct_per_day),
             "fee_budget": (self.fees_this_month(ps.now) / nav, cfg.max_fee_pct_per_month),
             "gross_cap": (ps.gross / nav, cfg.gross_cap),
+            "open_positions": (float(len(self._held(ps))), float(cfg.max_open_positions)),
+            "satellite_positions": (
+                float(sum(1 for p in self._held(ps) if cfg.is_satellite(p))),
+                float(cfg.max_satellite_positions),
+            ),
+            "satellite_gross": (
+                sum(v for p, v in self._held(ps).items() if cfg.is_satellite(p)) / nav,
+                cfg.max_satellite_gross,
+            ),
         }
         out = {
             name: {"used": used, "limit": limit, "headroom": limit - used,

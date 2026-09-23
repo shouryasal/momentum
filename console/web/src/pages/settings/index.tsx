@@ -3,9 +3,11 @@ import {
   Badge,
   Button,
   Card,
+  Code,
   Grid,
   Group,
   Loader,
+  ScrollArea,
   Select,
   Stack,
   Table,
@@ -19,6 +21,7 @@ import {
   IconArrowBackUp,
   IconFileCode,
   IconHistory,
+  IconListCheck,
   IconLock,
   IconRefresh,
 } from '@tabler/icons-react';
@@ -29,14 +32,17 @@ import { useSearchParams } from 'react-router-dom';
 import { errorMessage } from '@/api';
 import { usePageCommands } from '@/app/commandRegistry';
 import { useSession } from '@/app/SessionContext';
-import { CodeEditor, DataTable, DiffView, EmptyState, SchemaForm } from '@/components';
+import { CodeEditor, ConfirmDialog, DataTable, DiffView, EmptyState, SchemaForm } from '@/components';
 import type { JsonSchema, ValidationIssue } from '@/components';
+
+import { routeBlurb } from '@/routes';
 
 import { configApi, configKeys, type HistoryEntry, type PatchOp, type PreviewResult } from './api';
 import { PendingEffectsBanner } from './components/PendingEffectsBanner';
+import { SetupPanel } from './components/SetupPanel';
 import { SavePreview, type SaveIntent } from './components/SavePreview';
 import { SectionTree, sectionsOf } from './components/SectionTree';
-import { getAtDotted, patchFrom, setAtDotted } from './patch';
+import { changeBodyFor, getAtDotted, patchFrom, setAtDotted } from './patch';
 
 type SaveBody = Parameters<typeof configApi.save>[1];
 
@@ -57,7 +63,8 @@ export default function SettingsPage() {
   const [section, setSection] = useState<string | null>(null);
   const [draft, setDraft] = useState<Record<string, unknown> | null>(null);
   const [rawDraft, setRawDraft] = useState<string | null>(null);
-  const [tab, setTab] = useState<string | null>('form');
+  // "Start here" first: the settings a demo run needs, before the whole generated form.
+  const [tab, setTab] = useState<string | null>('setup');
   const [previewOpen, setPreviewOpen] = useState(false);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -99,6 +106,12 @@ export default function SettingsPage() {
 
   const rawDirty = Boolean(doc.data && rawDraft !== null && rawDraft !== doc.data.raw);
   const dirty = ops.length > 0 || rawDirty;
+
+  /** The change, derived once, for both the preview and the save (see `changeBodyFor`). */
+  const changeBody = useMemo(
+    () => changeBodyFor({ rawDirty, rawDraft, ops }),
+    [rawDirty, rawDraft, ops],
+  );
 
   usePageCommands('settings', [
     {
@@ -159,14 +172,15 @@ export default function SettingsPage() {
   const save = useMutation({
     mutationFn: async (intent: SaveIntent) => {
       if (!doc.data) throw new Error('no document');
-      if (intent.stepUpToken) await session.stepUp(intent.stepUpToken);
+      // ConfirmDialog has already opened the step-up window; the token rides along only
+      // because the server re-checks it on the protected-path branch.
       const body: SaveBody = {
         base_sha: doc.data.sha,
         reason: intent.reason,
         commit: intent.commit,
         apply_effects: intent.applyEffects,
         ...(intent.confirmPhrase ? { confirm_phrase: intent.confirmPhrase } : {}),
-        ...(tab === 'raw' && rawDirty ? { raw: rawDraft ?? '' } : { patch: ops }),
+        ...changeBody,
       };
       return configApi.save(fileId, body);
     },
@@ -180,11 +194,25 @@ export default function SettingsPage() {
     },
   });
 
+  /**
+   * Restoring an earlier revision of the whole file.
+   *
+   * `confirm_phrase` is the phrase the **operator typed**, not the one the server handed
+   * the client in `GET /api/config/{id}`: forwarding `doc.data.confirm_phrase` made the
+   * typed confirmation a no-op the page satisfied on the operator's behalf. `apply_effects`
+   * is explicit for the same reason — the server's default is `apply_now`, which
+   * regenerates `var/runtime` and restarts the bots.
+   */
   const revert = useMutation({
-    mutationFn: (entry: HistoryEntry) =>
-      configApi.revert(fileId, { audit_id: entry.id, confirm_phrase: doc.data?.confirm_phrase }),
+    mutationFn: (vars: { entry: HistoryEntry; phrase: string }) =>
+      configApi.revert(fileId, {
+        audit_id: vars.entry.id,
+        confirm_phrase: vars.phrase,
+        apply_effects: false,
+        commit: false,
+      }),
     onSuccess: () => {
-      setNotice('Reverted.');
+      setNotice('Reverted. The effects are queued — apply them from the banner.');
       void queryClient.invalidateQueries({ queryKey: ['config'] });
     },
   });
@@ -232,8 +260,11 @@ export default function SettingsPage() {
     <Stack gap="md" data-testid="settings-page">
       <Group justify="space-between" align="flex-end">
         <Stack gap={2}>
-          <Title order={3}>Settings</Title>
-          <Text size="sm" c="dimmed">
+          <Title order={3}>Setup</Title>
+          <Text size="sm" c="dimmed" data-testid="page-blurb">
+            {routeBlurb('settings')}
+          </Text>
+          <Text size="xs" c="dimmed">
             {document.description}
           </Text>
         </Stack>
@@ -297,16 +328,28 @@ export default function SettingsPage() {
 
       <Tabs value={tab} onChange={setTab}>
         <Tabs.List>
+          <Tabs.Tab value="setup" leftSection={<IconListCheck size={14} />}>
+            Start here
+          </Tabs.Tab>
           <Tabs.Tab value="form" disabled={!document.schema}>
-            Form
+            All settings
           </Tabs.Tab>
           <Tabs.Tab value="raw" leftSection={<IconFileCode size={14} />}>
             Raw {document.format.toUpperCase()}
           </Tabs.Tab>
           <Tabs.Tab value="history" leftSection={<IconHistory size={14} />}>
-            History
+            What changed
           </Tabs.Tab>
         </Tabs.List>
+
+        <Tabs.Panel value="setup" pt="md">
+          <SetupPanel
+            onOpenSection={(next) => {
+              setSection(next);
+              setTab('form');
+            }}
+          />
+        </Tabs.Panel>
 
         <Tabs.Panel value="form" pt="md">
           {document.schema ? (
@@ -373,7 +416,9 @@ export default function SettingsPage() {
           <HistoryTab
             entries={history.data?.entries ?? []}
             loading={history.isLoading}
-            onRevert={(entry) => revert.mutate(entry)}
+            confirmPhrase={document.confirm_phrase}
+            stepUpActive={session.stepUpActive}
+            onRevert={(entry, phrase) => revert.mutateAsync({ entry, phrase })}
             reverting={revert.isPending}
           />
         </Tabs.Panel>
@@ -397,7 +442,7 @@ export default function SettingsPage() {
           <Button
             disabled={!dirty}
             onClick={() =>
-              void runPreview(tab === 'raw' ? { raw: rawDraft ?? '' } : { patch: ops })
+              void runPreview(changeBody)
             }
             data-testid="review-changes"
           >
@@ -576,18 +621,32 @@ function FieldTools({
   );
 }
 
-function HistoryTab({
+/**
+ * The audited history, with revert.
+ *
+ * Revert restores the *whole* file as it stood before one save — `risk.*` and `trading.*`
+ * included — and by default regenerates `var/runtime` and restarts the bots. It used to be
+ * a bare button whose only guard was `disabled={!row.revertable}`, so one misclick
+ * rewrote protected config. It now goes through the same typed-phrase + step-up dialog a
+ * protected save does, and shows the diff it is about to undo.
+ */
+export function HistoryTab({
   entries,
   loading,
+  confirmPhrase,
+  stepUpActive,
   onRevert,
   reverting,
 }: {
   entries: HistoryEntry[];
   loading: boolean;
-  onRevert: (entry: HistoryEntry) => void;
+  confirmPhrase: string;
+  stepUpActive: boolean;
+  onRevert: (entry: HistoryEntry, phrase: string) => Promise<unknown>;
   reverting: boolean;
 }) {
   const [selected, setSelected] = useState<HistoryEntry | null>(null);
+  const [pendingRevert, setReverting] = useState<HistoryEntry | null>(null);
 
   return (
     <Stack gap="md">
@@ -646,8 +705,9 @@ function HistoryTab({
                 disabled={!row.revertable || reverting}
                 onClick={(event) => {
                   event.stopPropagation();
-                  onRevert(row);
+                  setReverting(row);
                 }}
+                data-testid={`revert-${row.id}`}
               >
                 Revert
               </Button>
@@ -655,6 +715,37 @@ function HistoryTab({
           },
         ]}
       />
+      <ConfirmDialog
+        opened={pendingRevert !== null}
+        onClose={() => setReverting(null)}
+        title={`Revert to before config_audit #${pendingRevert?.id ?? ''}?`}
+        confirmLabel="Revert the file"
+        confirmPhrase={confirmPhrase}
+        requireStepUp
+        stepUpSatisfied={stepUpActive}
+        danger
+        description={
+          <>
+            This restores the <strong>whole file</strong> as it stood before that save
+            {pendingRevert?.changed_paths.length
+              ? `, undoing ${pendingRevert.changed_paths.join(', ')}`
+              : ''}
+            . The effects are queued, not applied — use the banner when you are ready.
+          </>
+        }
+        onConfirm={async ({ phrase }) => {
+          if (pendingRevert) await onRevert(pendingRevert, phrase ?? '');
+          setReverting(null);
+        }}
+      >
+        {pendingRevert ? (
+          <ScrollArea.Autosize mah={200}>
+            <Code block style={{ whiteSpace: 'pre' }}>
+              {pendingRevert.diff || 'no diff recorded'}
+            </Code>
+          </ScrollArea.Autosize>
+        ) : null}
+      </ConfirmDialog>
       {selected ? (
         <Card withBorder padding="sm">
           <Stack gap="xs">

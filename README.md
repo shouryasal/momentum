@@ -87,11 +87,14 @@ Three modes, set by `EARN_CLAUDE_AUTH_MODE` in `.env` and `auth.claude_mode` in
 
 | Mode | What a job gets | When |
 |---|---|---|
-| `subscription` (default) | `CLAUDE_CODE_OAUTH_TOKEN` only. A present `ANTHROPIC_API_KEY` is **dropped**, because it would preempt subscription auth in a headless run. | You have Claude Max. No metered spend. |
-| `api_key` | `ANTHROPIC_API_KEY` only. | No subscription. Metered, capped by `auth.api_key_monthly_cap_usd` (default \$30/month). |
-| `auto` | The token (if any) **plus** the key renamed to `EARN_FALLBACK_ANTHROPIC_API_KEY` — a name the Claude CLI can never pick up implicitly. | Subscription first, metered fallback only as a deliberate, journaled switch. |
+| `subscription` (default) | `CLAUDE_CODE_OAUTH_TOKEN` only under that name. A present `ANTHROPIC_API_KEY` is **renamed** to `EARN_FALLBACK_ANTHROPIC_API_KEY`, never exported under the plain name that would preempt subscription auth in a headless run. | You have Claude Max. No metered spend unless something explicitly asks for the key. |
+| `api_key` | `ANTHROPIC_API_KEY` only; the OAuth token is dropped. The one mode that exports the plain name. | No subscription. Metered, capped by `auth.api_key_monthly_cap_usd` (default \$30/month). |
+| `auto` | The token (if any) **plus** the key renamed to `EARN_FALLBACK_ANTHROPIC_API_KEY`. | Subscription first, metered fallback only as a deliberate, journaled switch. |
 
-Anything unknown means `subscription`. For the subscription path:
+The rename is unconditional in `subscription` **and** `auto`, token or no token:
+`EARN_FALLBACK_ANTHROPIC_API_KEY` is a name the Claude CLI can never pick up implicitly,
+so a key can only ever be spent through an explicit, journalled, capped `claude:api_key`
+attempt. Anything unknown means `subscription`. For the subscription path:
 
 ```bash
 claude setup-token          # browser sign-in; prints a long-lived OAuth token
@@ -238,9 +241,19 @@ bash ops/bootstrap_data.sh                                             # candles
 docker compose -p earn -f ops/docker-compose.yml down
 ```
 
-`ops/bootstrap_data.sh` downloads 1h/4h/1d candles from 2021 for BTC, ETH and BNB (BNB for
-fee conversion only — it is never tradeable) and then runs `ops.check_gaps`. On a reported
-gap, re-run the script; `download-data` refetches the missing range.
+`ops/bootstrap_data.sh` downloads 1h/4h/1d candles from 2021 for **every pair in the
+current universe snapshot** — the ~100-name watchlist plus `universe.data_only_symbols`
+(BNB, for fee conversion only; it is never tradeable) — and then runs `ops.check_gaps`. The
+pair list is not hardcoded: it comes from `knowledge/universe/<date>.json`, which
+`ops.universe_refresh` resolves weekly from the live Binance API and which is also the
+whitelist the bots run and the backtests replay. Measured, that is ~0.15 GB and ~6 minutes.
+On a reported gap, re-run the script; `download-data` refetches the missing range.
+
+`ops/refresh_backtest_data.sh` (the Sunday-18:00 `backtest_data` job) refreshes the universe
+first and then tops the candles up, because a name that entered the universe this week has
+no history yet. A refused refresh — the tradeable tier would shrink past
+`universe.refresh.max_tradeable_shrink`, or a core asset failed to resolve — stops the job
+and leaves the previous snapshot in place.
 
 ---
 

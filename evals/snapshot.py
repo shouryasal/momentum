@@ -29,6 +29,10 @@ INPUT_FILES = {
     "dossiers": "dossiers.md", "event_stats": "event_stats.json",
     # v3: the validated signal that fired this run (empty for a scheduled run)
     "signal": "signal.json",
+    # v4: the point-in-time universe the targets were chosen against. Without it a replay
+    # would rebuild the prompt against whatever the watchlist happens to be today, which
+    # is exactly the drift `universe_snapshot` exists to make impossible.
+    "universe": "universe.json",
 }
 
 

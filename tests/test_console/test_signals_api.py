@@ -28,7 +28,16 @@ def iso(dt: datetime) -> str:
 
 @pytest.fixture
 def journal(env: Path, monkeypatch: pytest.MonkeyPatch):
-    """Initialised databases under the isolated state root, seeded with one signal."""
+    """Initialised databases under the isolated state root, seeded with one signal.
+
+    Every row below is stamped relative to ``NOW``, so the service reads its clock from
+    ``NOW`` too. Without the pin the funnel (24h), the detector/model stats (30d) and
+    the screener health panel (24h) all measured their windows against the wall clock
+    while the rows sat at a fixed date: the assertions below meant "1" on the day they
+    were written and "0" a day (or a month) later. A test that changes meaning with the
+    calendar is worse than no test, so the clock is part of the fixture.
+    """
+    monkeypatch.setattr(signals_service, "_now", lambda: NOW)
     cfg = load_config()
     journal_path, _knowledge = db.init_all(cfg, root=env)
     with db.opened(journal_path) as conn:
@@ -107,6 +116,31 @@ class TestReads:
         assert body["by_detector"][0]["group"] == "breakout"
         assert body["by_detector"][0]["hit_rate"] == 1.0
         assert body["by_model"][0]["group"] == "claude-sonnet-5"
+
+    def test_the_funnel_window_follows_the_service_clock(
+            self, auth_client, journal, monkeypatch: pytest.MonkeyPatch):
+        """Two pins, two different answers — impossible if the window is the wall clock.
+
+        ``pipeline.funnel`` takes an injectable ``now``; the console service used to drop
+        it and let the pipeline read ``datetime.now(UTC)``. Whatever the real date is,
+        that bug answers both halves of this test identically (one fixed window, one set
+        of rows), so it cannot satisfy both. No calendar can make it pass.
+        """
+        far = NOW + timedelta(days=400)
+        with db.opened(journal) as conn:
+            conn.execute(
+                "INSERT INTO signals(signal_id, ts_utc, scan_id, source, detector, pair,"
+                " strength, features_json, dedupe_key, status, updated_utc)"
+                " VALUES ('sig-far', ?, 'scan-2','detector','breakout','ETH/USDT', 0.5,"
+                " '{}', 'k2', 'candidate', ?)", (iso(far - timedelta(minutes=10)), iso(far)))
+            conn.commit()
+
+        near = auth_client.get("/api/signals/funnel").json()["counts"]
+        assert near["acted"] == 1        # sig-1, ten minutes before the pinned NOW
+
+        monkeypatch.setattr(signals_service, "_now", lambda: far)
+        later = auth_client.get("/api/signals/funnel").json()["counts"]
+        assert later["detected"] == 1 and later["acted"] == 0     # sig-1 has aged out
 
     def test_runs_and_proposals(self, auth_client, journal):
         runs = auth_client.get("/api/runs").json()["runs"]

@@ -1,0 +1,64 @@
+# venue-guard eval cases. Both `run:` cases are deterministic and OFFLINE - they read the
+# real historical fixtures under tests/fixtures/ and touch no source, so the code-only gate
+# can score them and a network outage can never turn a red case green.
+cases:
+  - id: peg-detector-matches-history
+    # The one case that matters: the 2024-01-03 wick must stay silent, the 2022-05-12 Terra
+    # episode must still fire on two independent USD venues, and the March 2023 USDC depeg
+    # must warn without ever blocking. If the persistence rule is weakened this fails.
+    run: scripts/venue_state.py
+    args: ["--selftest"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - "verdict=OK"
+        - "peg_terra_2022-05-12.json"
+        - "peg_wick_2024-01-03.json"
+        - "peg_usdc_2023-03-11.json"
+      stdout_not_contains: ["FAIL", "Traceback"]
+
+  - id: replay-is-reproducible-as-of-an-instant
+    # No look-ahead: the same instant must always produce the same verdict, and it must be
+    # the one the historical record supports.
+    run: scripts/venue_state.py
+    args: ["--replay", "peg_terra_2022-05-12.json", "--as-of", "2022-05-12T10:00:00Z"]
+    expect:
+      exit_code: 0
+      stdout_contains: ['"state": "usdt_depeg"', '"depeg_flag": true', '"min_sources": 2']
+      stdout_not_contains: ["Traceback"]
+
+  - id: quiet-hour-before-the-break-is-silent
+    run: scripts/venue_state.py
+    args: ["--replay", "peg_terra_2022-05-12.json", "--as-of", "2022-05-11T12:00:00Z"]
+    expect:
+      exit_code: 0
+      stdout_contains: ['"depeg_flag": false']
+      stdout_not_contains: ["Traceback"]
+
+  - id: usdc-depeg-warns-and-names-the-sign
+    # March 2023: the PEER broke and USDT was the refuge. The verdict must warn, must not
+    # block, and must carry both halves of the fact - peer_state depeg AND usdt_state premium.
+    run: scripts/venue_state.py
+    args: ["--replay", "peg_usdc_2023-03-11.json", "--as-of", "2023-03-11T20:00:00Z"]
+    expect:
+      exit_code: 0
+      stdout_contains:
+        - '"depeg_flag": false'
+        - '"severity": "warn"'
+        - '"peer_state": "depeg"'
+        - "not our NAV"
+      stdout_not_contains: ["Traceback"]
+
+  - id: wick-day-stays-silent
+    # The control that kills the naive detector: 2024-01-03 printed a 0.7600 LOW.
+    run: scripts/venue_state.py
+    args: ["--replay", "peg_wick_2024-01-03.json", "--as-of", "2024-01-03T14:00:00Z"]
+    expect:
+      exit_code: 0
+      stdout_contains: ['"state": "ok"', '"depeg_flag": false']
+      stdout_not_contains: ["Traceback"]
+
+  - id: sign-of-a-depeg-is-explained-not-just-reported
+    ask: "venue.json says peg.usdt_state is premium and peg.peer_state is depeg. What does that mean for our book?"
+    expect:
+      contains: ["contagion", "not our NAV"]

@@ -23,8 +23,15 @@ Numbers come from code. Never estimate an indicator, a volatility or a drawdown.
 3. Write one paragraph to `knowledge/state/latest.md` describing the regime:
    - If `data_fresh` is false, say so FIRST — everything else is provisional.
    - Name the regime (`trend_up | trend_down | range | high_vol`), when it last
-     changed, each asset's trend vs its 200d MA, realized vol vs the low/med/high
-     bounds, drawdown from the 90d high, and current funding.
+     changed, each CORE asset's trend vs its 200d MA, realized vol vs the
+     low/med/high bounds, drawdown from the 90d high, and current funding.
+   - Then **breadth across the watchlist**, in one line, from the JSON only:
+     how many watchlist names are above their own 200d MA, the median 24h
+     return, and how many are within 10% of a 30d high. Breadth is context, not
+     a signal: the measured cross-section of alts loses money, so a broad rally
+     is a reason to check the correlation cap, not a reason to buy more names.
+   - Never a per-name story for a watchlist coin. If one name matters enough to
+     describe, it belongs in the signal pipeline, not in the state paragraph.
    - No predictions, no numbers not in the JSON, no advice.
 
 ## Definitions

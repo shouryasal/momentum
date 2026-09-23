@@ -64,27 +64,51 @@ def _allowlist(wrap, job) -> list[str]:
     return out.stdout.split()
 
 
+def has_plain_key(env: str) -> bool:
+    """Is the CLI-readable ``ANTHROPIC_API_KEY`` exported?
+
+    Never write ``"ANTHROPIC_API_KEY=" not in env``: ``EARN_FALLBACK_ANTHROPIC_API_KEY=``
+    contains that substring, so the assertion is satisfied by the leak and broken by the
+    fix. Match the start of a line.
+    """
+    return any(line.startswith("ANTHROPIC_API_KEY=") for line in env.splitlines())
+
+
 class TestSubscriptionFirst:
     def test_research_prefers_oauth_and_strips_api_key(self, tmp_path):
         # A present ANTHROPIC_API_KEY would preempt subscription auth in headless
-        # Claude Code runs — envwrap must withhold it when the token exists.
+        # Claude Code runs — envwrap must withhold it.
         env = _run(_repo(tmp_path, BOTH_CREDS), "research")
         assert "CLAUDE_CODE_OAUTH_TOKEN=sub-token" in env
-        assert "ANTHROPIC_API_KEY=" not in env
+        assert not has_plain_key(env)
         assert "BINANCE" not in env and "TELEGRAM" not in env
         assert "EARN_AUTOMATED_RUN=1" in env
 
-    def test_research_falls_back_to_api_key(self, tmp_path):
+    def test_a_key_only_host_gets_it_under_the_protected_name(self, tmp_path):
+        """This used to hand the job the plain ``ANTHROPIC_API_KEY``, and that was the
+        money bug: the key was dropped ONLY when an OAuth token was also present, so on a
+        host with ``auth.subscription_source: login`` (no token in .env by design) every
+        cron model job carried a credential the headless CLI spends implicitly — with no
+        chain, no monthly cap and no llm_calls row. The credential is not lost:
+        ``claude_auth.api_key_from`` reads the protected name first and ``env_for`` hands
+        it to an explicit, journalled ``claude:api_key`` attempt."""
         env = _run(_repo(tmp_path, KEY_ONLY), "research")
-        assert "ANTHROPIC_API_KEY=sk-ant-test" in env
+        assert not has_plain_key(env)
+        assert "EARN_FALLBACK_ANTHROPIC_API_KEY=sk-ant-test" in env
         assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
     @pytest.mark.parametrize("job", ["review", "daily_review", "maintenance"])
     def test_model_jobs_share_the_policy(self, tmp_path, job):
         env = _run(_repo(tmp_path, BOTH_CREDS), job)
         assert "CLAUDE_CODE_OAUTH_TOKEN=sub-token" in env
-        assert "ANTHROPIC_API_KEY=" not in env
+        assert not has_plain_key(env)
         assert "BINANCE" not in env
+
+    @pytest.mark.parametrize("job", MODEL_JOBS)
+    def test_no_model_job_gets_the_plain_key_without_a_token(self, tmp_path, job):
+        """The invariant, on every model job: the plain name is exported only in
+        ``api_key`` mode, where metered spend is the deliberate choice."""
+        assert not has_plain_key(_run(_repo(tmp_path, KEY_ONLY), job))
 
 
 @pytest.mark.parametrize("job", MODEL_JOBS)
@@ -123,7 +147,8 @@ def test_ingest_gets_a_claude_credential_only(tmp_path):
     # subscription token — and nothing else.
     env = _run(_repo(tmp_path, BOTH_CREDS), "ingest")
     assert "CLAUDE_CODE_OAUTH_TOKEN=sub-token" in env
-    for secret in ("ANTHROPIC_API_KEY=", "TELEGRAM", "BINANCE", "FT_API", "FT_JWT"):
+    assert not has_plain_key(env)
+    for secret in ("TELEGRAM", "BINANCE", "FT_API", "FT_JWT"):
         assert secret not in env
 
 

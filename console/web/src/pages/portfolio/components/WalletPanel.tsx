@@ -1,4 +1,4 @@
-import { Alert, Badge, Card, Group, SimpleGrid, Stack, Text } from '@mantine/core';
+import { Alert, Badge, Card, Group, SimpleGrid, Stack, Text, Tooltip } from '@mantine/core';
 
 import type { Wallet } from '../api';
 
@@ -30,15 +30,43 @@ function Figure({ label, value, help }: { label: string; value: string; help?: s
  * whole account. A gap beyond the tolerance is the reconciliation mismatch that blocks
  * entries — which is the only reason to show both.
  */
-export function WalletPanel({ wallet }: { wallet: Wallet }) {
+export function WalletPanel({ wallet }: { wallet: Wallet | null | undefined }) {
+  /**
+   * A fresh install has no wallet row yet.
+   *
+   * Destructuring it unconditionally threw, and this component renders inside the Trading
+   * screen — so "no money recorded yet" came out as a broken screen. Nothing the server
+   * sends may be assumed to be there.
+   */
+  if (!wallet?.ledger || !wallet.exchange || !wallet.reconcile) {
+    return (
+      <Card withBorder padding="md">
+        <Text fw={600}>The money</Text>
+        <Text size="sm" c="dimmed">
+          Nothing has been recorded for this bot yet, so there is no balance to compare
+          against the exchange.
+        </Text>
+      </Card>
+    );
+  }
   const { ledger, exchange, reconcile } = wallet;
   return (
     <Card withBorder padding="md">
       <Group justify="space-between" mb="sm">
-        <Text fw={600}>Wallet</Text>
-        <Badge color={reconcile.mismatch ? 'red' : 'teal'} variant="light">
-          {reconcile.mismatch ? 'reconcile mismatch' : 'reconciled'}
-        </Badge>
+        <Text fw={600}>The money</Text>
+        <Tooltip
+          label={
+            reconcile.mismatch
+              ? "The system's own books and the exchange disagree by more than the allowed gap. New entries are blocked until they agree."
+              : "The system's own books agree with what the exchange says you hold."
+          }
+          multiline
+          w={300}
+        >
+          <Badge color={reconcile.mismatch ? 'red' : 'teal'} variant="light">
+            {reconcile.mismatch ? 'books disagree with the exchange' : 'books agree with the exchange'}
+          </Badge>
+        </Tooltip>
       </Group>
       <SimpleGrid cols={{ base: 2, sm: 3 }} spacing="md">
         <Figure label="ledger NAV" value={usdt(ledger.nav)} help="what the gate enforces" />

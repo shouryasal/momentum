@@ -6,6 +6,13 @@ compares it with what the venue says is there. In **live** the venue is Binance;
 disagreement there means the journal and the bot have drifted apart — the same bug class,
 caught before real money is involved.
 
+Which of the two is decided by :mod:`ops.lib.mode_view`, never by ``mode_state.load()``.
+This job holds ``BINANCE_KEY_A/B`` but *not* ``EARN_CONSOLE_SECRET``, so the signed mode
+file never verified here: every live sleeve was silently reconciled against the bot's own
+numbers instead of the exchange, and ``baseline_for()`` was skipped, so the one independent
+check on real money never ran in the mode that has any. Anything short of a **provable**
+TEST now goes to Binance with that sleeve's preflight baseline.
+
 A mismatch above ``risk.reconcile.tolerance_pct`` sets the ``reconcile_mismatch``
 block-entries flag (so the gate refuses new entries) and raises a critical alert. Every
 comparison is journalled either way.
@@ -27,6 +34,7 @@ from typing import Any
 from ops import db
 from ops.config import REPO_ROOT, EarnConfig, load_config
 from ops.lib import mode_state as ms
+from ops.lib import mode_view
 from ops.lib import reconcile as rec
 
 #: ``(sleeve, live) -> {asset: total}`` — Binance in live, the bot's wallet in test
@@ -76,17 +84,34 @@ def candle_prices(
     return prices
 
 
-def baseline_for(jdb: sqlite3.Connection, run_id: str | None) -> dict[str, float]:
-    """The pre-existing exchange balances recorded by preflight when the sleeve armed."""
+def baseline_for(
+    jdb: sqlite3.Connection, run_id: str | None, sleeve: str | None = None
+) -> dict[str, float]:
+    """The pre-existing exchange balances preflight recorded when **this sleeve** armed.
+
+    The query used to have no ``sleeve`` predicate at all, so with both sleeves armed the
+    newest completed transition won whichever sleeve it belonged to: sleeve a's baseline
+    was subtracted from sleeve b's exchange snapshot and a genuine divergence on one sleeve
+    was masked by the other's opening balances. ``ops.preflight`` captures the baseline
+    from that sleeve's *own* keys (``binance_check.keys_for(sleeve)``), so the baselines are
+    per-sleeve and routinely differ.
+
+    Only ``LIVE_*`` transitions write ``preflight_json``, so a go-test row leaves it NULL
+    and cannot poison the lookup; an all-zero baseline is still a real answer and is
+    returned as one.
+    """
     if not run_id:
         return {}
     import json
 
-    row = jdb.execute(
-        "SELECT preflight_json FROM mode_transitions WHERE status='completed'"
-        " AND preflight_json IS NOT NULL ORDER BY id DESC LIMIT 20"
-    ).fetchall()
-    for r in row:
+    sql = ("SELECT preflight_json FROM mode_transitions WHERE status='completed'"
+           " AND preflight_json IS NOT NULL")
+    params: tuple[str, ...] = ()
+    if sleeve:
+        sql += " AND sleeve=?"
+        params = (str(sleeve).lower(),)
+    rows = jdb.execute(sql + " ORDER BY id DESC LIMIT 20", params).fetchall()
+    for r in rows:
         try:
             payload = json.loads(r["preflight_json"] or "{}")
         except (json.JSONDecodeError, TypeError):
@@ -150,8 +175,10 @@ def run(
     now: datetime | None = None,
     alert: Callable[[str, str], None] | None = None,
     sleeves: Sequence[str] = ("a", "b"),
+    root: Path | None = None,
 ) -> list[SleeveReconciliation]:
     st = state if state is not None else ms.load()
+    view = mode_view.load(jdb=jdb, state=st, root=root)
     prices = candle_prices(kdb, cfg)
     out: list[SleeveReconciliation] = []
     for sleeve in sleeves:
@@ -162,7 +189,12 @@ def run(
         ).fetchone()
         if run_row is None:
             continue
-        live = st.is_live(sleeve)
+        # ``assume_live`` and not ``is_live``: this job is the ONLY independent check on
+        # real money, and it is the one job handed BINANCE_KEY_A/B (ops/envwrap.sh) — yet
+        # it has no EARN_CONSOLE_SECRET, so ``mode_state.load()`` always said TEST and the
+        # ledger was silently reconciled against the *bot's own numbers* with no baseline.
+        # Anything short of a proven TEST therefore goes to the exchange.
+        live = view.sleeve(sleeve).assume_live
         try:
             venue = balances(sleeve, live)
         except Exception as e:  # noqa: BLE001 - an unreachable venue is a warning row
@@ -171,7 +203,7 @@ def run(
         result = reconcile_sleeve(
             cfg, jdb, sleeve=sleeve, run_id=str(run_row["run_id"]),
             seed_usdt=float(run_row["seed_usdt"]), balances=venue, prices=prices,
-            baseline=baseline_for(jdb, str(run_row["run_id"])) if live else None,
+            baseline=baseline_for(jdb, str(run_row["run_id"]), sleeve) if live else None,
             flags_path=flags_path, now=now, source="binance" if live else "freqtrade",
             flag_audit_conn=kdb,
         )

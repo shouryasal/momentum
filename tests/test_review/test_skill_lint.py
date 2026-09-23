@@ -41,6 +41,14 @@ def make_skill(tmp_path: Path, *, name="demo-skill", frontmatter=GOOD_FRONTMATTE
     return d
 
 
+#: The repo's own suite is one of the two callers ``Sandbox.unconfined`` exists for (the
+#: other is a human at the console who has just re-entered the token). Every *containment*
+#: assertion lives in ``test_skill_containment.py``; the cases here are about what an
+#: expectation means, so they say so explicitly rather than inheriting a permissive default
+#: — omitting the argument is a refusal, and that is the point.
+UNCONFINED = skill_eval.Sandbox.unconfined("the repo's own test suite")
+
+
 def codes(result) -> set[str]:
     return {f.code for f in result.findings}
 
@@ -191,13 +199,28 @@ def test_an_unparseable_script_is_an_error(tmp_path):
     assert "script.syntax" in error_codes(skill_lint.lint_skill(d))
 
 
-def test_reads_are_not_writes(tmp_path):
+def test_reads_of_an_ordinary_file_are_not_writes(tmp_path):
     d = make_skill(tmp_path, script=(
         "from pathlib import Path\n"
-        "print(Path('config/earn.yaml').read_text())\n"
-        "with open('config/earn.yaml') as fh:\n"
+        "print(Path('knowledge/assets/BTC.json').read_text())\n"
+        "with open('reports/weekly.md') as fh:\n"
         "    print(fh.read())\n"))
-    assert skill_lint.lint_skill(d).ok
+    assert skill_lint.lint_skill(d).ok, [f.as_dict() for f in skill_lint.lint_skill(d).findings]
+
+
+@pytest.mark.parametrize("literal", [
+    "config/earn.yaml", "/home/shourya/earn/.env", "var/state/mode.json",
+    "var/runtime/runtime-b.json", "/home/shourya/earn/ops/killdir/KILL",
+    ".claude/settings.json", "/etc/passwd",
+])
+def test_naming_a_protected_path_is_an_error_even_in_a_read(tmp_path, literal):
+    """This test used to assert the opposite — that a *read* of ``config/earn.yaml`` lints
+    clean, on the reasoning that only writes matter. The two demonstrated payloads were a
+    read of ``.env`` and a delete of the kill switch, so naming one of these files at all
+    is now the finding: neither the frontmatter checks nor the write-destination check
+    could see either shape."""
+    d = make_skill(tmp_path, script=f"print(open({literal!r}).read())\n")
+    assert "script.protected_path" in error_codes(skill_lint.lint_skill(d))
 
 
 # --------------------------------------------------------------------------- skill_eval
@@ -218,7 +241,8 @@ def test_a_script_case_passes_on_its_expectations(tmp_path):
               exit_code: 0
               stdout_contains: ["rows="]
         """)
-    result = skill_eval.evaluate(d, cwd=tmp_path, repo_root=tmp_path)
+    result = skill_eval.evaluate(d, cwd=tmp_path, repo_root=tmp_path,
+                                 sandbox=UNCONFINED)
     assert result.pass_rate == 1.0
     assert result.ok(0.8)
 
@@ -232,7 +256,8 @@ def test_a_script_case_fails_when_the_output_is_wrong(tmp_path):
             expect:
               stdout_contains: ["rows="]
         """)
-    result = skill_eval.evaluate(d, cwd=tmp_path, repo_root=tmp_path)
+    result = skill_eval.evaluate(d, cwd=tmp_path, repo_root=tmp_path,
+                                 sandbox=UNCONFINED)
     assert result.pass_rate == 0.0
     assert not result.ok(0.8)
 
@@ -248,7 +273,8 @@ def test_a_skipped_judgement_case_is_not_a_free_pass(tmp_path):
             ask: "Is this trade defensible?"
             expect: {contains: ["invalidation"]}
         """)
-    result = skill_eval.evaluate(d, cwd=tmp_path, repo_root=tmp_path)
+    result = skill_eval.evaluate(d, cwd=tmp_path, repo_root=tmp_path,
+                                 sandbox=UNCONFINED)
     assert result.skipped == 1
     assert result.pass_rate == 0.5
     assert not result.ok(0.8)
@@ -270,7 +296,8 @@ def test_a_judgement_case_runs_with_an_injected_session(tmp_path):
 
 def test_a_skill_with_no_cases_can_never_clear_the_floor(tmp_path):
     d = make_skill(tmp_path)
-    result = skill_eval.evaluate(d, cwd=tmp_path, repo_root=tmp_path)
+    result = skill_eval.evaluate(d, cwd=tmp_path, repo_root=tmp_path,
+                                 sandbox=UNCONFINED)
     assert result.pass_rate == 0.0
     assert not result.ok(0.0)          # `ok` requires cases, not just a rate
 
@@ -290,7 +317,8 @@ def test_an_eval_subprocess_never_sees_a_credential(tmp_path, monkeypatch):
               exit_code: 0
               stdout_contains: ["api None", "binance None"]
         """)
-    result = skill_eval.evaluate(d, cwd=tmp_path, repo_root=tmp_path)
+    result = skill_eval.evaluate(d, cwd=tmp_path, repo_root=tmp_path,
+                                 sandbox=UNCONFINED)
     assert result.pass_rate == 1.0, [c.as_dict() for c in result.cases]
 
 
@@ -303,5 +331,6 @@ def test_run_tests_reports_no_tests_rather_than_passing(tmp_path):
 def test_run_tests_runs_the_skills_own_suite(tmp_path):
     d = make_skill(tmp_path)
     (d / "tests" / "test_demo.py").write_text("def test_fails():\n    assert False\n")
-    ok, log = skill_eval.run_tests(d, cwd=tmp_path, repo_root=tmp_path, timeout_s=60)
+    ok, log = skill_eval.run_tests(d, cwd=tmp_path, repo_root=tmp_path,
+                                   timeout_s=60, sandbox=UNCONFINED)
     assert ok is False and "test_fails" in log

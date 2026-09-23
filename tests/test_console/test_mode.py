@@ -361,7 +361,7 @@ class TestRecoverAndRollback:
         bots = {"a": FakeBot(), "b": FakeBot()}
         app.state.bot_factory = lambda _cfg, sleeve: bots[sleeve]
         step_up(auth_client, token)
-        recovered = auth_client.get("/api/mode/recover").json()
+        recovered = auth_client.post("/api/mode/recover").json()
         assert [r["sleeve"] for r in recovered] == ["a"]
         assert ms.load(secret=SECRET).sleeve("a").state == "TEST"
 

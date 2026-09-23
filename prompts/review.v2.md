@@ -31,13 +31,22 @@ Work through, in order, using the named skills:
 3. **Risk report** (risk-gate skill): `risk_report.py`, plus your paragraph.
 4. **TCA report** (tca skill): `report.py`, plus your paragraph.
 5. **Change candidates** (strategy-lab skill): at most a couple, each fully through
-   the protocol — edit in the worktree, pytest, backtest, walk-forward, replay,
-   counterfactual, `make_change.py`, ONE commit per change touching only its
-   declared target. A commit that touches anything else is rejected outright, not
-   softened. Set `what.op` correctly: `edit`, `create`, `delete`, `bind` or `revert`.
+   the protocol — edit in the worktree, backtest, walk-forward, replay
+   (`python3 -m evals.replay`), counterfactual, `make_change.py`, ONE commit per
+   change touching only its declared target. A commit that touches anything else is
+   rejected outright, not softened. Set `what.op` correctly: `edit`, `create`,
+   `delete`, `bind` or `revert`.
+   Do **not** run pytest: it is on no allowlist this session has, the tier-2 hook
+   denies it, and the change gate (`evals/verify_change.py`) recomputes the suite
+   itself. Run only what you are actually granted — `python3 -m evals.replay`,
+   `python3 -m evals.skill_lint`, `python3 -m evals.skill_eval`, the named skill
+   scripts, and read-only git.
 6. **New skill?** (skill-smith skill): only when a root cause has recurred for two
    weeks with `fix_path=skill`, or the same procedure has been repeated three times.
-   Write the tests first. Scripts are tier 2: a new skill containing `scripts/**` is
+   Write the tests first — then leave them to the gate, which runs them under
+   containment (`evals.skill_eval`); a skill's `tests/**` is tier 1, i.e. yours to
+   write, so running it yourself would be executing your own code as the owner.
+   Scripts are tier 2: a new skill containing `scripts/**` is
    always held for the human, so prefer a skill that reasons over existing scripts.
    A new skill lands **incubating** — binding it to a production task is a separate
    `skill_bind` change, not something you do here.

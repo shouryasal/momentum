@@ -101,6 +101,30 @@ class TestPack:
         assert req.output_schema == validation_schema()
         assert req.tools_profile == "read_only"
         assert req.skills == list(cfg.skills.bindings.get("validate") or [])
+        assert req.cwd == root, "the validator ran the model somewhere else"
+        assert req.model.tier >= 3, "a sub-tier-3 model was asked to validate"
+
+    def test_the_call_is_journaled_against_the_signal(self, env, provider):
+        """One ``llm_calls`` row per attempt, tied to the signal it validated.
+
+        This path returned ``provider_down`` for the whole of the previous build because
+        ``runs.signals.run_task`` called the router with a signature it does not have and
+        swallowed the ``TypeError``. No row was the only symptom, and nobody was watching
+        for an absence.
+        """
+        cfg, jdb, kdb, root = env
+        _insert_signal(jdb)
+        provider.script([scripted(text=json.dumps(_verdict()), cost_usd=0.21)])
+        out = validatorlib.validate_signal(cfg, jdb, kdb, "sig-1", root=root, now=NOW)
+        assert out.ok, out.reason
+        row = jdb.execute("SELECT task, run_ref, stage, provider, model, status, cost_usd"
+                          " FROM llm_calls").fetchone()
+        assert (row["task"], row["run_ref"], row["stage"]) == ("validate", "sig-1",
+                                                               "validate")
+        assert row["provider"] == "claude:subscription" and row["status"] == "ok"
+        assert row["cost_usd"] == 0.21
+        # ...and the same cost reaches the signal's own row, via the outcome.
+        assert jdb.execute("SELECT cost_usd FROM signal_validations").fetchone()[0] == 0.21
 
 
 class TestVerdicts:

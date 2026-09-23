@@ -126,7 +126,12 @@ def _limits_sheet(wb: Workbook, conn, cfg: EarnConfig) -> None:
     state = {(row["sleeve"], row["key"]): row["value"]
              for row in conn.execute("SELECT * FROM risk_state")}
     ws.append(["max weight BTC", r.max_weight["BTC"], None, "custom_stake/confirm_entry"])
-    ws.append(["max weight other", r.max_weight["default"], None, "gate"])
+    # There is no max_weight.default any more: an asset with no explicit cap and no tier
+    # caps at ZERO (wide-universe.md §2.2), so "other" is the tier ceiling, not a default.
+    ws.append(["max weight major", r.tier_caps.major, None, "gate"])
+    ws.append(["max weight satellite", r.tier_caps.satellite, None, "gate"])
+    ws.append(["max open positions", r.max_open_positions, None, "gate"])
+    ws.append(["max satellite gross", r.max_satellite_gross, None, "gate"])
     ws.append(["max gross exposure", r.max_gross_exposure, None, "gate"])
     ws.append(["usdt floor", r.usdt_floor, None, "gate"])
     ws.append(["daily loss stop", r.daily_loss_stop,

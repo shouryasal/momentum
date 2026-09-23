@@ -27,12 +27,18 @@ export function ChangeDetailDrawer({ changeId, onClose }: ChangeDetailDrawerProp
   const [confirming, setConfirming] = useState<DecisionAction | null>(null);
   const [task, setTask] = useState('');
 
-  const act = (action: DecisionAction) => {
+  /**
+   * `await`-able on purpose: the revert and attach dialogs are step-up guarded, and
+   * `ConfirmDialog` only opens the step-up window *before* calling `onConfirm`. A
+   * fire-and-forget `mutate` also swallowed the 403 into the drawer instead of the dialog.
+   */
+  const act = async (action: DecisionAction) => {
     if (!changeId) return;
-    decision.mutate(
-      { id: changeId, action, note, reason: note, task },
-      { onSettled: () => setConfirming(null) },
-    );
+    try {
+      await decision.mutateAsync({ id: changeId, action, note, reason: note, task });
+    } finally {
+      setConfirming(null);
+    }
   };
 
   return (
@@ -144,7 +150,7 @@ export function ChangeDetailDrawer({ changeId, onClose }: ChangeDetailDrawerProp
             <Button
               disabled={!data.can_decide}
               loading={decision.isPending}
-              onClick={() => act('approve')}
+              onClick={() => void act('approve')}
             >
               Approve &amp; merge
             </Button>
@@ -152,7 +158,7 @@ export function ChangeDetailDrawer({ changeId, onClose }: ChangeDetailDrawerProp
               variant="default"
               disabled={!data.can_decide}
               loading={decision.isPending}
-              onClick={() => act('reject')}
+              onClick={() => void act('reject')}
             >
               Reject
             </Button>

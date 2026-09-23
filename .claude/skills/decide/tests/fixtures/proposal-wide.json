@@ -1,0 +1,21 @@
+{
+  "schema_version": 4,
+  "run_id": "2026-09-23T20:30+04:00",
+  "prompt_version": "research.v4",
+  "module": "trend",
+  "targets": {"BTC": 0.40, "ETH": 0.20, "SOL": 0.05, "USDT": 0.35},
+  "universe_snapshot": {
+    "date": "2026-09-23",
+    "sha256": "3fd3108c4f05d98ef4c71dabd3496f38038da77836d7783a60a51613ed26df5f"
+  },
+  "exposure_scale": 0.8,
+  "confidence": 0.55,
+  "abstain": false,
+  "horizon_days": 7,
+  "rationale": [
+    "BTC above 200d MA, vol regime med",
+    "SOL is satellite tier: 0.05 is its whole cap, and the satellite sleeve is 5% of 10%",
+    "no blackout flags"
+  ],
+  "invalidation": "BTC daily close below the 200d MA, or SOL leaving the tradeable tier"
+}

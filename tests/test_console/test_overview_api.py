@@ -67,6 +67,21 @@ def journal(repo: Path) -> sqlite3.Connection:
     return db.connect(db.journal_path(cfg, repo))
 
 
+def seed_candles(repo: Path, prices: dict[str, float] | None = None) -> None:
+    """The marks the Overview values ``positions_json`` amounts at."""
+    cfg = config_service.get_cfg(repo)
+    prices = prices if prices is not None else {"BTC/USDT": 50_000.0, "ETH/USDT": 3_000.0}
+    with db.connect(db.knowledge_path(cfg, repo)) as conn:
+        conn.execute("DELETE FROM candles")
+        for pair, close in prices.items():
+            conn.execute(
+                "INSERT OR REPLACE INTO candles(pair, tf, open_time, open, high, low, close,"
+                " volume, close_time, is_closed) VALUES (?,?,?,?,?,?,?,?,?,1)",
+                (pair, "1h", 1, close, close, close, close, 1.0, 3_600_000),
+            )
+        conn.commit()
+
+
 def seed(repo: Path) -> None:
     now = datetime.now(UTC)
     with journal(repo) as conn:
@@ -76,13 +91,15 @@ def seed(repo: Path) -> None:
             " ('test-a-1','a','test',10000,?, 'active','SleeveA','sha','/tmp/a.sqlite')",
             (_iso(now - timedelta(days=3)),),
         )
+        # positions_json is base-unit AMOUNTS (docs/contracts.md): 0.06 BTC and 0.5 ETH,
+        # marked by seed_candles() at 50 000 / 3 000 -> 3 000 + 1 500 = 4 500 of the book.
         for offset, nav in ((72, 10000.0), (24, 10200.0), (0, 10350.0)):
             conn.execute(
                 "INSERT INTO nav_points(ts_utc, sleeve, run_id, mode, nav_usdt, cash_usdt,"
                 " open_trades, positions_json) VALUES (?,?,?,?,?,?,?,?)",
                 (
-                    _iso(now - timedelta(hours=offset)), "a", "test-a-1", "test", nav, 4000.0,
-                    1, json.dumps({"BTC": {"value_usdt": nav * 0.5}}),
+                    _iso(now - timedelta(hours=offset)), "a", "test-a-1", "test", nav,
+                    nav - 4500.0, 1, json.dumps({"BTC": 0.06, "ETH": 0.5}),
                 ),
             )
         conn.execute(
@@ -130,6 +147,7 @@ def seed(repo: Path) -> None:
             (_iso(now),),
         )
         conn.commit()
+    seed_candles(repo)
 
 
 # --------------------------------------------------------------------------- overview
@@ -157,9 +175,10 @@ def test_overview_reports_real_numbers(client: TestClient, repo: Path) -> None:
 
     exposure = body["exposure"]["sleeves"][0]
     assert exposure["sleeve"] == "a"
-    assert exposure["gross"] == pytest.approx(0.5)
+    assert exposure["gross"] == pytest.approx(4_500.0 / 10_350.0, rel=1e-4)
     btc = next(a for a in exposure["assets"] if a["asset"] == "BTC")
-    assert btc["cap"] > 0 and btc["util"] == pytest.approx(btc["weight"] / btc["cap"])
+    assert btc["cap"] > 0
+    assert btc["util"] == pytest.approx(btc["weight"] / btc["cap"], abs=1e-4)
 
     assert body["gate"]["reject"] == 1
     assert body["gate"]["recent"][0]["reason"] == "weight_cap:BTC/USDT"
@@ -168,6 +187,46 @@ def test_overview_reports_real_numbers(client: TestClient, repo: Path) -> None:
     assert body["research"]["last"]["served_model"] == "opus"
     assert body["incidents"][0]["kind"] == "stale_data"
     assert body["changed_today"]["config"][0]["changed_paths"] == ["risk.usdt_floor"]
+
+
+class TestExposurePanelValuesAmounts:
+    """``nav_points.positions_json`` is base-unit AMOUNTS, not USDT.
+
+    ``runs/nav_tick.py:ledger_nav`` writes ``{"BTC": 0.06}`` — coins. The panel used to
+    divide that straight by NAV, so a sleeve holding 3 000 USDT of BTC on a 10 350 NAV
+    rendered a weight of 0.0000058 and a gross bar sitting on zero while it was 43%
+    invested. Every number here is the marked one.
+    """
+
+    def test_weights_and_gross_are_money_not_coin_counts(self, client, repo) -> None:
+        seed(repo)
+        sleeve = client.get("/api/overview").json()["exposure"]["sleeves"][0]
+        btc = next(a for a in sleeve["assets"] if a["asset"] == "BTC")
+        eth = next(a for a in sleeve["assets"] if a["asset"] == "ETH")
+        assert btc["amount"] == pytest.approx(0.06)
+        assert btc["mark_usdt"] == pytest.approx(50_000.0)
+        assert btc["value_usdt"] == pytest.approx(3_000.0)
+        assert btc["weight"] == pytest.approx(3_000.0 / 10_350.0, rel=1e-4)
+        assert eth["value_usdt"] == pytest.approx(1_500.0)
+        assert eth["weight"] == pytest.approx(1_500.0 / 10_350.0, rel=1e-4)
+        # 0.06 BTC read as USDT would be a weight of 5.8e-6 and a gross of ~0.
+        assert btc["weight"] > 0.25
+        assert sleeve["gross"] == pytest.approx(4_500.0 / 10_350.0, rel=1e-4)
+        assert sleeve["gross_util"] == pytest.approx(
+            sleeve["gross"] / sleeve["gross_cap"], rel=1e-3
+        )
+
+    def test_an_unmarkable_amount_is_unknown_not_zero(self, client, repo) -> None:
+        """No closed candle for ETH means no ETH weight — and never a 0% one."""
+        seed(repo)
+        seed_candles(repo, {"BTC/USDT": 50_000.0})
+        sleeve = client.get("/api/overview").json()["exposure"]["sleeves"][0]
+        eth = next(a for a in sleeve["assets"] if a["asset"] == "ETH")
+        assert eth["mark_usdt"] is None
+        assert eth["weight"] is None and eth["util"] is None
+        assert eth["amount"] == pytest.approx(0.5)
+        # gross still comes from money the ledger reconciled, so it survives a missing mark.
+        assert sleeve["gross"] == pytest.approx(4_500.0 / 10_350.0, rel=1e-4)
 
 
 def test_overview_lists_the_next_scheduled_jobs(client: TestClient) -> None:

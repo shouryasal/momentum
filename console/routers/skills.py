@@ -1,8 +1,13 @@
 """``/api/skills`` — the Skills page.
 
 Step-up is required for anything that changes what an automated run can execute:
-``scripts/**`` writes, creating or archiving a skill, and editing bindings or policy.
-Reading, linting, testing and evaluating are session actions.
+``scripts/**`` and ``tests/**`` writes, creating or archiving a skill, and editing
+bindings or policy. Reading, linting, testing and evaluating are session actions.
+
+The step-up decision is taken on the path the write will actually land on, not on the
+string the client sent: :func:`console.services.skills_service.file_tier` normalises first.
+``tests/..%2Fscripts%2Fzz.py`` is a ``scripts/`` write and is treated as one — Starlette
+decodes the ``%2F`` after routing, which is exactly how that got past a raw-string check.
 
 Every write is linted server side before it lands; a lint error rolls the file back and
 comes back as the refusal with its findings, so a broken skill never sits on disk waiting
@@ -225,7 +230,7 @@ def write_file(
     actor: HumanActor = ACTOR,
 ) -> dict[str, Any]:
     if skills_service.requires_step_up(path):
-        actor.require_step_up()          # scripts/** is tier 2
+        actor.require_step_up()          # scripts/** and tests/** are tier 2
     try:
         result = skills_service.write_file(name, path, body.content, actor=actor.actor,
                                            base_sha=body.base_sha, root=_root())

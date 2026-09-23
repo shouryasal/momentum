@@ -29,6 +29,7 @@ from ops.lib import audit, claude_auth, envfile
 
 __all__ = [
     "AUTH_MODES",
+    "AUTH_SOURCE_IDS",
     "CATALOGUE",
     "SecretMeta",
     "SecretsError",
@@ -196,40 +197,141 @@ def delete_secret(
 # --------------------------------------------------------------------------- auth mode
 
 
+#: The three ways this machine can authenticate to Claude, as the Secrets page names
+#: them. Each one is a *fact about the host*, not a setting: the mode selector decides
+#: which is preferred, presence decides which can serve, and ``in_effect`` is the answer
+#: to "which one actually runs at 08:30 tomorrow".
+AUTH_SOURCE_IDS: tuple[str, ...] = ("subscription_token", "cli_login", "api_key")
+
+
+def _auth_sources(
+    *, effective: str, subscription_source: str, prefer: str,
+    token: Any, key: Any, session: Any,
+) -> list[dict[str, Any]]:
+    """The three rows, with which one is in effect and what each means for billing."""
+    token_ok = bool(token.present)
+    login_ok = bool(session.present and not session.expired)
+    key_ok = bool(key.present)
+
+    subscription_ready = login_ok if subscription_source == "login" else token_ok
+    in_effect: str | None
+    if effective == "api_key":
+        in_effect = "api_key" if key_ok else None
+    elif effective == "subscription":
+        in_effect = ("cli_login" if subscription_source == "login" else
+                     "subscription_token") if subscription_ready else None
+    else:  # auto: the preferred credential leads, the other is the declared fallback
+        first = "api_key" if prefer == "api_key" else "subscription"
+        order = [first, "subscription" if first == "api_key" else "api_key"]
+        in_effect = None
+        for candidate in order:
+            if candidate == "api_key" and key_ok:
+                in_effect = "api_key"
+                break
+            if candidate == "subscription" and subscription_ready:
+                in_effect = ("cli_login" if subscription_source == "login"
+                             else "subscription_token")
+                break
+
+    return [
+        {
+            "id": "subscription_token",
+            "label": "Claude subscription token",
+            "secret": "CLAUDE_CODE_OAUTH_TOKEN",
+            "present": token_ok,
+            "last4": token.last4,
+            "updated_at": token.updated_at,
+            "in_effect": in_effect == "subscription_token",
+            "usable": token_ok,
+            "billing": "Included in your Claude subscription. No metered spend.",
+            "headless": "Works in cron and headless runs — this is the one Earn wants.",
+            "how": "Press “Sign in to Claude”. The console runs `claude setup-token` for "
+                   "you and stores what it prints.",
+        },
+        {
+            "id": "cli_login",
+            "label": "Claude CLI login session",
+            "secret": None,
+            "present": bool(session.present),
+            "last4": None,
+            "updated_at": session.expires_at,
+            "in_effect": in_effect == "cli_login",
+            "usable": login_ok,
+            "expired": bool(session.expired),
+            "subscription_type": session.subscription_type,
+            "billing": "Included in your Claude subscription. No metered spend.",
+            "headless": "Expires and has to be renewed interactively, so an unattended "
+                        "03:00 job can fail on it. Prefer the token.",
+            "how": "Created by `claude login` in a terminal; models.yaml must also say "
+                   "auth.subscription_source: login.",
+        },
+        {
+            "id": "api_key",
+            "label": "Anthropic API key",
+            "secret": "ANTHROPIC_API_KEY",
+            "present": key_ok,
+            "last4": key.last4,
+            "updated_at": key.updated_at,
+            "in_effect": in_effect == "api_key",
+            "usable": key_ok,
+            "billing": "Metered — billed per token, bounded only by "
+                       "auth.api_key_monthly_cap_usd in models.yaml.",
+            "headless": "Always works headless. In `auto` mode it is renamed to "
+                        "EARN_FALLBACK_ANTHROPIC_API_KEY so the CLI can never pick it up "
+                        "by accident.",
+            "how": "Paste a key from console.anthropic.com into ANTHROPIC_API_KEY below.",
+        },
+    ]
+
+
 def auth_mode_state(
     *, models_path: Path | None = None, path: Path | None = None,
     home: Path | None = None,
 ) -> dict[str, Any]:
-    """What the two sources of truth say, and whether they agree.
+    """What the two sources of truth say, whether they agree, and what actually serves.
 
     ``models.yaml`` is what a human configured; ``.env`` is what ``ops/envwrap.sh`` will
     act on. When they disagree the jobs follow ``.env``, so the UI has to show both.
+
+    ``sources`` is the third thing an operator needs and the console never used to say:
+    the **three** credentials that could authenticate this host, which of them exist, and
+    which one is in effect. Presence and ``last4`` only — no value is read here.
     """
     from ops.models_config import DEFAULT_MODELS_CONFIG, load_models_cfg
 
     mp = models_path or DEFAULT_MODELS_CONFIG
+    prefer = "subscription"
     try:
         configured = load_models_cfg(mp, overlay=None).auth
         configured_mode: str | None = configured.claude_mode
         source = configured.subscription_source
+        prefer = configured.prefer
     except Exception:  # noqa: BLE001 - a broken models.yaml is the config page's problem
         configured_mode, source = None, "token"
-    env_mode = envfile.value_of(claude_auth.AUTH_MODE_VAR, path=path or env_path())
+    env_file = path or env_path()
+    env_mode = envfile.value_of(claude_auth.AUTH_MODE_VAR, path=env_file)
     effective = claude_auth.auth_mode({claude_auth.AUTH_MODE_VAR: env_mode or ""},
                                       configured=configured_mode or "subscription")
     session = claude_auth.login_session(home=home)
+    token, key = envfile.infos(
+        [claude_auth.OAUTH_VAR, claude_auth.API_KEY_VAR], path=env_file)
     return {
         "configured": configured_mode,
         "env": env_mode,
         "effective": effective,
         "in_sync": (env_mode or configured_mode) == configured_mode,
         "subscription_source": source,
+        "prefer": prefer,
         "login_session": {
             "present": session.present,
             "expires_at": session.expires_at,
             "expired": session.expired,
             "subscription_type": session.subscription_type,
         },
+        "sources": _auth_sources(
+            effective=effective, subscription_source=source, prefer=prefer,
+            token=token, key=key, session=session,
+        ),
     }
 
 

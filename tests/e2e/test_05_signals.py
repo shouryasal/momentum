@@ -230,6 +230,94 @@ def _recording_runner(stub: StubProvider, answer):
     return runner
 
 
+class TestTheRouterIsWiredIn:
+    """No injected runner anywhere: scan and validate go through the router of record.
+
+    The previous build's ``runs.signals.run_task`` called ``runs.llm.chain.run_task`` with
+    ``ctx=``/``tools_profile=``/``cwd=``/``deadline_s=``/``max_turns=``/``max_usd=``, none
+    of which are its parameters, and turned the resulting ``TypeError`` into a
+    ``provider_down`` result from a dead in-module dispatcher reading an empty registry.
+    Every scan and every validation failed that way, silently, with no ``llm_calls`` row
+    to give it away. These assertions are the ones that would have caught it, and they
+    fail again the moment that signature drifts.
+    """
+
+    def test_scan_and_validate_both_reach_a_provider_and_are_journaled(
+        self, cfg, world, stub: StubProvider
+    ) -> None:
+        root, jdb, kdb = world
+        spawns: list[list[str]] = []
+
+        stub.default = scripted(text=json.dumps({"items": []}))
+        report = pipelinelib.scan(cfg, jdb, kdb, root=root, now=NOW,
+                                  spawn=spawns.append, plan_fast_path=False)
+        assert report.new, f"scan created no signals; errors={report.errors}"
+        assert report.screen_ok, f"the screener never answered: {report.errors}"
+        assert stub.calls >= 1, "the screener did not reach the provider"
+
+        scan_rows = jdb.execute(
+            "SELECT run_ref, stage, provider, model, status FROM llm_calls"
+            " WHERE task='scan'").fetchall()
+        assert scan_rows, "the scan produced no llm_calls row"
+        assert scan_rows[0]["run_ref"] == report.scan_id
+        assert scan_rows[0]["stage"] == "scan"
+        assert scan_rows[0]["provider"] == "claude:subscription"
+        assert scan_rows[0]["status"] == "ok"
+        # tasks.scan.chain leads with local_small and no Ollama is running here, so the
+        # move down the chain is on the record too.
+        assert jdb.execute(
+            "SELECT COUNT(*) AS n FROM provider_switches WHERE task='scan'"
+            " AND reason='provider_down'").fetchone()["n"] >= 1
+
+        # Give the validator something screened, then run it with no injected runner.
+        sid = report.new[0]
+        jdb.execute("UPDATE signals SET status='screened', status_reason=NULL,"
+                    " updated_utc=? WHERE signal_id=?", (iso(NOW), sid))
+        jdb.commit()
+        stub.script([scripted(text=json.dumps(VALIDATION_PAYLOAD), cost_usd=0.17)])
+        outcome = validatorlib.validate_signal(cfg, jdb, kdb, sid, root=root, now=NOW,
+                                               force=True)
+        assert outcome.ok, outcome.reason
+        assert outcome.verdict == "valid" and outcome.actionable is True
+
+        row = jdb.execute(
+            "SELECT run_ref, stage, provider, model, status, cost_usd FROM llm_calls"
+            " WHERE task='validate'").fetchone()
+        assert row is not None, "the validation produced no llm_calls row"
+        assert (row["run_ref"], row["stage"]) == (sid, "validate")
+        assert row["status"] == "ok" and row["cost_usd"] == 0.17
+        # The strong pass must have been served by a tier-3-or-better model.
+        tiers = {m.id: m.tier for m in _models_cfg().models.values()}
+        assert tiers[row["model"]] >= 3, (row["model"], tiers[row["model"]])
+
+        # And the pipeline still hands off to the planner from there.
+        result = pipelinelib.plan(cfg, jdb, kdb, sid, root=root, now=NOW,
+                                  spawn=spawns.append)
+        assert result.fired, f"the planner refused: {result.blocked}"
+        assert "runs.research_run" in " ".join(spawns[-1])
+
+    def test_the_seam_passes_only_keywords_the_router_declares(self) -> None:
+        """The shape check, so a drift fails even with no provider in the process."""
+        import inspect
+
+        from runs.llm import chain as chainlib
+
+        params = inspect.signature(chainlib.run_task).parameters
+        assert params["run_ctx"].default is inspect.Parameter.empty
+        assert {"run_ctx", "models_cfg", "output_schema", "skills", "jdb", "kdb",
+                "providers", "cfg", "root", "gray_zone", "force_escalation",
+                "journal_runs"} <= set(params)
+        # ...and the argument names the broken version used are NOT parameters.
+        assert not ({"ctx", "tools_profile", "cwd", "deadline_s", "max_turns", "max_usd",
+                     "escalate"} & set(params))
+
+
+def _models_cfg():
+    from ops.models_config import load_models_cfg
+
+    return load_models_cfg(REPO / "config" / "models.yaml")
+
+
 # --------------------------------------------------------------------------- proposal
 
 
@@ -395,6 +483,17 @@ class TestMinTierFloor:
         status = jdb.execute("SELECT status FROM signals WHERE signal_id='sig-local'"
                              ).fetchone()["status"]
         assert status != "valid", status
+        # The refusal is on the record, not just in the return value: the router journals
+        # the drop with its reason. (Nothing was journaled at all while this path was
+        # dead, so an empty provider_switches table used to be indistinguishable from a
+        # correctly-enforced floor.)
+        switches = jdb.execute(
+            "SELECT reason, detail FROM provider_switches WHERE task='validate'"
+        ).fetchall()
+        assert any(r["reason"] == "skipped_capability"
+                   and "local models cannot serve 'validate'" in (r["detail"] or "")
+                   for r in switches), [tuple(r) for r in switches]
+        assert jdb.execute("SELECT COUNT(*) AS n FROM llm_calls").fetchone()["n"] == 0
 
 
 def test_no_proposal_reached_the_repo(tmp_path: Path) -> None:

@@ -87,3 +87,32 @@ export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
 }
+
+/**
+ * Per-field messages out of a 422 body, as `"field: message"` lines.
+ *
+ * `console/app.py` turns a `RequestValidationError` into
+ * `{code:'invalid', message:'request body failed validation', detail:{errors:[{loc,msg}]}}`.
+ * `ApiError.detail` carried that and nothing read it, so a rejected field — a two-character
+ * KILL reason, a seed below the minimum — surfaced as one unhelpful sentence that named
+ * neither the field nor the rule. Anything that renders `errorMessage` should render these
+ * beside it.
+ */
+export function errorFields(err: unknown): string[] {
+  if (!(err instanceof ApiError)) return [];
+  const detail = err.detail;
+  if (!detail || typeof detail !== 'object') return [];
+  const errors = (detail as { errors?: unknown }).errors;
+  if (!Array.isArray(errors)) return [];
+  const out: string[] = [];
+  for (const entry of errors) {
+    if (!entry || typeof entry !== 'object') continue;
+    const { loc, msg } = entry as { loc?: unknown; msg?: unknown };
+    if (typeof msg !== 'string' || msg === '') continue;
+    const path = Array.isArray(loc)
+      ? loc.filter((part) => part !== 'body').map(String).join('.')
+      : '';
+    out.push(path ? `${path}: ${msg}` : msg);
+  }
+  return out;
+}

@@ -11,7 +11,7 @@ from ops.lib import flags as host_flags
 from strategies import riskgate
 from strategies.riskgate import MemoryStateStore, RiskGate
 
-from .conftest import NOW, benign_gate, ps, write_freshness
+from .conftest import ENTRY, NOW, benign_gate, ps, write_freshness
 
 
 class TestBlackout:
@@ -24,7 +24,7 @@ class TestBlackout:
         gate = riskgate.RiskGate(
             gate_cfg, riskgate.MemoryStateStore(),
             staleness_provider=lambda now: 0.0, kill_provider=lambda: False)
-        d = gate.check_entry("BTC/USDT", 100.0, ps())
+        d = gate.check_entry("BTC/USDT", ENTRY, ps())
         assert not d.allowed and d.reason == "blackout:macro_blackout"
         assert gate.check_exit("BTC/USDT", "roi", ps()).allowed
 
@@ -73,7 +73,7 @@ class TestStaleness:
     def test_31min_blocks_29min_allows(self, gate_cfg):
         for age, expect in ((31.0, False), (29.0, True)):
             gate = benign_gate(gate_cfg, staleness_provider=lambda now, a=age: a)
-            d = gate.check_entry("BTC/USDT", 100.0, ps())
+            d = gate.check_entry("BTC/USDT", ENTRY, ps())
             assert d.allowed is expect, age
             if not expect:
                 assert d.reason == "staleness"
@@ -113,14 +113,14 @@ class TestStaleness:
         gate = RiskGate(gate_cfg, MemoryStateStore(),
                         flags_provider=lambda pair, now: (False, ""),
                         kill_provider=lambda: False)   # real freshness provider, no file
-        d = gate.check_entry("BTC/USDT", 100.0, ps())
+        d = gate.check_entry("BTC/USDT", ENTRY, ps())
         assert not d.allowed and d.reason == "staleness"
 
 
 class TestKillSwitch:
     def test_kill_blocks_entries_allows_exits(self, gate_cfg):
         gate = benign_gate(gate_cfg, kill_provider=lambda: True)
-        d = gate.check_entry("BTC/USDT", 100.0, ps())
+        d = gate.check_entry("BTC/USDT", ENTRY, ps())
         assert not d.allowed and d.reason == "kill"
         assert gate.check_exit("BTC/USDT", "risk_stop_daily", ps()).allowed
 
@@ -135,7 +135,7 @@ class TestKillSwitch:
 
 
 def test_checks_dict_reports_every_check(gate):
-    d = gate.check_entry("BTC/USDT", 100.0, ps())
+    d = gate.check_entry("BTC/USDT", ENTRY, ps())
     assert set(d.checks) == set(riskgate.CHECK_ORDER)
     assert all(d.checks.values())
 
@@ -178,7 +178,7 @@ class TestFreshnessMatchesTheWriter:
         gate = RiskGate(gate_cfg, MemoryStateStore(),
                         flags_provider=lambda pair, now: (False, ""),
                         kill_provider=lambda: False)
-        assert gate.check_entry("BTC/USDT", 100.0, ps()).allowed
+        assert gate.check_entry("BTC/USDT", ENTRY, ps()).allowed
 
     def test_the_gate_derives_the_sidecar_path_beside_the_knowledge_db(self, gate_cfg):
         assert pathlib.Path(gate_cfg.freshness_path).name == "freshness.json"

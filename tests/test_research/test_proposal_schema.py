@@ -21,6 +21,8 @@ MUTATIONS = [
     ("sum_low", {"targets": {"BTC": 0.45, "ETH": 0.25, "USDT": 0.28}}),
     ("sum_boundary_bad", {"targets": {"BTC": 0.452, "ETH": 0.25, "USDT": 0.30}}),
     ("unknown_asset", {"targets": {"BTC": 0.5, "ETH": 0.3, "SOL": 0.2}}),
+    ("unknown_asset_with_cash", {"targets": {"BTC": 0.5, "SOL": 0.2, "USDT": 0.3}}),
+    ("no_quote", {"targets": {"BTC": 0.7, "ETH": 0.3}}),
     ("extra_top", {"leverage": 2}),
     ("bad_module", {"module": "yolo"}),
     ("empty_rationale", {"rationale": []}),
@@ -52,8 +54,11 @@ def test_verdicts_agree(name, mut):
         validate_proposal(raw)
     # container loader agrees (it may reject for a different reason, never accept)
     assert validate_structural(raw, ["BTC", "ETH"], 0.001) != [], name
-    # JSON Schema catches everything it CAN express (sum lives in pydantic only)
-    if name not in ("sum_low", "sum_boundary_bad", "abstain_not_hold"):
+    # JSON Schema catches everything it CAN express. The sum, abstain->hold and
+    # membership of the tradeable tier live in pydantic only: the last one depends on a
+    # universe snapshot JSON Schema has no way to see (wide-universe design §3.3).
+    if name not in ("sum_low", "sum_boundary_bad", "abstain_not_hold",
+                    "unknown_asset_with_cash"):
         with pytest.raises(jsonschema.ValidationError):
             jsonschema.validate(raw, json_schema())
 
@@ -72,29 +77,109 @@ def test_abstain_hold_ok():
 # ---------------------------------------------------------------- v3 (P4)
 
 from schemas.proposal import (  # noqa: E402
+    ASSET_PATTERN,
+    DEFAULT_MAX_ASSETS,
     LEGACY_SCHEMA_VERSION,
-    SCHEMA_VERSION,
+    PLAN_SCHEMA_VERSION,
+    SPARSE_SCHEMA_VERSION,
     build_models,
     parse_any,
     proposal_json_schema,
     to_file,
+    tradeable_from_snapshot,
+    universe_ref_from_snapshot,
 )
 
 
-def test_targets_are_generated_from_the_universe():
+def test_targets_are_validated_against_the_universe():
     _, model = build_models(["BTC", "ETH", "SOL"], "USDT")
     good = dict(GOOD, targets={"BTC": 0.4, "ETH": 0.2, "SOL": 0.1, "USDT": 0.3})
     assert model.model_validate(good).module == "trend"
-    with pytest.raises(ProposalInvalid):
-        # the OLD three-key shape is no longer complete for this universe
-        validate_proposal(GOOD, ["BTC", "ETH", "SOL"])
+    # the OLD three-key shape is still a perfectly good SPARSE proposal: SOL is absent,
+    # which means SOL is zero. That is the v4 change (wide-universe §3.3).
+    assert validate_proposal(GOOD, ["BTC", "ETH", "SOL"]).targets.get("SOL") == 0.0
 
 
-def test_generated_json_schema_matches_the_universe():
+def test_generated_json_schema_pins_the_sparse_shape():
     schema = proposal_json_schema(["BTC", "ETH", "SOL"])
-    assert set(schema["properties"]["targets"]["required"]) == {"BTC", "ETH", "SOL", "USDT"}
-    jsonschema.validate(
-        dict(GOOD, targets={"BTC": 0.4, "ETH": 0.2, "SOL": 0.1, "USDT": 0.3}), schema)
+    targets = schema["properties"]["targets"]
+    assert targets["required"] == ["USDT"]            # cash is never implicit
+    assert targets["maxProperties"] == DEFAULT_MAX_ASSETS + 1
+    assert targets["propertyNames"]["pattern"] == ASSET_PATTERN
+    jsonschema.validate(dict(GOOD, targets={"SOL": 0.1, "USDT": 0.9}), schema)
+
+
+# ---------------------------------------------------------------- v4 (wide universe)
+
+WIDE = ["BTC", "ETH", "SOL", "AVAX", "LINK", "DOT", "ATOM", "NEAR", "OP"]
+SNAP = {"date": "2026-09-20", "sha256": "c" * 64}
+
+
+def test_an_asset_outside_the_tradeable_tier_rejects_the_whole_proposal():
+    """Not clamped to zero — rejected, so the journal records a model that tried."""
+    with pytest.raises(ProposalInvalid, match="outside the tradeable universe"):
+        validate_proposal(dict(GOOD, targets={"BTC": 0.4, "DOGE": 0.1, "USDT": 0.5}), WIDE)
+
+
+def test_a_proposal_may_not_name_more_assets_than_max_assets():
+    many = {a: 0.1 for a in WIDE}
+    many["USDT"] = 0.1
+    with pytest.raises(ProposalInvalid, match="max_assets"):
+        validate_proposal(dict(GOOD, targets=many), WIDE)
+    smaller = {a: 0.1 for a in WIDE[:3]}
+    smaller["USDT"] = 0.7
+    with pytest.raises(ProposalInvalid, match="max_assets"):
+        validate_proposal(dict(GOOD, targets=smaller), WIDE, max_assets=2)
+
+
+def test_the_quote_is_always_required():
+    with pytest.raises(ProposalInvalid, match="must name USDT"):
+        validate_proposal(dict(GOOD, targets={"BTC": 0.7, "ETH": 0.3}), WIDE)
+
+
+def test_v4_must_name_the_snapshot_it_saw_and_v2_must_not():
+    body = dict(GOOD, targets={"BTC": 0.4, "SOL": 0.1, "USDT": 0.5})
+    prop = validate_proposal(dict(body, schema_version=4, universe_snapshot=SNAP), WIDE)
+    assert prop.universe_snapshot.sha256 == SNAP["sha256"]
+    with pytest.raises(ProposalInvalid, match="requires universe_snapshot"):
+        validate_proposal(dict(body, schema_version=4), WIDE)
+    with pytest.raises(ProposalInvalid, match="requires schema_version 4"):
+        validate_proposal(dict(body, universe_snapshot=SNAP), WIDE)
+
+
+def test_a_proposal_against_a_different_snapshot_is_refused():
+    """Replayability: the universe moved under the model, so the answer is not usable."""
+    body = dict(GOOD, schema_version=4, targets={"BTC": 0.4, "SOL": 0.1, "USDT": 0.5})
+    validate_proposal(dict(body, universe_snapshot=SNAP), WIDE, snapshot=SNAP)
+    stale = {"date": "2026-09-13", "sha256": "d" * 64}
+    with pytest.raises(ProposalInvalid, match="not the snapshot this run used"):
+        validate_proposal(dict(body, universe_snapshot=stale), WIDE, snapshot=SNAP)
+    with pytest.raises(ProposalInvalid, match="universe_snapshot required"):
+        validate_proposal(dict(GOOD, targets={"BTC": 0.5, "USDT": 0.5}), WIDE, snapshot=SNAP)
+
+
+def test_cash_module_counts_every_named_asset():
+    body = dict(GOOD, module="cash", targets={"SOL": 0.06, "AVAX": 0.06, "USDT": 0.88})
+    with pytest.raises(ProposalInvalid, match="cash"):
+        validate_proposal(body, WIDE)
+    validate_proposal(dict(body, targets={"SOL": 0.05, "AVAX": 0.05, "USDT": 0.90}), WIDE)
+
+
+def test_the_loader_pattern_and_cap_agree_with_the_host():
+    from strategies import proposal_loader as pl
+
+    assert pl.ASSET_PATTERN == ASSET_PATTERN
+    assert pl.DEFAULT_MAX_ASSETS == DEFAULT_MAX_ASSETS
+
+
+def test_tradeable_from_snapshot_reads_only_tradeable_tiers():
+    snap = {"date": "2026-09-20", "sha256": "e" * 64,
+            "assets": {"BTC": {"tier": "core"}, "SOL": {"tier": "satellite"},
+                       "PEPE": {"tier": "watchlist"}, "XYZ": {"tier": "exit_only"}}}
+    assert tradeable_from_snapshot(snap) == ("BTC", "SOL")
+    ref = universe_ref_from_snapshot(snap)
+    assert (ref.date, ref.sha256) == ("2026-09-20", "e" * 64)
+    assert universe_ref_from_snapshot({"date": "2026-09-20"}) is None
 
 
 def test_committed_schema_matches_the_default_universe():
@@ -143,10 +228,18 @@ def test_parse_any_does_not_paper_over_a_genuinely_broken_payload():
         parse_any(dict(GOOD, module="yolo"))
 
 
-def test_to_file_omits_absent_optionals_and_stamps_v3_only_when_needed():
+def test_to_file_stamps_the_lowest_version_the_payload_needs():
     prop = validate_proposal(GOOD)
     plain = to_file(prop)
     assert "schema_version" not in plain and "signal_id" not in plain
     assert validate_structural(plain, ["BTC", "ETH"], 0.001) == []
     tagged = to_file(prop, signal_id="sig-1")
-    assert tagged["signal_id"] == "sig-1" and tagged["schema_version"] == SCHEMA_VERSION
+    assert tagged["signal_id"] == "sig-1"
+    assert tagged["schema_version"] == PLAN_SCHEMA_VERSION
+    wide = validate_proposal(
+        dict(GOOD, schema_version=4, targets={"BTC": 0.4, "SOL": 0.1, "USDT": 0.5},
+             universe_snapshot=SNAP), WIDE)
+    out = to_file(wide)
+    assert out["schema_version"] == SPARSE_SCHEMA_VERSION
+    assert out["universe_snapshot"] == SNAP
+    assert validate_structural(out, WIDE, 0.001) == []
