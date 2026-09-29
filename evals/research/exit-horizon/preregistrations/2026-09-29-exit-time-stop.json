@@ -1,0 +1,110 @@
+{
+  "audit_problems": [],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "inconclusive",
+  "closed_utc": "2026-09-29T19:36:45Z",
+  "costs_bps": 15.0,
+  "falsifier": "if every N in 20/40/60 gives up more than 1 point of CAGR for each point of MaxDD saved versus the deployed regime exit, the time-stop is dead",
+  "horizon": "1d rebalance, 9.1y",
+  "id": "2026-09-29-exit-time-stop",
+  "n_params": 1,
+  "opened_utc": "2026-09-29T19:24:41Z",
+  "outcome": "inconclusive",
+  "regimes": [
+    "bull-2023-24",
+    "chop-2025-26",
+    "bear-2022",
+    "full"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": {
+        "cagr": 38.59,
+        "mdd": -83.19,
+        "oos_cagr": 44.01,
+        "oos_mdd": -76.63,
+        "oos_sharpe": 0.91,
+        "sharpe_arith": 0.83
+      },
+      "strategy_baseline": {
+        "cagr": 33.36,
+        "entries_9y": 17,
+        "mdd": -60.16,
+        "name": "deployed MA200(2% hyst) regime exit, scale-in-only",
+        "oos_cagr": 46.28,
+        "oos_mdd": -45.83,
+        "oos_sharpe": 1.05,
+        "sharpe_arith": 0.88
+      }
+    },
+    "both_directions": "avoided: almost nothing - 1.15pp of drawdown at N=20, and N=40/60 are DEEPER than deployed (-62.40, -65.38). gave up: time in market rises to 90-97% and the 2022 bear costs -30.60% at N=20 against the deployed exit's -6.65%.",
+    "costs_bps": 15.0,
+    "edge_audit": {
+      "binding_sample": "17 holding episodes for the deployed exit, 47-53 for the winners",
+      "deflated_hurdle": 2.32,
+      "deflated_hurdle_oos": 2.6422,
+      "effective_n": 529.7,
+      "effective_n_source": "audit_stats.py labels BTC/USDT 1d pt2 sl1 20bars",
+      "expected_max_sharpe": 1.49,
+      "n_trials": 7961
+    },
+    "falsifier_triggered": false,
+    "falsifier_value": "tstop_20 gives up NO CAGR versus the deployed exit (39.62 vs 33.36) while saving 1.15pp of MaxDD, so the 'more than 1 point of CAGR per point of MaxDD saved' condition is not met by every N - but the saving is 1.15pp, inside noise, and the rule is dominated on all three axes by both symmetric and ma_50",
+    "full_window": {
+      "tstop_20": [
+        39.62,
+        0.96,
+        -59.01
+      ],
+      "tstop_40": [
+        34.52,
+        0.85,
+        -62.4
+      ],
+      "tstop_60": [
+        32.28,
+        0.8,
+        -65.38
+      ]
+    },
+    "headline_is_in_sample": false,
+    "n_params": 1,
+    "out_of_sample": {
+      "cagr": 47.15,
+      "days": 2459,
+      "mdd": -50.84,
+      "sharpe_arith": 1.05,
+      "span": "2020-01-01..2026-09-24",
+      "wf_pick": "tstop_20 in all 7 blocks"
+    },
+    "regimes": {
+      "bear-2022": {
+        "n": 365
+      },
+      "bull-2023-24": {
+        "n": 731
+      },
+      "chop-2025-26": {
+        "n": 632
+      },
+      "full": {
+        "n": 3326
+      }
+    },
+    "unregistered_variant_newhigh_rearm": {
+      "tstopnh_20": [
+        14.47,
+        0.75,
+        -27.45
+      ]
+    }
+  },
+  "seal": "da1e14dfa4a5ee4b62930723ae520e56a55af429681cdcd0408ddf47f35b955e",
+  "seal_ok": true,
+  "statement": "Exiting N days after the last equity/price high (N in 20/40/60) with ensemble entry beats the deployed MA200-regime exit on drawdown per point of CAGR given up",
+  "status": "closed",
+  "surface": "local-panel-1d-parquet+feather-closes"
+}

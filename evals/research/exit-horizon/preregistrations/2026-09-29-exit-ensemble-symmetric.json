@@ -1,0 +1,96 @@
+{
+  "audit_problems": [
+    "headline 1.18 does not clear the deflated hurdle 2.32; beating the baseline is not the bar"
+  ],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "supported",
+  "closed_utc": "2026-09-29T19:37:09Z",
+  "costs_bps": 15.0,
+  "falsifier": "if symmetric exposure does not cut MaxDD by at least 10 percentage points versus the deployed regime exit, OR its drawdown-saved-per-point-of-CAGR-given-up ratio is below 1.0, the symmetric exit is not worth deploying",
+  "horizon": "1d rebalance, 9.1y",
+  "id": "2026-09-29-exit-ensemble-symmetric",
+  "n_params": 0,
+  "opened_utc": "2026-09-29T19:24:40Z",
+  "outcome": "inconclusive",
+  "regimes": [
+    "bull-2023-24",
+    "chop-2025-26",
+    "bear-2022",
+    "full"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": {
+        "cagr": 38.59,
+        "mdd": -83.19,
+        "oos_cagr": 44.01,
+        "oos_mdd": -76.63,
+        "oos_sharpe": 0.91,
+        "sharpe_arith": 0.83
+      },
+      "strategy_baseline": {
+        "cagr": 33.36,
+        "entries_9y": 17,
+        "mdd": -60.16,
+        "name": "deployed MA200(2% hyst) regime exit, scale-in-only",
+        "oos_cagr": 46.28,
+        "oos_mdd": -45.83,
+        "oos_sharpe": 1.05,
+        "sharpe_arith": 0.88
+      }
+    },
+    "both_directions": "avoided: 14.54pp of full-window drawdown and 37.57pp vs BTC hold. gave up: 18.4pp more time in market, 5.7x the turnover (8.62 vs 2.93 x NAV/yr) and 0.85pp/yr more fee drag; in the 2022 bear it LOST 20.60% where the deployed exit lost 6.65%, because scaling out gradually keeps residual exposure the binary regime exit does not.",
+    "costs_bps": 15.0,
+    "edge_audit": {
+      "binding_sample": "17 holding episodes for the deployed exit, 47-53 for the winners",
+      "deflated_hurdle": 2.32,
+      "deflated_hurdle_oos": 2.6422,
+      "effective_n": 529.7,
+      "effective_n_source": "audit_stats.py labels BTC/USDT 1d pt2 sl1 20bars",
+      "expected_max_sharpe": 1.49,
+      "n_trials": 7961
+    },
+    "falsifier_triggered": false,
+    "falsifier_value": "MaxDD cut by 14.54pp vs the deployed exit (-45.62 vs -60.16) against a 10pp threshold; CAGR GIVEN UP is negative (-9.71, i.e. the variant earns MORE), so the drawdown-per-point-given-up ratio is undefined-favourable rather than below 1.0",
+    "full_window": {
+      "cagr": 43.07,
+      "mdd": -45.62,
+      "sharpe_arith": 1.1
+    },
+    "headline": 1.18,
+    "headline_is_in_sample": false,
+    "n_params": 0,
+    "out_of_sample": {
+      "cagr": 48.98,
+      "days": 2459,
+      "fee_yr": 1.38,
+      "mdd": -40.35,
+      "sharpe_arith": 1.18,
+      "span": "2020-01-01..2026-09-24",
+      "tim_pct": 86.2,
+      "turn_yr": 9.17
+    },
+    "regimes": {
+      "bear-2022": {
+        "n": 365
+      },
+      "bull-2023-24": {
+        "n": 731
+      },
+      "chop-2025-26": {
+        "n": 632
+      },
+      "full": {
+        "n": 3326
+      }
+    }
+  },
+  "seal": "1608b8f1d1d93a945e92a8f568698a3078e17ec606337ca4a7833464e95691de",
+  "seal_ok": true,
+  "statement": "Holding exposure equal to the BTC/ETH 15-member ensemble weight on the way DOWN as well as up (the backtested book) beats the deployed MA200-regime exit on drawdown per point of CAGR given up, net of 15bps/side",
+  "status": "closed",
+  "surface": "local-panel-1d-parquet+feather-closes"
+}

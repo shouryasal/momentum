@@ -36,8 +36,12 @@ ACTION_PRIORITY: tuple[str, ...] = (
     "stoploss",      # fixed / trailing / ATR stop
     "take_profit",   # partial TP ladder rung
     "add",           # DCA or pyramid
-    "rebalance",     # sleeve drift back toward target weight
+    "rebalance",     # sleeve drift back toward target weight, including SleeveA's trim
 )
+# Priority is not classification. SleeveA's trim is offered in the ``rebalance`` slot — so a
+# flatten, a stop or a take-profit rung on the same candle still beats it — while
+# :func:`trim_reason` decides separately whether the risk GATE may refuse it. An exit no fee
+# budget may silence can still be the last candidate offered in a candle.
 
 # Exit reasons that are risk reductions: never blocked by a churn / turnover / fee check.
 RISK_EXIT_REASONS: frozenset[str] = frozenset({
@@ -55,6 +59,53 @@ def is_risk_exit(reason: str | None) -> bool:
         return False
     r = str(reason).strip()
     return r in RISK_EXIT_REASONS or r.startswith(RISK_EXIT_PREFIXES)
+
+
+# --------------------------------------------------------------------------- trim reason
+
+#: A trim taken because the position DRIFTED outside the rebalance band while the book was
+#: still inside every shipped limit. Routine housekeeping, so it stays a *discretionary*
+#: exit: ``riskgate.check_discretionary_exit`` applies the orders-per-day, turnover and
+#: monthly fee-budget checks and may refuse it, and it is priced on the maker side like any
+#: other unhurried sell.
+TRIM_DRIFT = "rebalance_trim"
+
+#: A trim taken because the book is ALREADY outside one of its own exposure limits. This
+#: one may not be silenceable: :func:`is_risk_exit` matches it on the ``risk_stop`` prefix
+#: (``crisis-policy.md`` G7 item 8 asks for exactly that prefix on any de-risk), so the
+#: churn and fee-budget checks wave it through, it crosses the spread, and it does not
+#: consume the day's discretionary order count. A de-risk a fee budget can silence is not a
+#: de-risk. It is NOT added to :data:`RISK_EXIT_REASONS`: the prefix is the mechanism, and
+#: the two names in that set that share it (``risk_stop_daily`` / ``risk_stop_monthly``) are
+#: sleeve-level flattens that ``riskgate.flatten_pending`` matches EXACTLY, so this reason
+#: can never be mistaken for one.
+TRIM_BREACH = "risk_stop_exposure"
+
+
+def trim_reason(*, position_value: float, gross: float, free_usdt: float, nav: float,
+                weight_cap: float, gross_cap: float, usdt_floor: float) -> str:
+    """:data:`TRIM_BREACH` when the book is already outside a limit, else :data:`TRIM_DRIFT`.
+
+    The three limits are the *sizing* checks ``riskgate`` applies to an incoming order, and
+    all three have the shape ``(position + stake) / nav <= cap``. They refuse ORDERS, so a
+    position that grows past its cap because the price moved raises no order and the gate
+    never sees it: over 3,326 days the never-trimming sleeve sat above its BTC cap on 422 of
+    them and above the gross ceiling on 136 (``docs/design/exit-and-horizon-2026-09-29.md``
+    §2). This asks the same arithmetic of the position the book is actually carrying, which
+    is what decides whether a trim is housekeeping or the only thing standing between the
+    book and a breach it cannot otherwise clear.
+
+    Every comparison is made against the book BEFORE the trim, because that is the state the
+    classification is about. A trim is never classified by its size.
+    """
+    n = max(float(nav), _EPS)
+    if float(position_value) / n > float(weight_cap) + _EPS:
+        return TRIM_BREACH
+    if float(gross) / n > float(gross_cap) + _EPS:
+        return TRIM_BREACH
+    if float(free_usdt) / n < float(usdt_floor) - _EPS:
+        return TRIM_BREACH
+    return TRIM_DRIFT
 
 
 # --------------------------------------------------------------------------- merging

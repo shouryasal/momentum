@@ -47,7 +47,11 @@ except ImportError:  # in-container flat layout
         SqliteStateStore,
     )
 
-STRATEGY_VERSION = "earn-3"
+#: Stamped on every journal row. ``earn-3`` was the trend ensemble as an entry gate;
+#: ``earn-4`` is that ensemble allowed to make a position smaller as well as larger
+#: (``docs/design/trend-trim-2026-09-30.md``). The bump is what lets the Gate page separate
+#: rows produced by the trimming sleeve from rows produced by the one that could only buy.
+STRATEGY_VERSION = "earn-4"
 
 #: The tier the trend ensemble gates: ``universe.core`` assets carry this tier in
 #: ``riskgate.json`` (and, absent a snapshot, every capped asset does — see
@@ -578,15 +582,51 @@ class EarnBaseStrategy(IStrategy):
           the reason named (``trend_state.py`` lists them). Fail closed: a missing or stale
           signal is not a flat signal, and it is not a full one either.
 
-        Applied in exactly two places, both on the BUY side: :meth:`custom_stake_amount`
-        (a new entry) and :meth:`_gated_add` (every add). It never touches an exit — the
-        stop, the ladder, ROI and the exit signal keep the whole exit path — and it never
-        touches the risk gate, which still validates every scaled stake.
+        Applied on the BUY side at :meth:`custom_stake_amount` (a new entry) and
+        :meth:`_gated_add` (every add), and — since 2026-09-30 — on the SELL side at
+        ``SleeveA._trim_plan``, which sells a core position back down to
+        ``weight × target × NAV`` when it has drifted more than the rebalance band above it.
+        It does not *replace* any full-exit rule — the binary MA200 flip, the stop, the ladder
+        and ROI keep the whole exit path and freqtrade runs all of them before it asks for an
+        adjustment at all — but it can itself close a position, because at a real, fresh
+        weight of zero the scaled target is zero and the excess is the whole position. That
+        close is classified ``rebalance_trim`` like any other drift trim, so the churn and
+        fee-budget checks may refuse it (``docs/design/trend-trim-2026-09-30.md`` §4.1, §7).
+        (Until 2026-09-30 this docstring read "It never touches an exit", and that asymmetry
+        was the defect: the weight sized the book in and could not size it out.)
+
+        It never touches the risk gate, which still validates every scaled stake.
         """
         if not self._is_core(pair):
             return ts.TrendWeight(1.0, "not_core")
         return ts.weight_for(self._trend_state(), pair.split("/")[0], _aware(now),
                              self._trend_max_age_h())
+
+    #: The only two trend-gate outcomes a SELL-side rule may size against. The other four
+    #: reasons (``trend_state_missing``, ``_stale``, ``_warmup``, ``_no_asset``) are
+    #: PLUMBING: on the buy side they all mean "do not buy", which is safe, but on the sell
+    #: side a weight of 0.0 means "sell the whole position", so a dead writer or a stalled
+    #: candle store would liquidate the core book on a data fault. ``not_core`` is excluded
+    #: too — a satellite's 1.0 is a placeholder for "this signal does not speak about you",
+    #: not a measurement, and the ensemble is a core-asset signal.
+    _SELLABLE_TREND_REASONS: tuple[str, ...] = (ts.REASON_OK, ts.REASON_ZERO)
+
+    def _trend_weight_for_trim(self, pair: str, ps: PortfolioState) -> ts.TrendWeight | None:
+        """The ensemble weight a TRIM may size against, or ``None`` meaning do not trim.
+
+        ``weight_zero`` is a real, fresh zero — every one of the fifteen members is off — and
+        a sell-side rule may act on it. Anything in the plumbing set fails closed to NO TRIM
+        and journals the refusal through the ordinary trend-gate row (once per pair per
+        SIDE per state change), so a silenced trim is visible on the Gate page instead of
+        being an invisible no-op — and is visible as the refused SELL it is, not folded into
+        whichever buy-side row happened to be written first.
+        """
+        tw = self._trend_weight(pair, ps.now)
+        if tw.reason in self._SELLABLE_TREND_REASONS:
+            return tw
+        self._journal_trend_gate(pair, tw, ps, where="adjust_trade_position",
+                                 intent="adjust", stake=0.0, side="sell")
+        return None
 
     def _trend_scaled(self, pair: str, stake: float, ps: PortfolioState, *,
                       where: str, intent: str, tag: str) -> float:
@@ -614,24 +654,30 @@ class EarnBaseStrategy(IStrategy):
         return scaled
 
     def _journal_trend_gate(self, pair: str, tw: ts.TrendWeight, ps: PortfolioState, *,
-                            where: str, intent: str, stake: float) -> None:
+                            where: str, intent: str, stake: float,
+                            side: str = "buy") -> None:
         """One journal row per pair per CHANGE of trend-gate state — never per candle.
 
         A shut gate is a sizing refusal, not a risk-gate breach (the risk gate never saw
         an order), so the row carries the ordinary ``reject`` severity and a reason that
         names plumbing (``trend_state_*``) or the market (``weight_zero``), so the Gate
         page and a healthcheck can tell them apart (§10.2 item 6).
+
+        ``side`` is part of the dedup key as well as the row, because since 2026-09-30 the
+        same four plumbing reasons refuse a SELL too (``_trend_weight_for_trim``). Keyed on
+        the reason alone, whichever direction asked first swallowed the other's row, and a
+        refused trim would have been journalled — if at all — as a refused buy.
         """
-        key = f"{tw.reason}:{tw.weight:.3f}"
-        if self._trend_gate_last.get(pair) == key:
+        slot, key = f"{side}:{pair}", f"{tw.reason}:{tw.weight:.3f}"
+        if self._trend_gate_last.get(slot) == key:
             return
-        self._trend_gate_last[pair] = key
+        self._trend_gate_last[slot] = key
         if not self._journal_on:
             return
         try:
             _journal.record_gate_decision(
                 self.gate_cfg.sleeve, pair, where, intent, tw.tradeable,
-                f"trend_gate:{tw.reason}", side="buy",
+                f"trend_gate:{tw.reason}", side=side,
                 checks={"trend_gate": tw.tradeable}, proposed_stake=stake, nav=ps.nav,
                 strategy_version=STRATEGY_VERSION, run_id=self.gate_cfg.run_id or None,
                 action="allow" if tw.weight >= 1.0 else ("clamp" if tw.tradeable else "reject"),
@@ -1016,8 +1062,15 @@ class EarnBaseStrategy(IStrategy):
         Returns freqtrade's ``(stake, order_tag)`` pair (``_adjust_trade_position_internal``
         unpacks a tuple) so the winner's tag rides on the order it created —
         ``order.ft_order_tag`` — instead of being stashed per pair before the winner is
-        known. Only adds carry a tag; an exit passes ``""`` so freqtrade keeps its own
-        ``partial_exit`` reason.
+        known. An exit that passes ``""`` keeps freqtrade's own ``partial_exit`` reason (the
+        take-profit ladder, SleeveB's trim); one that passes a tag REPLACES it, because
+        ``check_and_call_adjust_trade_position`` forwards the tag as
+        ``execute_trade_exit(exit_tag=…)`` and there ``exit_reason = exit_tag or
+        exit_check.exit_reason``. ``SleeveA._trim_plan`` uses that deliberately, so the exit
+        reason names the branch and ``custom_exit_price`` / ``record_order_fill`` can tell a
+        breach trim from a drift trim. Note that a partial exit is the ONE exit freqtrade does
+        not route through :meth:`confirm_trade_exit` (``and not sub_trade_amt``): the gate
+        call inside the candidate is the only one it gets.
         """
         plan = self._mechanics_plan(trade, current_time, current_rate, current_profit,
                                     min_stake, max_stake)

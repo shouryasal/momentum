@@ -1,0 +1,93 @@
+{
+  "audit_problems": [],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "refuted",
+  "closed_utc": "2026-09-29T19:36:46Z",
+  "costs_bps": 15.0,
+  "falsifier": "if the fast-exit book's MaxDD is not shallower than the symmetric ensemble's by at least 3 percentage points, OR its arithmetic Sharpe is lower than the symmetric ensemble's, the enter-slow-exit-fast claim does not hold on this data",
+  "horizon": "1d rebalance, 9.1y",
+  "id": "2026-09-29-exit-fast-ensemble-asymmetric",
+  "n_params": 0,
+  "opened_utc": "2026-09-29T19:24:41Z",
+  "outcome": "refuted",
+  "regimes": [
+    "bull-2023-24",
+    "chop-2025-26",
+    "bear-2022",
+    "full"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": {
+        "cagr": 38.59,
+        "mdd": -83.19,
+        "oos_cagr": 44.01,
+        "oos_mdd": -76.63,
+        "oos_sharpe": 0.91,
+        "sharpe_arith": 0.83
+      },
+      "strategy_baseline": {
+        "cagr": 33.36,
+        "entries_9y": 17,
+        "mdd": -60.16,
+        "name": "deployed MA200(2% hyst) regime exit, scale-in-only",
+        "oos_cagr": 46.28,
+        "oos_mdd": -45.83,
+        "oos_sharpe": 1.05,
+        "sharpe_arith": 0.88
+      }
+    },
+    "both_directions": "avoided: nothing on drawdown - the five fastest members include three Donchian state machines that stay latched ON through a drawdown. gave up: turnover rises to 12.31x NAV/yr and fee drag to 1.85%/yr, the highest of any variant; the 2022 bear costs -33.94% against symmetric's -20.60%.",
+    "costs_bps": 15.0,
+    "edge_audit": {
+      "binding_sample": "17 holding episodes for the deployed exit, 47-53 for the winners",
+      "deflated_hurdle": 2.32,
+      "deflated_hurdle_oos": 2.6422,
+      "effective_n": 529.7,
+      "effective_n_source": "audit_stats.py labels BTC/USDT 1d pt2 sl1 20bars",
+      "expected_max_sharpe": 1.49,
+      "n_trials": 7961
+    },
+    "falsifier_triggered": true,
+    "falsifier_value": "fast-exit MaxDD is -46.37 against symmetric's -45.62: 0.75pp DEEPER, not the required 3pp shallower. (The second clause passes: Sharpe 1.19 vs 1.10.)",
+    "full_window": {
+      "cagr": 46.0,
+      "mdd": -46.37,
+      "sharpe_arith": 1.19
+    },
+    "headline_is_in_sample": false,
+    "mechanism": "enter-slow-exit-fast helps RETURN (CAGR 46.00 vs 43.07, Sharpe 1.19 vs 1.10) and not DRAWDOWN; a fast LEVEL rule (close vs MA40/50) does both",
+    "n_params": 0,
+    "out_of_sample": {
+      "cagr": 53.05,
+      "days": 2459,
+      "fee_yr": 1.98,
+      "mdd": -46.37,
+      "sharpe_arith": 1.3,
+      "span": "2020-01-01..2026-09-24",
+      "turn_yr": 13.18
+    },
+    "regimes": {
+      "bear-2022": {
+        "n": 365
+      },
+      "bull-2023-24": {
+        "n": 731
+      },
+      "chop-2025-26": {
+        "n": 632
+      },
+      "full": {
+        "n": 3326
+      }
+    }
+  },
+  "seal": "88da6fc363105f9fe50cb1e2a0e553f7e9523a44b968bbf1b4b692f829c5762f",
+  "seal_ok": true,
+  "statement": "Enter slow exit fast: entering on the full 15-member ensemble and exiting on the 5 FASTEST members only (ma50, ma75, dc20_10, dc40_20, dc55_20) beats the symmetric ensemble and the deployed regime exit on drawdown per point of CAGR given up",
+  "status": "closed",
+  "surface": "local-panel-1d-parquet+feather-closes"
+}

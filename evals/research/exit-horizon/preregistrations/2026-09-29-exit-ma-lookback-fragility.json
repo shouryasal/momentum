@@ -1,0 +1,107 @@
+{
+  "audit_problems": [
+    "headline 1.31 does not clear the deflated hurdle 2.32; beating the baseline is not the bar"
+  ],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "supported",
+  "closed_utc": "2026-09-29T19:37:09Z",
+  "costs_bps": 15.0,
+  "falsifier": "if the CAGR range across MA50/125/200/225 used as the EXIT rule (entry held at the ensemble) is below 10 percentage points, the exit is NOT lookback-fragile and growth-audit's entry-side range does not transfer",
+  "horizon": "1d rebalance, 9.1y",
+  "id": "2026-09-29-exit-ma-lookback-fragility",
+  "n_params": 1,
+  "opened_utc": "2026-09-29T19:24:40Z",
+  "outcome": "inconclusive",
+  "regimes": [
+    "bull-2023-24",
+    "chop-2025-26",
+    "bear-2022",
+    "full"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": {
+        "cagr": 38.59,
+        "mdd": -83.19,
+        "oos_cagr": 44.01,
+        "oos_mdd": -76.63,
+        "oos_sharpe": 0.91,
+        "sharpe_arith": 0.83
+      },
+      "strategy_baseline": {
+        "cagr": 33.36,
+        "entries_9y": 17,
+        "mdd": -60.16,
+        "name": "deployed MA200(2% hyst) regime exit, scale-in-only",
+        "oos_cagr": 46.28,
+        "oos_mdd": -45.83,
+        "oos_sharpe": 1.05,
+        "sharpe_arith": 0.88
+      }
+    },
+    "both_directions": "avoided: a short exit MA (40-50) avoids 20-23pp of drawdown versus MA200. gave up: nothing on this data - the short MAs also earn more - but turnover rises from 2.93 to 7.4 x NAV/yr and the whole result rests on 47-52 holding episodes.",
+    "costs_bps": 15.0,
+    "dense_grid_sharpe": {
+      "100": 1.15,
+      "125": 1.0,
+      "150": 0.9,
+      "175": 0.89,
+      "20": 1.16,
+      "200": 0.88,
+      "225": 0.83,
+      "250": 0.82,
+      "30": 1.15,
+      "40": 1.28,
+      "50": 1.25,
+      "60": 1.16,
+      "75": 0.99
+    },
+    "edge_audit": {
+      "binding_sample": "17 holding episodes for the deployed exit, 47-53 for the winners",
+      "deflated_hurdle": 2.32,
+      "deflated_hurdle_oos": 2.6422,
+      "effective_n": 529.7,
+      "effective_n_source": "audit_stats.py labels BTC/USDT 1d pt2 sl1 20bars",
+      "expected_max_sharpe": 1.49,
+      "n_trials": 7961
+    },
+    "falsifier_triggered": false,
+    "falsifier_value": "CAGR range across the pre-registered exit grid MA50/125/200/225 = 19.50pp (50.32 at MA50 to 30.82 at MA225) against a 10pp threshold; MaxDD range on the same grid = 27.37pp (-37.50 to -64.87), and 32.35pp across the dense grid MA20..MA250",
+    "headline": 1.31,
+    "headline_is_in_sample": false,
+    "n_params": 1,
+    "out_of_sample": {
+      "days": 2459,
+      "span": "2020-01-01..2026-09-24",
+      "wf_dense_grid": {
+        "cagr": 51.71,
+        "mdd": -35.61,
+        "picks": "ma_40 x5, ma_20 x1, ma_50 x1",
+        "sharpe_arith": 1.31
+      }
+    },
+    "plateau": "MA20-MA60 all Sharpe >= 1.15; monotone decline from MA50 to MA250; MA40-50 is the middle of the plateau, not a boundary peak",
+    "regimes": {
+      "bear-2022": {
+        "n": 365
+      },
+      "bull-2023-24": {
+        "n": 731
+      },
+      "chop-2025-26": {
+        "n": 632
+      },
+      "full": {
+        "n": 3326
+      }
+    }
+  },
+  "seal": "59b791086da9b392c72362a0ab4f2ad3f098e6943f9ce91babd6d4a6c9a2c640",
+  "seal_ok": true,
+  "statement": "The deployed single-MA regime exit is as lookback-fragile on the EXIT side as growth-audit.md measured the entry side to be (44-point CAGR range across MA50/125/200/225)",
+  "status": "closed",
+  "surface": "local-panel-1d-parquet+feather-closes"
+}

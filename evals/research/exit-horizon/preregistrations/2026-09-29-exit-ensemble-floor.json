@@ -1,0 +1,103 @@
+{
+  "audit_problems": [],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "refuted",
+  "closed_utc": "2026-09-29T19:36:44Z",
+  "costs_bps": 15.0,
+  "falsifier": "if no floor in 0.2/0.4/0.6 improves arithmetic Sharpe over the symmetric exit by at least 0.10 AND the result is not monotone across the three floors, the floor is a fitted knob and is dead",
+  "horizon": "1d rebalance, 9.1y",
+  "id": "2026-09-29-exit-ensemble-floor",
+  "n_params": 1,
+  "opened_utc": "2026-09-29T19:24:40Z",
+  "outcome": "refuted",
+  "regimes": [
+    "bull-2023-24",
+    "chop-2025-26",
+    "bear-2022",
+    "full"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": {
+        "cagr": 38.59,
+        "mdd": -83.19,
+        "oos_cagr": 44.01,
+        "oos_mdd": -76.63,
+        "oos_sharpe": 0.91,
+        "sharpe_arith": 0.83
+      },
+      "strategy_baseline": {
+        "cagr": 33.36,
+        "entries_9y": 17,
+        "mdd": -60.16,
+        "name": "deployed MA200(2% hyst) regime exit, scale-in-only",
+        "oos_cagr": 46.28,
+        "oos_mdd": -45.83,
+        "oos_sharpe": 1.05,
+        "sharpe_arith": 0.88
+      }
+    },
+    "both_directions": "avoided: nothing the symmetric rule did not avoid more cheaply. gave up: floor_0.6 cuts time in market to 50.2% and CAGR to 36.50%, below BTC hold's 38.59%.",
+    "costs_bps": 15.0,
+    "edge_audit": {
+      "binding_sample": "17 holding episodes for the deployed exit, 47-53 for the winners",
+      "deflated_hurdle": 2.32,
+      "deflated_hurdle_oos": 2.6422,
+      "effective_n": 529.7,
+      "effective_n_source": "audit_stats.py labels BTC/USDT 1d pt2 sl1 20bars",
+      "expected_max_sharpe": 1.49,
+      "n_trials": 7961
+    },
+    "falsifier_triggered": true,
+    "falsifier_value": "best floor Sharpe improvement over symmetric = -0.04 (floor_0.4 1.06 vs symmetric 1.10) against a required +0.10; and the surface is NOT monotone (0.2->0.95, 0.4->1.06, 0.6->0.98)",
+    "full_window": {
+      "floor_0.2": [
+        39.08,
+        0.95,
+        -58.16
+      ],
+      "floor_0.4": [
+        44.45,
+        1.06,
+        -57.92
+      ],
+      "floor_0.6": [
+        36.5,
+        0.98,
+        -48.95
+      ]
+    },
+    "headline_is_in_sample": false,
+    "n_params": 1,
+    "out_of_sample": {
+      "cagr": 53.64,
+      "days": 2459,
+      "mdd": -45.25,
+      "sharpe_arith": 1.18,
+      "span": "2020-01-01..2026-09-24",
+      "wf_pick": "floor_0.4 in all 7 blocks"
+    },
+    "regimes": {
+      "bear-2022": {
+        "n": 365
+      },
+      "bull-2023-24": {
+        "n": 731
+      },
+      "chop-2025-26": {
+        "n": 632
+      },
+      "full": {
+        "n": 3326
+      }
+    }
+  },
+  "seal": "11cb4225c9d5e40fb4b9df4a83a834e139837f53d7abea3546c4d21308858ab5",
+  "seal_ok": true,
+  "statement": "Selling only when the ensemble weight falls below a floor x (0.2/0.4/0.6) and then to zero beats both the symmetric scale-out and the deployed MA200-regime exit on drawdown per point of CAGR given up",
+  "status": "closed",
+  "surface": "local-panel-1d-parquet+feather-closes"
+}

@@ -1,0 +1,104 @@
+{
+  "audit_problems": [],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "refuted",
+  "closed_utc": "2026-09-29T19:36:45Z",
+  "costs_bps": 15.0,
+  "falsifier": "if no trail width in 15/25/35 percent produces a MaxDD shallower than the deployed regime exit, the trailing-stop-only book is dead",
+  "horizon": "1d rebalance, 9.1y",
+  "id": "2026-09-29-exit-trailing-stop-only",
+  "n_params": 1,
+  "opened_utc": "2026-09-29T19:24:41Z",
+  "outcome": "refuted",
+  "regimes": [
+    "bull-2023-24",
+    "chop-2025-26",
+    "bear-2022",
+    "full"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": {
+        "cagr": 38.59,
+        "mdd": -83.19,
+        "oos_cagr": 44.01,
+        "oos_mdd": -76.63,
+        "oos_sharpe": 0.91,
+        "sharpe_arith": 0.83
+      },
+      "strategy_baseline": {
+        "cagr": 33.36,
+        "entries_9y": 17,
+        "mdd": -60.16,
+        "name": "deployed MA200(2% hyst) regime exit, scale-in-only",
+        "oos_cagr": 46.28,
+        "oos_mdd": -45.83,
+        "oos_sharpe": 1.05,
+        "sharpe_arith": 0.88
+      }
+    },
+    "both_directions": "avoided: nothing. gave up: 2.42pp of CAGR at 15% and a deeper drawdown; the stop fires into a grind and the ensemble re-enters the next bar, so the book pays 9.04x NAV/yr of turnover for a worse drawdown.",
+    "costs_bps": 15.0,
+    "edge_audit": {
+      "binding_sample": "17 holding episodes for the deployed exit, 47-53 for the winners",
+      "deflated_hurdle": 2.32,
+      "deflated_hurdle_oos": 2.6422,
+      "effective_n": 529.7,
+      "effective_n_source": "audit_stats.py labels BTC/USDT 1d pt2 sl1 20bars",
+      "expected_max_sharpe": 1.49,
+      "n_trials": 7961
+    },
+    "falsifier_triggered": true,
+    "falsifier_value": "no pre-registered trail width produces a MaxDD shallower than the deployed exit's -60.16: 15% -> -61.54, 25% -> -66.27, 35% -> -67.58. All three are DEEPER.",
+    "headline_is_in_sample": false,
+    "n_params": 1,
+    "out_of_sample": {
+      "cagr": 33.38,
+      "days": 2459,
+      "mdd": -51.91,
+      "sharpe_arith": 0.88,
+      "span": "2020-01-01..2026-09-24",
+      "wf_pick": "trail_0.15 in all 7 blocks"
+    },
+    "regimes": {
+      "bear-2022": {
+        "n": 365
+      },
+      "bull-2023-24": {
+        "n": 731
+      },
+      "chop-2025-26": {
+        "n": 632
+      },
+      "full": {
+        "n": 3326
+      }
+    },
+    "unregistered_variant_newhigh_rearm": {
+      "note": "a sticky re-arm cuts MaxDD to -25.62 but CAGR to 8.35 - dodges the crash by dodging the rally, and is 30pp of CAGR below BTC hold",
+      "trailnh_0.15": [
+        8.35,
+        0.58,
+        -25.62
+      ],
+      "trailnh_0.25": [
+        4.84,
+        0.33,
+        -57.41
+      ],
+      "trailnh_0.35": [
+        6.76,
+        0.38,
+        -60.73
+      ]
+    }
+  },
+  "seal": "45a6be6493464e36e4df838ec86cbafba3426ccd76f14974491a46cc5234ca95",
+  "seal_ok": true,
+  "statement": "A trailing stop alone (no trend exit: hold from ensemble entry until the stop fires, re-enter when the ensemble re-arms) beats the deployed MA200-regime exit on drawdown per point of CAGR given up",
+  "status": "closed",
+  "surface": "local-panel-1d-parquet+feather-closes"
+}
