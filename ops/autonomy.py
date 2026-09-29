@@ -63,9 +63,14 @@ from pathlib import Path
 from typing import Any
 
 from ops.config import REPO_ROOT, EarnConfig, load_config
+from ops.gen_ops_files import GATE_MODULE  # noqa: F401 - re-exported, see below
 from ops.lib import autonomy_state as astate
 from ops.lib import kill as killlib
 from ops.lib import paths
+
+#: ``GATE_MODULE`` above is re-exported, not redefined: the string that names this module
+#: is owned by the renderer that writes it into every cron line, so the gate and the
+#: schedule agree by construction rather than by two developers remembering to match.
 
 OFF = astate.OFF
 WATCHING = astate.WATCHING
@@ -74,7 +79,9 @@ TRADING = astate.TRADING
 
 #: Typed confirmation for :func:`flatten_all`. Selling the whole book to cash is never a
 #: side effect of anything — not of pausing, not of stopping, not of the kill switch.
-FLATTEN_PHRASE = "FLATTEN ALL"
+#: The same phrase the console's ``POST /api/control/flatten`` demands: one act, one
+#: sentence to type, whichever seat you are in.
+FLATTEN_PHRASE = "SELL EVERYTHING"
 
 #: The minimum autonomy level each scheduled job needs. ``off`` means "always permitted".
 #:
@@ -94,20 +101,24 @@ JOB_MIN_LEVEL: dict[str, str] = {
     "reconcile": WATCHING,
     "tca_job": WATCHING,
     "backtest_data": WATCHING,
-    # Proposing: the full decision loop, and the reviews that feed it.
+    # Proposing: the full decision loop, the reviews that feed it, and the self-research
+    # passes — all of them write proposals or changes and all of them spend on models.
     "research_run": PROPOSING,
     "daily_review": PROPOSING,
     "review_run": PROPOSING,
     "maintenance": PROPOSING,
+    "discovery_light": PROPOSING,
+    "discovery_deep": PROPOSING,
 }
 
 #: Jobs that are permitted even when this gate itself fails to load. Keep it tiny.
 ALWAYS_JOBS: frozenset[str] = frozenset({"healthcheck", "backup"})
 
 #: Jobs that spend money on models, and are therefore subject to the spend caps.
-MODEL_JOBS: frozenset[str] = frozenset(
-    {"research_run", "review_run", "daily_review", "maintenance", "scanner", "ingest", "watch"}
-)
+MODEL_JOBS: frozenset[str] = frozenset({
+    "research_run", "review_run", "daily_review", "maintenance", "scanner", "ingest",
+    "watch", "discovery_light", "discovery_deep",
+})
 
 #: Exported to a permitted child when spend is at a ceiling and ``at_cap: degrade``.
 #: The routing layer reads it to drop to its cheapest permitted tier for this run.
@@ -138,6 +149,26 @@ def _parse_iso(value: Any) -> datetime | None:
     except ValueError:
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def _env(root: Path | None) -> dict[str, str] | None:
+    """The process environment with ``$EARN_STATE_ROOT`` pinned to ``root``.
+
+    Every read and write of the signed state goes through this rather than the ambient
+    environment, so a caller that knows its own state root — the console, a worktree
+    session, a test — can never read or write the *checkout's* autonomy file by accident.
+    The rest of ``os.environ`` is carried along deliberately: ``EARN_CONSOLE_SECRET`` and
+    ``EARN_AUTOMATED_RUN`` still have to be visible, or signing and the human-only guard
+    would both silently stop working.
+    """
+    if root is None:
+        return None
+    return {**os.environ, paths.STATE_ROOT_ENV: str(root)}
+
+
+def load_state(root: Path | None = None) -> astate.AutonomyState:
+    """The signed per-bot level, read against ``root``. Never raises; failure is ``off``."""
+    return astate.load(env=_env(root))
 
 
 def display_tz(cfg: EarnConfig) -> tzinfo:
@@ -249,7 +280,7 @@ def views(
     bots: Sequence[str] = paths.SLEEVES,
 ) -> dict[str, BotView]:
     """Every bot's effective level, with the kill switch read once, uncached."""
-    st = state if state is not None else astate.load()
+    st = state if state is not None else load_state(root)
     engaged = killlib.is_engaged(cfg, root or paths.state_root())
     return {b: bot_view(cfg, st, b, kill_engaged=engaged) for b in bots}
 
@@ -390,6 +421,23 @@ def _open_journal(cfg: EarnConfig, root: Path | None = None) -> Any:
     from ops import db
 
     path = (root or paths.state_root()) / cfg.paths.journal_db
+    if not path.exists():
+        return None
+    return db.connect(path, readonly=True)
+
+
+def _open_knowledge(cfg: EarnConfig, root: Path | None = None) -> Any:
+    """Read-only knowledge DB, or ``None``.
+
+    Opened by :func:`acting` when a caller has not handed one over. The watchdog holds both
+    connections already; the **console** holds neither, and it is the surface that has to
+    explain *why* trading stopped. Without this the console's banner could say "data has
+    been stale" and not "the funding phase has been failing on PEPEUSDT since 06:20", which
+    is the difference between an operator knowing something is wrong and knowing what to fix.
+    """
+    from ops import db
+
+    path = (root or paths.state_root()) / cfg.paths.knowledge_db
     if not path.exists():
         return None
     return db.connect(path, readonly=True)
@@ -680,7 +728,13 @@ class ScheduleStatus:
 
 def schedule_status(cfg: EarnConfig | None = None, root: Path | None = None,
                     runner=None) -> ScheduleStatus:
-    """Read the installed crontab back and compare it with the rendering for this host."""
+    """Read the installed crontab back and compare it with the rendering for this host.
+
+    ``root`` is the **checkout** root — the ``E=`` the cron lines are written against and
+    the tree whose ``.venv`` they run. It is *not* the state root, and passing one for the
+    other renders a crontab pointing at a data directory with no code in it. ``None``, the
+    normal case, means this checkout.
+    """
     from ops import gen_ops_files
 
     conf = cfg or load_config()
@@ -732,10 +786,16 @@ def enable_units(cfg: EarnConfig | None = None, root: Path | None = None,
         name = Path(rel).name
         rc, _o, err = run(["systemctl", "enable", "--now", name])
         rc2, active, _ = run(["systemctl", "is-active", name])
+        state = (active or "").strip() or "unknown"
         out.append({
             "unit": name,
+            "scope": "system",
             "enabled": rc == 0,
-            "active": (active or "").strip() or "unknown",
+            "active": state,
+            # `enabled` was a return code; `verified` is the read-back. Enabling something
+            # that then refuses to start is exactly the shape of failure this whole change
+            # exists to stop reporting as success.
+            "verified": rc == 0 and state == "active",
             "error": None if rc == 0 else (err or "").strip() or f"rc={rc}",
             "sudo": f"sudo systemctl enable --now {Path(name).stem}",
         })
@@ -848,6 +908,11 @@ def job_liveness(
 ) -> JobLiveness:
     beat = read_beat(job, root)
     prev, nxt = _fires(cfg, job, now, tz)
+    # The fire time to judge lateness by is the newest one that is ALREADY `grace` old,
+    # exactly as ops/healthcheck.py does it. Judging against `prev` instead would make a
+    # fast-cadence job permanently un-late: for a */15 job, `prev + 15min` is the *next*
+    # fire, so the window in which it could be called late never opens.
+    late_ref, _ = _fires(cfg, job, now - timedelta(minutes=grace_min), tz)
     last_ok = _parse_iso(beat.get("last_ok"))
     last_skip = _parse_iso(beat.get("last_skip"))
     held = _lock_held(root, job)
@@ -859,20 +924,19 @@ def job_liveness(
     if not permit.allowed:
         verdict = "idle"
         note = f"not permitted: {permit.reason}"
-    elif prev is None:
+    elif prev is None or late_ref is None:
         verdict = "never"
         note = "no fire time could be computed for this job"
     else:
-        due = prev + timedelta(minutes=grace_min)
         latest = max([d for d in (last_ok, last_skip) if d is not None], default=None)
         if latest is None:
-            verdict = "never" if now >= due else "ok"
-            note = "no run has ever been recorded" if verdict == "never" else None
-        elif latest < prev and now >= due:
-            minutes_late = round((now - prev).total_seconds() / 60.0, 1)
+            verdict = "never"
+            note = "no run has ever been recorded"
+        elif latest < late_ref:
+            minutes_late = round((now - late_ref).total_seconds() / 60.0, 1)
             verdict = "ok" if held else "late"
             note = "a run is in flight (lock held)" if held else (
-                f"expected at {_iso(prev)}, nothing since {_iso(latest)}")
+                f"expected at {_iso(late_ref)}, nothing since {_iso(latest)}")
         if verdict == "ok" and int(beat.get("consecutive_failures") or 0) >= 2:
             verdict = "failing"
             note = f"{beat['consecutive_failures']} consecutive failures"
@@ -895,19 +959,698 @@ def job_liveness(
     )
 
 
-def liveness(
+# --------------------------------------------------------------------------- outcomes
+#
+# Everything above this line measures whether the *jobs ran*. That is not the same question
+# as whether the system *did anything*, and on 2026-09-24 the difference cost fourteen
+# hours: PEPEUSDT has no perpetual contract, its 400 failed the whole funding phase, the
+# phase failure stopped ingest, freshness froze at 06:20, the healthcheck raised a
+# ``data_stale`` flag with ``expires_at: null`` that could never clear itself, and the risk
+# gate then refused 655 consecutive entries while the strategy went on finding signals
+# every cycle. Every job ran on schedule the entire time. ``liveness()`` said "alive".
+#
+# So the measures below count OUTCOMES: entries allowed against entries refused, how long
+# since an entry was last allowed, how long each blocking flag has been up and what would
+# ever take it down, and how long since each ingest source and each ingest *phase* last
+# succeeded. A system that has been unable to act for hours must not be able to describe
+# itself as healthy, and these are the numbers that make that impossible.
+
+#: How far back the outcome counters look by default.
+ACTING_WINDOW_H = 24
+
+#: Consecutive refused entries, all for the same reason, that make "blocked" a first-class
+#: state rather than a line in a log. Twenty is roughly an hour of a 31-pair fast-test
+#: profile: long enough that a single bad cycle is not an alarm, short enough that a wedge
+#: is caught inside the hour.
+BLOCKED_STREAK = 20
+
+#: A ``block_entries`` flag still active after this long is a wedge, not a blip.
+BLOCKED_FLAG_MIN = 60
+
+#: No entry allowed for this long, while entries were being refused, is "not trading".
+NO_ENTRY_MIN = 120
+
+#: How many recent entry decisions the refusal streak is computed over. The streak is what
+#: turns "the gate said no" into "the gate has been saying no since 03:00", so it looks
+#: further back than the counting window on purpose.
+STREAK_SCAN = 5000
+
+#: Refusal slug (or its ``check`` half) -> the same fact in words an owner reads. The gate
+#: writes ``blackout:data_stale``; nobody should have to know that to learn that the data
+#: went stale. Unmapped slugs fall back to :func:`refusal_words`, which never invents a
+#: meaning — it prints the slug.
+REFUSAL_WORDS: dict[str, str] = {
+    "blackout:data_stale": "data has been stale",
+    "blackout:reconcile_mismatch": "its books disagree with the exchange",
+    "blackout:tier2_unaudited": "a protected setting was changed outside the console",
+    "blackout:missed_run": "a scheduled job is missing its output",
+    "staleness": "market data is older than the gate allows",
+    "kill": "the emergency stop is on",
+    "nav_valid": "what the bot is worth could not be worked out",
+    "monthly_lock": "the monthly loss limit has been hit",
+    "daily_lock": "the daily loss limit has been hit",
+    "reconcile": "its books disagree with the exchange",
+    "trades_per_day": "it has already made the day's allowance of trades",
+    "orders_per_day": "it has already sent the day's allowance of orders",
+    "turnover_day": "it has already turned over the day's allowance",
+    "fee_budget": "the month's fee budget is spent",
+    "max_positions": "it already holds as many positions as it may",
+    "usdt_floor": "holding more would break the cash floor",
+    "gross_cap": "the book is already as large as it may be",
+    "exit_only": "that coin is exit-only",
+    "tier": "that coin is not tradeable",
+    "min_notional": "the order would be too small to place",
+    "step_size": "the order would be below the exchange's smallest step",
+}
+
+#: Refusals that mean "the system has been switched off from the inside" rather than "the
+#: limits did their job". A ``weight_cap`` refusal on one pair is the gate working; a
+#: ``blackout`` refusal on every pair for fourteen hours is the gate being wedged.
+WEDGE_REFUSALS = ("blackout", "staleness", "kill", "nav_valid", "reconcile",
+                  "flags_unreadable", "flags_stale")
+
+
+def refusal_words(reason: str | None) -> str:
+    """``blackout:data_stale`` -> "data has been stale". Never invents a meaning."""
+    if not reason:
+        return "no reason was recorded"
+    if reason in REFUSAL_WORDS:
+        return REFUSAL_WORDS[reason]
+    head = reason.split(":", 1)[0]
+    if head in REFUSAL_WORDS:
+        return REFUSAL_WORDS[head]
+    if head == "blackout":
+        return f"the {reason.split(':', 1)[1]} blackout flag is set"
+    return reason
+
+
+def is_wedge(reason: str | None) -> bool:
+    """Is this refusal "the system is switched off" rather than "a limit did its job"?"""
+    return bool(reason) and reason.split(":", 1)[0] in WEDGE_REFUSALS
+
+
+def _hhmm(dt: datetime | None, tz: tzinfo) -> str:
+    return dt.astimezone(tz).strftime("%H:%M") if dt else "an unknown time"
+
+
+def _humanise_minutes(minutes: float | None) -> str:
+    if minutes is None:
+        return "an unknown time"
+    if minutes < 60:
+        return f"{int(minutes)}m"
+    hours, rest = divmod(int(minutes), 60)
+    if hours < 24:
+        return f"{hours}h {rest:02d}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h"
+
+
+def clears_when(flag: Mapping[str, Any]) -> str:
+    """What will ever take this flag down — the sentence the overnight failure lacked.
+
+    ``data_stale`` was written with ``expires_at: null``, so the only thing that could ever
+    clear it was the process that set it deciding to, and that process was watching a
+    freshness file the dead ingest job had stopped updating. Nothing said so. Saying it is
+    this function's whole job, and it never guesses: an expiry is quoted, a human-set flag
+    says only a human may clear it, and a flag with neither says exactly that.
+    """
+    expires = flag.get("expires_at")
+    setter = str(flag.get("set_by") or "?")
+    if expires:
+        return f"it expires at {expires}"
+    if setter == "human":
+        return "only a person can clear it — it has no expiry"
+    return (f"nothing clears it on a clock: it has no expiry, so it lifts only when "
+            f"{setter} decides to lift it")
+
+
+@dataclass(frozen=True)
+class Acting:
+    """Did the system actually *do* anything, and if not, what is stopping it.
+
+    Every field here is an outcome. None of them can be satisfied by a job exiting zero.
+    """
+
+    as_of: str
+    window_hours: int
+    entries_allowed: int
+    entries_refused: int
+    exits_allowed: int
+    last_allowed_entry: str | None
+    minutes_since_allowed_entry: float | None
+    #: Newest-first run of refused entries that all share one reason: the number that turns
+    #: "the gate said no" into "the gate has been saying no since 03:00".
+    streak: int
+    streak_reason: str | None
+    streak_since: str | None
+    #: ``{reason: count}`` inside the window, largest first.
+    refusals: list[dict[str, Any]]
+    #: The dominant refusal reason **since the last allowed entry**, and how many there have
+    #: been. These describe the silence happening *now*; :attr:`refusals` describes the
+    #: whole window, which on a recovered host is still dominated by yesterday's episode.
+    current_reason: str | None
+    current_words: str | None
+    refused_since_last_allowed: int
+    #: Every active flag whose severity blocks entries, with how long it has been up and
+    #: what would ever take it down.
+    blocking_flags: list[dict[str, Any]]
+    #: Per ingest source, from the freshness sidecar the gate itself reads.
+    sources: list[dict[str, Any]]
+    #: Per ingest *phase*, from ``ingest_runs`` — one failing phase is what started this.
+    phases: list[dict[str, Any]]
+    verdict: str            # trading | quiet | not_trading | idle | unknown
+    headline: str
+    blocked_since: str | None
+    blocked_minutes: float | None
+    clears_when: str | None
+    #: What is blocked, in one phrase, for the alert's first line.
+    blocked_what: str | None
+
+    @property
+    def blocked(self) -> bool:
+        return self.verdict == "not_trading"
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "as_of": self.as_of, "window_hours": self.window_hours,
+            "entries_allowed": self.entries_allowed,
+            "entries_refused": self.entries_refused,
+            "exits_allowed": self.exits_allowed,
+            "last_allowed_entry": self.last_allowed_entry,
+            "minutes_since_allowed_entry": self.minutes_since_allowed_entry,
+            "streak": self.streak, "streak_reason": self.streak_reason,
+            "streak_since": self.streak_since,
+            "refusals": self.refusals, "current_reason": self.current_reason,
+            "current_words": self.current_words,
+            "refused_since_last_allowed": self.refused_since_last_allowed,
+            "blocking_flags": self.blocking_flags,
+            "sources": self.sources, "phases": self.phases,
+            "verdict": self.verdict, "headline": self.headline,
+            "blocked_since": self.blocked_since,
+            "blocked_minutes": self.blocked_minutes,
+            "clears_when": self.clears_when, "blocked_what": self.blocked_what,
+        }
+
+
+def _entry_rows(conn: Any) -> list[Any]:
+    """The newest entry decisions, newest first. A missing table is not a crash."""
+    try:
+        return conn.execute(
+            "SELECT id, ts_utc, allowed, reason, sleeve, pair FROM gate_decisions"
+            " WHERE intent='entry' ORDER BY id DESC LIMIT ?", (STREAK_SCAN,)).fetchall()
+    except Exception:  # noqa: BLE001 - a fresh DB has no rows and may have no table
+        return []
+
+
+def _exit_count(conn: Any, since: str) -> int:
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM gate_decisions WHERE intent='exit' AND allowed=1"
+            " AND ts_utc >= ?", (since,)).fetchone()
+    except Exception:  # noqa: BLE001
+        return 0
+    return int(row["n"]) if row else 0
+
+
+def _refusal_streak(rows: Sequence[Any]) -> tuple[int, str | None, str | None]:
+    """Leading run of refusals sharing one reason, newest first.
+
+    Counted from the newest decision backwards, so a single allowed entry breaks it. That
+    is deliberate: the measure has to answer "has anything got through *lately*", and a
+    streak that survived an allowed entry would answer a different question.
+    """
+    streak, reason, since = 0, None, None
+    for row in rows:
+        if row["allowed"]:
+            break
+        if reason is None:
+            reason = row["reason"]
+        elif row["reason"] != reason:
+            break
+        streak += 1
+        since = row["ts_utc"]
+    return streak, reason, since
+
+
+def blocking_flags(path: Path | str, now: datetime) -> tuple[list[dict[str, Any]], str | None]:
+    """Active ``block_entries`` flags, oldest first, each with its age and its exit.
+
+    Returns ``(flags, error)``. An unreadable flags file is itself a block — the gate fails
+    closed on it — so the error is reported rather than swallowed.
+    """
+    from ops.lib import flags as flagslib
+
+    try:
+        active = flagslib.active_flags(path, now)
+    except flagslib.FlagsError as e:
+        return [], str(e)
+    out: list[dict[str, Any]] = []
+    for name, flag in active.items():
+        if flag.get("severity") != "block_entries":
+            continue
+        set_at = _parse_iso(flag.get("set_at"))
+        minutes = None if set_at is None else (now - set_at).total_seconds() / 60.0
+        out.append({
+            "name": name,
+            "severity": flag.get("severity"),
+            "reason": flag.get("reason"),
+            "set_by": flag.get("set_by"),
+            "set_at": flag.get("set_at"),
+            "expires_at": flag.get("expires_at"),
+            "scope": flag.get("scope", "ALL"),
+            "active_minutes": None if minutes is None else round(minutes, 1),
+            #: False is the defect: a flag that cannot time out can only be lifted by
+            #: whatever set it, and if that thing is broken the system stays switched off.
+            "can_expire": bool(flag.get("expires_at")),
+            "clears_when": clears_when(flag),
+        })
+    out.sort(key=lambda f: f["set_at"] or "")
+    return out, None
+
+
+def source_freshness(cfg: EarnConfig, *, root: Path | None = None,
+                     now: datetime | None = None,
+                     path: Path | None = None) -> list[dict[str, Any]]:
+    """Per ingest source: when it was last seen, how old that is, and whether it is stale.
+
+    "Jobs ran on schedule" was true all night; *this* is the measure that was not. The
+    sidecar is the same file the risk gate reads, so a source shown fresh here is a source
+    the gate agrees is fresh.
+    """
+    from ops.lib import freshness as freshlib
+
+    when = now or datetime.now(UTC)
+    p = path if path is not None else freshlib.freshness_path(root or paths.state_root())
+    limit = float(getattr(getattr(cfg, "ops", None), "staleness_min", 30) or 30)
+    out: list[dict[str, Any]] = []
+    for source, age in sorted(freshlib.ages(path=p, now=when).items()):
+        allowance = 0.0
+        if source.startswith("candles_"):
+            allowance = freshlib._tf_minutes(source.split("_", 1)[1])
+        adjusted = None if age == float("inf") else max(age - allowance, 0.0)
+        out.append({
+            "source": source,
+            "age_minutes": None if age == float("inf") else round(age, 1),
+            "age_minutes_allowed": None if adjusted is None else round(adjusted, 1),
+            "stale": adjusted is None or adjusted > limit,
+        })
+    return out
+
+
+def ingest_phases(conn: Any, *, now: datetime | None = None) -> list[dict[str, Any]]:
+    """Per ingest phase: last success, last failure, and the failure's own words.
+
+    This is the measure that names the cause rather than the symptom. On the night in
+    question ``candles`` and ``books`` were minutes old and ``funding`` was hours old with
+    ``400 Bad Request ... symbol=PEPEUSDT`` sitting in its detail column, and no surface
+    put those two facts next to each other.
+    """
+    when = now or datetime.now(UTC)
+    try:
+        rows = conn.execute(
+            "SELECT phase, status, MAX(started_at) AS at, detail FROM ingest_runs"
+            " GROUP BY phase, status").fetchall()
+    except Exception:  # noqa: BLE001 - no table on a knowledge DB that never ingested
+        return []
+    folded: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        entry = folded.setdefault(row["phase"], {
+            "phase": row["phase"], "last_ok": None, "last_fail": None, "last_error": None})
+        if row["status"] == "ok":
+            entry["last_ok"] = row["at"]
+        else:
+            entry["last_fail"] = row["at"]
+            entry["last_error"] = (row["detail"] or "")[:300] or None
+    out: list[dict[str, Any]] = []
+    for phase in sorted(folded):
+        entry = folded[phase]
+        ok_at = _parse_iso(entry["last_ok"])
+        entry["minutes_since_ok"] = (
+            None if ok_at is None else round((when - ok_at).total_seconds() / 60.0, 1))
+        entry["failing"] = bool(
+            entry["last_fail"] and (not entry["last_ok"]
+                                    or entry["last_fail"] > entry["last_ok"]))
+        out.append(entry)
+    return out
+
+
+def acting(
     cfg: EarnConfig | None = None,
     *,
     root: Path | None = None,
     now: datetime | None = None,
+    window_hours: int = ACTING_WINDOW_H,
+    jdb: Any = None,
+    kdb: Any = None,
+    flags_path: Path | None = None,
+    freshness_path: Path | None = None,
+    tz: tzinfo | None = None,
+    bots: Sequence[str] = paths.SLEEVES,
+    state: astate.AutonomyState | None = None,
+) -> Acting:
+    """Is the system actually acting, and if not: what, why, since when, and what clears it.
+
+    ``jdb``/``kdb`` may be passed by a caller that already holds those connections (the
+    watchdog does); otherwise both are opened read-only and closed again. Nothing here
+    raises: a measure that can fail the watchdog is a measure that can silence it.
+    """
+    conf = cfg or load_config()
+    state_root = root or paths.state_root()
+    when = now or datetime.now(UTC)
+    zone = tz or display_tz(conf)
+    since_dt = when - timedelta(hours=window_hours)
+    since = _iso(since_dt)
+
+    conn, owned = jdb, False
+    if conn is None:
+        try:
+            conn = _open_journal(conf, state_root)
+            owned = conn is not None
+        except Exception:  # noqa: BLE001
+            conn = None
+    rows = _entry_rows(conn) if conn is not None else []
+    journal_readable = conn is not None
+    try:
+        allowed_rows = [r for r in rows if r["allowed"] and r["ts_utc"] >= since]
+        refused_rows = [r for r in rows if not r["allowed"] and r["ts_utc"] >= since]
+        entries_allowed, entries_refused = len(allowed_rows), len(refused_rows)
+        exits_allowed = _exit_count(conn, since) if conn is not None else 0
+        streak, streak_reason, streak_since = _refusal_streak(rows)
+        last_allowed = next((r["ts_utc"] for r in rows if r["allowed"]), None)
+        counts: dict[str, int] = {}
+        first_seen: dict[str, str] = {}
+        for row in refused_rows:
+            counts[row["reason"]] = counts.get(row["reason"], 0) + 1
+            first_seen[row["reason"]] = row["ts_utc"]
+        refusals = [{"reason": reason, "count": n, "words": refusal_words(reason),
+                     "since": first_seen.get(reason)}
+                    for reason, n in sorted(counts.items(), key=lambda kv: -kv[1])]
+        # Refusals since the last entry that got through: the ones that describe the
+        # CURRENT silence rather than the day's history.
+        #
+        # This distinction is not theoretical. Run against the live host the morning after
+        # the incident — recovered, 1524 entries allowed, nothing blocking, the newest
+        # refusal a plain `beta_cap` — and the window-wide "most common reason" was still
+        # the 1516 `blackout:data_stale` rows from the night before. The verdict came back
+        # `not_trading` on a host that was trading perfectly. Yesterday's wedge must not
+        # make today's quiet hour look like a wedge.
+        spell_rows = [r for r in rows if not r["allowed"]
+                      and (last_allowed is None or r["ts_utc"] > last_allowed)]
+        spell_counts: dict[str, int] = {}
+        for row in spell_rows:
+            spell_counts[row["reason"]] = spell_counts.get(row["reason"], 0) + 1
+        spell_reason = (max(spell_counts, key=lambda k: spell_counts[k])
+                        if spell_counts else None)
+        spell_refused = len(spell_rows)
+    finally:
+        if owned and conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    kconn, kowned = kdb, False
+    if kconn is None:
+        try:
+            kconn = _open_knowledge(conf, state_root)
+            kowned = kconn is not None
+        except Exception:  # noqa: BLE001
+            kconn = None
+    try:
+        phases = ingest_phases(kconn, now=when) if kconn is not None else []
+    finally:
+        if kowned and kconn is not None:
+            try:
+                kconn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    fpath = flags_path if flags_path is not None else state_root / conf.paths.flags_file
+    flags, flags_error = blocking_flags(fpath, when)
+    sources = source_freshness(conf, root=state_root, now=when, path=freshness_path)
+    stale = [s["source"] for s in sources if s["stale"]]
+
+    last_at = _parse_iso(last_allowed)
+    minutes_since = (None if last_at is None
+                     else round((when - last_at).total_seconds() / 60.0, 1))
+
+    st = state if state is not None else load_state(state_root)
+    vw = views(conf, state=st, root=state_root, bots=bots)
+    any_on = any(vw[b].level != OFF for b in bots)
+
+    # ------------------------------------------------------------------ the verdict
+    oldest = flags[0] if flags else None
+    wedged_flag = next((f for f in flags
+                        if (f["active_minutes"] or 0) >= BLOCKED_FLAG_MIN), None)
+    long_streak = streak >= BLOCKED_STREAK and is_wedge(streak_reason)
+    # "Nothing has got through for hours, and the reason is a wedge rather than a limit."
+    # Three things are load-bearing here, each one a way this got it wrong in testing:
+    #
+    # * the time test, keyed on time since the last *allowed* entry rather than a count
+    #   inside the window — one entry allowed twenty-three hours ago must not make the last
+    #   three hours of silence invisible;
+    # * the wedge test — a bot that has legitimately spent its daily trade allowance is
+    #   stopped on purpose, not broken;
+    # * and the wedge test over ``spell_reason``, the dominant reason *since* that last
+    #   allowed entry, not over the whole window. Using the window made the recovered live
+    #   host read as blocked, because the day's most common refusal was still the previous
+    #   night's.
+    dry = (spell_refused > 0
+           and (minutes_since is None or minutes_since >= NO_ENTRY_MIN)
+           and is_wedge(spell_reason))
+
+    blocked_since: str | None = None
+    blocked_minutes: float | None = None
+    clears: str | None = None
+    what: str | None = None
+    why: str | None = None
+
+    if not any_on:
+        verdict = "idle"
+        headline = "Every bot is off. Nothing is meant to be trading."
+    elif not journal_readable and flags_error:
+        verdict = "unknown"
+        headline = ("Cannot tell whether anything is trading: neither the journal nor the "
+                    f"flags file could be read ({flags_error}).")
+    elif flags_error:
+        verdict = "not_trading"
+        what = "every new entry, on both bots"
+        why = f"the flags file cannot be read ({flags_error}), and the gate fails closed"
+        clears = "a readable flags file"
+        headline = f"Not trading: {why}."
+    elif wedged_flag or long_streak or dry:
+        verdict = "not_trading"
+        # A flag can be scoped to one pair. Saying "on both bots" when a single symbol is
+        # blacked out would be the report overstating its own case, which is how a surface
+        # loses the trust it needs for the day it is right.
+        scope = (wedged_flag or oldest or {}).get("scope", "ALL")
+        what = ("every new entry, on both bots" if scope in (None, "ALL")
+                else f"new entries in {scope}")
+        if wedged_flag:
+            blocked_since = wedged_flag["set_at"]
+            blocked_minutes = wedged_flag["active_minutes"]
+            clears = wedged_flag["clears_when"]
+            why = refusal_words(f"blackout:{wedged_flag['name']}")
+        elif long_streak:
+            blocked_since = streak_since
+            since_streak = _parse_iso(streak_since)
+            blocked_minutes = (None if since_streak is None
+                               else round((when - since_streak).total_seconds() / 60.0, 1))
+            why = refusal_words(streak_reason)
+            clears = (oldest["clears_when"] if oldest
+                      else "whatever the gate is refusing on must stop being true")
+        else:
+            blocked_since = last_allowed
+            blocked_minutes = minutes_since
+            why = refusal_words(spell_reason)
+            clears = (oldest["clears_when"] if oldest
+                      else "whatever the gate is refusing on must stop being true")
+        # The count is "refused since the block began", not the window total: on the dry
+        # branch the window total can be dominated by an older, unrelated episode.
+        refused_here = (spell_refused if (not wedged_flag and not long_streak)
+                        else entries_refused)
+        headline = (f"Not trading: {why} since "
+                    f"{_hhmm(_parse_iso(blocked_since), zone)}, "
+                    f"{refused_here} entries refused.")
+    elif entries_allowed:
+        verdict = "trading"
+        headline = (f"Trading: {entries_allowed} entries allowed and {entries_refused} "
+                    f"refused in the last {window_hours}h.")
+    else:
+        verdict = "quiet"
+        headline = (f"Nothing blocked, and nothing to do: no entry was proposed in the "
+                    f"last {window_hours}h.")
+
+    if stale and verdict == "not_trading":
+        headline += f" Stale data: {', '.join(stale)}."
+
+    return Acting(
+        as_of=_iso(when), window_hours=window_hours,
+        entries_allowed=entries_allowed, entries_refused=entries_refused,
+        exits_allowed=exits_allowed, last_allowed_entry=last_allowed,
+        minutes_since_allowed_entry=minutes_since,
+        streak=streak, streak_reason=streak_reason, streak_since=streak_since,
+        refusals=refusals, current_reason=spell_reason,
+        current_words=refusal_words(spell_reason) if spell_reason else None,
+        refused_since_last_allowed=spell_refused,
+        blocking_flags=flags, sources=sources, phases=phases,
+        verdict=verdict, headline=headline, blocked_since=blocked_since,
+        blocked_minutes=blocked_minutes, clears_when=clears, blocked_what=what,
+    )
+
+
+# --------------------------------------------------------------------------- supervision
+
+#: The unit that keeps the console up. The console is the only surface that says "trading is
+#: blocked" in words; when it dies, the system loses its voice, which is exactly what
+#: happened on the night of 2026-09-24 — the process was gone and nothing restarted it.
+CONSOLE_UNIT = "earn-console.service"
+
+#: ``systemctl`` words that mean the probe answered. Anything else — an empty answer, a
+#: missing binary, no session bus — is ``unknown``, and unknown is never an alarm: a
+#: watchdog that shouts when it cannot see is a watchdog nobody reads.
+_ENABLED_WORDS = ("enabled", "enabled-runtime", "linked", "static", "alias", "indirect",
+                  "generated", "transient")
+_ABSENT_WORDS = ("disabled", "not-found", "masked", "bad")
+
+
+def _systemctl_env() -> dict[str, str]:
+    """``systemctl --user`` needs a session bus, and ``ops/envwrap.sh`` runs ``env -i``.
+
+    The watchdog's environment is deliberately stripped to its allowlisted secrets, which
+    removes ``XDG_RUNTIME_DIR`` and with it any way to ask the user manager anything. The
+    runtime directory is not a secret and its location is derivable, so the probe supplies
+    it rather than reporting "unknown" forever on the one host it has to work on.
+    """
+    env = dict(os.environ)
+    if not env.get("XDG_RUNTIME_DIR"):
+        candidate = Path(f"/run/user/{os.getuid()}") if hasattr(os, "getuid") else None
+        if candidate is not None and candidate.exists():
+            env["XDG_RUNTIME_DIR"] = str(candidate)
+    if not env.get("DBUS_SESSION_BUS_ADDRESS") and env.get("XDG_RUNTIME_DIR"):
+        bus = Path(env["XDG_RUNTIME_DIR"]) / "bus"
+        if bus.exists():
+            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
+    return env
+
+
+def _systemctl(argv: Sequence[str], runner=None) -> tuple[int, str, str]:
+    if runner is not None:
+        return runner(list(argv))
+    try:
+        p = subprocess.run(list(argv), capture_output=True, text=True,  # noqa: S603
+                           timeout=15, env=_systemctl_env())
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, "", str(e)
+    return p.returncode, p.stdout, p.stderr
+
+
+def _probe_scope(scope: str, unit: str, runner=None) -> dict[str, Any]:
+    prefix = ["systemctl", "--user"] if scope == "user" else ["systemctl"]
+    _, enabled, e1 = _systemctl([*prefix, "is-enabled", unit], runner)
+    _, active, e2 = _systemctl([*prefix, "is-active", unit], runner)
+    return {
+        "scope": scope,
+        "enabled_word": (enabled or "").strip(),
+        "active_word": (active or "").strip(),
+        "error": ((e1 or "") + (e2 or "")).strip()[:300] or None,
+    }
+
+
+def supervisor_status(unit: str = CONSOLE_UNIT, *, runner=None) -> dict[str, Any]:
+    """Is anything going to restart the console when it dies?
+
+    Both scopes are probed, user first, because the console is the human's own process: it
+    reads ``.env`` directly and binds loopback, so it needs no root and a **user** unit
+    installs with no ``sudo`` at all. That matters more than it sounds — the system unit in
+    ``ops/systemd/`` has existed all along and was never installed on this host precisely
+    because installing it needed a password nobody had at the time, which is why a killed
+    console stayed dead.
+
+    ``verdict`` is one of ``supervised`` (enabled and running), ``failing`` (enabled and
+    not running), ``unsupervised`` (definitively not installed) or ``unknown`` (the probe
+    could not answer, which is never an alarm).
+    """
+    # User scope first, and the system scope only if it did not answer: this runs on every
+    # `/api/control` poll, and four subprocess spawns every thirty seconds per open tab to
+    # re-learn something the first call already established is a waste.
+    probes = [_probe_scope("user", unit, runner)]
+    if probes[0]["enabled_word"] not in _ENABLED_WORDS:
+        probes.append(_probe_scope("system", unit, runner))
+    chosen: dict[str, Any] | None = None
+    for probe in probes:
+        if probe["enabled_word"] in _ENABLED_WORDS:
+            chosen = probe
+            break
+    answered = all(p["enabled_word"] in _ENABLED_WORDS + _ABSENT_WORDS for p in probes)
+    if chosen is not None:
+        active = chosen["active_word"]
+        verdict = "supervised" if active == "active" else "failing"
+        note = (f"{unit} is {chosen['enabled_word']} in the {chosen['scope']} manager and "
+                f"{active or 'in an unknown state'}."
+                if verdict == "supervised" else
+                f"{unit} is {chosen['enabled_word']} in the {chosen['scope']} manager but "
+                f"{active or 'not running'} — it is not coming back on its own.")
+    elif answered:
+        verdict, chosen = "unsupervised", {"scope": None, "enabled_word": "", "active_word": "",
+                                           "error": None}
+        note = (f"Nothing supervises the console: {unit} is installed in neither the user "
+                f"nor the system manager. If it dies, it stays dead and this console — the "
+                f"only surface that says trading is blocked — goes silent.")
+    else:
+        verdict, chosen = "unknown", {"scope": None, "enabled_word": "", "active_word": "",
+                                      "error": probes[0]["error"] or probes[1]["error"]}
+        note = (f"Cannot tell whether {unit} is supervised: systemctl did not answer. "
+                f"That is not evidence either way.")
+    return {
+        "unit": unit, "verdict": verdict, "note": note,
+        "scope": chosen.get("scope"), "enabled": chosen.get("enabled_word") or None,
+        "active": chosen.get("active_word") or None,
+        "error": chosen.get("error"),
+        "probes": probes,
+        "install_hint": "python -m ops.gen_ops_files --install-user-units",
+    }
+
+
+def enable_user_units(cfg: EarnConfig | None = None, root: Path | None = None,
+                      runner=None, *, home: Path | None = None) -> list[dict[str, Any]]:
+    """Install, enable and **verify** the user-scope units. No root, so no excuse."""
+    from ops import gen_ops_files
+
+    return gen_ops_files.install_user_units(cfg or load_config(), root, runner=runner,
+                                            home=home)
+
+
+def liveness(
+    cfg: EarnConfig | None = None,
+    *,
+    root: Path | None = None,
+    checkout: Path | None = None,
+    now: datetime | None = None,
     state: astate.AutonomyState | None = None,
     runner=None,
     bots: Sequence[str] = paths.SLEEVES,
+    jdb: Any = None,
+    kdb: Any = None,
+    flags_path: Path | None = None,
+    freshness_path: Path | None = None,
 ) -> dict[str, Any]:
-    """The whole honest picture: per job, and one overall verdict.
+    """The whole honest picture: per job, per outcome, and one overall verdict.
 
     The verdict an operator needs first is ``not_scheduled`` — bots are switched on, and
     nothing is installed to run them. That was this host's real state, and no page said so.
+
+    ``blocked`` is the verdict this function learned the hard way. It used to answer only
+    "did the jobs run", and on 2026-09-24 the jobs ran perfectly for fourteen hours while
+    the risk gate refused 655 consecutive entries behind a flag that could never expire.
+    ``alive`` was, strictly, true. It was also the most misleading word available. So
+    :func:`acting` now runs inside this function and ``blocked`` outranks ``late`` and
+    ``failing``: a loop that runs on time and cannot act is not a healthy loop.
+
+    ``root`` is the **state** root (heartbeats, locks, the signed level, the kill file);
+    ``checkout`` is the tree the crontab is rendered against and defaults to this one. They
+    are different roots and feeding one to the other renders a schedule pointing at a data
+    directory with no code in it.
     """
     conf = cfg or load_config()
     state_root = root or paths.state_root()
@@ -917,10 +1660,10 @@ def liveness(
     grace = int(getattr(run, "late_grace_min", 15) or 15)
     stale_hours = int(getattr(run, "stale_heartbeat_hours", 26) or 26)
 
-    st = state if state is not None else astate.load()
+    st = state if state is not None else load_state(state_root)
     vw = views(conf, state=st, root=state_root, bots=bots)
     sp = spend_for(conf, root=state_root, now=when, bots=bots)
-    sched = schedule_status(conf, state_root, runner=runner)
+    sched = schedule_status(conf, checkout, runner=runner)
 
     jobs: list[JobLiveness] = []
     for job in sorted(set(conf.ops.schedules) & set(JOB_MIN_LEVEL)):
@@ -933,6 +1676,19 @@ def liveness(
     any_on = any(vw[b].level != OFF for b in bots)
     beats = [_parse_iso(j.last_ok) for j in jobs]
     newest = max([b for b in beats if b is not None], default=None)
+
+    # The outcome half. Wrapped because a measurement failure must never take the whole
+    # picture down with it — but its absence is reported, not hidden behind a green tick.
+    try:
+        act = acting(conf, root=state_root, now=when, jdb=jdb, kdb=kdb,
+                     flags_path=flags_path, freshness_path=freshness_path, tz=tz,
+                     bots=bots, state=st)
+    except Exception as e:  # noqa: BLE001
+        act = None
+        act_error: str | None = f"{type(e).__name__}: {e}"
+    else:
+        act_error = None
+    supervisor = supervisor_status(runner=runner)
 
     if not any_on:
         verdict, headline = "off", (
@@ -952,6 +1708,11 @@ def liveness(
     elif (when - newest) > timedelta(hours=stale_hours):
         verdict, headline = "never_ran", (
             f"No job has completed in {stale_hours}h. The loop is not running.")
+    elif act is not None and act.blocked:
+        # Ahead of `late` and `failing` deliberately. A job an hour behind is a nuisance; a
+        # system that has not been allowed to act since 06:00 is switched off, and the word
+        # on the screen has to be the second one.
+        verdict, headline = "blocked", "TRADING IS BLOCKED. " + act.headline
     elif any(j.verdict == "late" for j in gated):
         late = ", ".join(j.job for j in gated if j.verdict == "late")
         verdict, headline = "late", f"The loop is late: {late}."
@@ -979,6 +1740,14 @@ def liveness(
         },
         "kill_engaged": killlib.is_engaged(conf, state_root),
         "jobs": [j.to_json() for j in jobs],
+        #: The outcome half: entries allowed vs refused, time since the last allowed entry,
+        #: every blocking flag with its age and its exit, and per-source/per-phase ingest
+        #: freshness. ``null`` only when the measurement itself failed — see ``acting_error``.
+        "acting": act.to_json() if act is not None else None,
+        "acting_error": act_error,
+        #: Whether anything will restart the console when it dies. It died on the night this
+        #: was written, and nothing did.
+        "supervisor": supervisor,
     }
 
 
@@ -1034,11 +1803,11 @@ def set_level(
         raise AutonomyError(
             f"autonomy.run.max_level is {ceiling!r}; raise it deliberately before "
             f"setting {bot} to {level!r}")
-    current = astate.load()
+    current = load_state(root)
     before = current.bot(bot).level
     nxt = astate.set_level(current, bot, level, set_by=set_by, reason=reason,
                            resume_level=resume_level, now=now)
-    astate.write(nxt)
+    astate.write(nxt, env=_env(root))
     return Transition(bot=bot, action="level", before=before, after=level)
 
 
@@ -1050,6 +1819,7 @@ def start(
     reason: str | None = None,
     cfg: EarnConfig | None = None,
     root: Path | None = None,
+    checkout: Path | None = None,
     runner=None,
     enable_systemd: bool = True,
 ) -> Transition:
@@ -1057,21 +1827,39 @@ def start(
 
     The schedule comes first on purpose. Raising a level while nothing is installed is how
     a system ends up believing it is autonomous when it is inert.
+
+    ``root`` is the state root, ``checkout`` the tree the crontab runs from (this one by
+    default) — see :func:`liveness` for why they are never the same argument.
     """
     _require_human("starting the loop")
     conf = cfg or load_config()
-    current = astate.load()
+    current = load_state(root)
     entry = current.bot(bot)
     target = level or entry.resume_level or WATCHING
 
-    sched = install_schedule(conf, root, runner=runner)
-    units = enable_units(conf, root, runner=runner) if enable_systemd else []
+    sched = install_schedule(conf, checkout, runner=runner)
+    units: list[dict[str, Any]] = []
+    if enable_systemd:
+        # User scope first, and it is the one that has to work: it needs no root, so there
+        # is no host on which "we could not install the console's supervisor" is acceptable.
+        # The system-scope attempt follows and is allowed to fail loudly into its own row.
+        try:
+            units += enable_user_units(conf, checkout, runner=runner)
+        except Exception as e:  # noqa: BLE001 - reported, never fatal to a start
+            units.append({"unit": CONSOLE_UNIT, "scope": "user", "installed": False,
+                          "enabled": False, "active": "unknown", "verified": False,
+                          "error": f"{type(e).__name__}: {e}"})
+        units += enable_units(conf, checkout, runner=runner)
     move = set_level(bot, target, set_by=set_by,
                      reason=reason or "start", cfg=conf, root=root)
     note = None
     if not sched.get("verified"):
         note = ("the crontab was installed but did not read back identical — the loop is "
                 "NOT proven to be scheduled")
+    if enable_systemd and not any(u.get("verified") for u in units):
+        supervised = ("; nothing is verified to restart the console if it dies — run "
+                      "`python -m ops.gen_ops_files --install-user-units`")
+        note = (note + supervised) if note else supervised.lstrip("; ").capitalize()
     return Transition(bot=bot, action="start", before=move.before, after=move.after,
                       schedule=sched, units=units, note=note)
 
@@ -1096,7 +1884,7 @@ def pause(
     """
     _require_human("pausing the loop")
     conf = cfg or load_config()
-    current = astate.load()
+    current = load_state(root)
     before = current.bot(bot).level
     resume = before if before != OFF else None
     move = set_level(bot, WATCHING, set_by=set_by, reason=reason or "pause", cfg=conf,
@@ -1233,7 +2021,8 @@ def main(argv: list[str] | None = None) -> int:
     root = paths.state_root()
 
     if args.command == "schedule":
-        st = schedule_status(cfg, root)
+        # No root: a crontab is rendered against the checkout, never the state root.
+        st = schedule_status(cfg)
         print(json.dumps(st.to_json(), indent=2))
         return 0 if (st.installed and st.matches) else 1
 

@@ -1,0 +1,204 @@
+{
+  "schema": "earn.hypothesis.seed.v1",
+  "written_utc": "2026-09-24T00:00:00Z",
+  "author": "build-time seed (a human-reviewed starting queue, not a set of answers)",
+  "note": [
+    "This is the discovery loop's STARTING QUEUE, not its conclusions. Every entry is a",
+    "prediction with a falsifier attached and no measurement behind it yet. The loop",
+    "records each one into knowledge/research/hypotheses/ before it measures anything, and",
+    "evals/hypothesis.py then refuses to let the prediction be edited once evidence exists.",
+    "",
+    "Each seed is drawn from something already measured in docs/design/crypto-research.md",
+    "or docs/design/wide-universe.md, and each one names what it would give up as well as",
+    "what it hopes to buy. A prediction that only names the upside cannot be wrong in the",
+    "direction that matters.",
+    "",
+    "Seeds whose patch touches `params.*` inside config/earn.yaml bounds: can become a",
+    "changes/*.json. Seeds whose patch touches `trading.*` land in the GENERATED",
+    "config/riskgate.json, which is rendered from config/earn.yaml (tier 2): the loop may",
+    "measure them and must report them for a human. Both kinds are here on purpose — the",
+    "ones the loop cannot propose are the ones the shipped strategy is weakest on."
+  ],
+
+  "open_questions": [
+    "The chasing filter: are forward returns worse after a coin has already run +200% in 30 days? If they are, that is an entry ban and a faster profit-booking rule for parabolic moves. NOT YET EXPRESSIBLE AS A PATCH — it needs an entry-side feature rule in strategies/, which is tier 2. Report the measurement; a human writes the rule.",
+    "The bleeder cut: does selling anything that loses to BTC by more than X% over N weeks improve the book, and by how much does it hurt in the weeks it is wrong? Same constraint: an exit rule keyed on relative strength is not one of the three patch namespaces.",
+    "Core versus rotation: how much of the measured result comes from BTC and ETH alone, and how much from the satellites? Measurable today by NARROWING discovery.pairs to the core and comparing — but universe membership and risk.max_satellite_positions are tier 2, so the finding is an input, never a new position.",
+    "Funding-conditioned sizing: funding predicts DRAWDOWN, not direction (P(7d dd < -8%) rises 17% to 41% across funding buckets while the median return stays positive). Conditioning size on funding needs a feature in the strategy; 2026-09-24-vol-target-25 below is the unconditional cousin, and it is worth knowing whether even that buys anything before the conditional version is built.",
+    "Coin life cycles and survivorship: the tradeable universe is today's listed set. A study that includes delisted pairs is the only one that can say whether alt momentum survives the coins that went to zero, and this repo's candle store does not yet hold them."
+  ],
+
+  "hypotheses": [
+    {
+      "id": "2026-09-24-profit-booking-roi-35",
+      "statement": "Booking profit at +35% per position cuts the shipped strategy's maximum drawdown without costing more than 15 percentage points of total return over the full window.",
+      "variable": "trading.take_profit.roi_table — the ROI exit table, today effectively off at 10.0 (a 1000% target)",
+      "patch": { "trading.take_profit.roi_table": { "0": 0.35 } },
+      "predictions": [
+        { "metric": "max_drawdown_pct", "direction": "decrease", "min_effect": 2.0,
+          "unit": "pp",
+          "note": "the whole case for profit taking: giving back less of a move" },
+        { "metric": "net_return_pct", "direction": "unchanged", "min_effect": 15.0,
+          "unit": "pp",
+          "note": "the cost, stated up front — exiting a runner at +35% in a year BTC did +300% is exactly how this loses" }
+      ],
+      "measurement": {
+        "method": "walk_forward", "timerange": "20210101-20260901", "folds": 4,
+        "pairs": [],
+        "baseline": "shipped configuration (no profit taking at all), same window, same measured costs",
+        "costs_applied": true,
+        "note": "the shipped strategy returned +75.4% over this window against buy-and-hold BTC +194%, so both baselines must be reported"
+      },
+      "falsifier": "Maximum drawdown improves by less than 2 percentage points, or total return falls by more than 15 percentage points. Either way the rule is paying for something it does not buy.",
+      "seed": "docs/design/crypto-research.md — the shipped strategy has NO profit taking at all",
+      "author": "build-time seed"
+    },
+
+    {
+      "id": "2026-09-24-profit-booking-ladder-staged",
+      "statement": "Selling a quarter of a position at +10% and another quarter at +25% keeps more upside than a single hard ROI exit while still cutting drawdown, and it pays for that in turnover.",
+      "variable": "trading.take_profit.ladder — staged partial exits, today an empty list",
+      "patch": {
+        "trading.take_profit.ladder": [
+          { "at_profit_pct": 0.10, "sell_fraction": 0.25 },
+          { "at_profit_pct": 0.25, "sell_fraction": 0.25 }
+        ]
+      },
+      "predictions": [
+        { "metric": "max_drawdown_pct", "direction": "decrease", "min_effect": 1.5,
+          "unit": "pp" },
+        { "metric": "turnover_annual", "direction": "increase", "min_effect": 0.10,
+          "unit": "x",
+          "note": "predicting the cost as well as the benefit: if turnover does not rise the ladder never fired" }
+      ],
+      "measurement": {
+        "method": "walk_forward", "timerange": "20210101-20260901", "folds": 4,
+        "pairs": [],
+        "baseline": "shipped configuration, same window, same measured costs",
+        "costs_applied": true
+      },
+      "falsifier": "Drawdown improves by less than 1.5 percentage points, or turnover rises while drawdown does not fall at all — a ladder that trades more and protects nothing is a fee schedule with extra steps.",
+      "seed": "docs/design/crypto-research.md — profit booking, staged variant",
+      "author": "build-time seed"
+    },
+
+    {
+      "id": "2026-09-24-vol-scaled-atr-stop",
+      "statement": "A volatility-scaled ATR stop at three times the 14-period ATR exits losers earlier in high-volatility regimes than the fixed 10% stop does, reducing maximum drawdown.",
+      "variable": "trading.stoploss.atr — the volatility-scaled stop, today disabled in favour of a flat 10%",
+      "patch": {
+        "trading.stoploss.atr": { "enabled": true, "period": 14, "mult": 3.0,
+                                   "timeframe": "4h" }
+      },
+      "predictions": [
+        { "metric": "max_drawdown_pct", "direction": "decrease", "min_effect": 1.5,
+          "unit": "pp" },
+        { "metric": "trades", "direction": "increase", "min_effect": 5.0, "unit": "trades",
+          "note": "a tighter stop in calm regimes means more stop-outs; if it does not, the stop never bound" }
+      ],
+      "measurement": {
+        "method": "walk_forward", "timerange": "20210101-20260901", "folds": 4,
+        "pairs": [],
+        "baseline": "shipped configuration (fixed 10% stop), same window, same measured costs",
+        "costs_applied": true,
+        "note": "implied vol forecasts forward realised vol far better than trailing realised does, so a stop scaled to TRAILING ATR is the weaker of the two available forms — which is what makes this worth measuring before anything is built on it"
+      },
+      "falsifier": "Drawdown improves by less than 1.5 percentage points, or the extra stop-outs cost more than 10 percentage points of total return. A stop that only whipsaws is a fee schedule.",
+      "seed": "docs/design/crypto-research.md — implied vol (DVOL) beats trailing realised vol as a forecast; raw DVOL overstates by 13-29%",
+      "author": "build-time seed"
+    },
+
+    {
+      "id": "2026-09-24-vol-target-25",
+      "statement": "Sizing to a 25% annual volatility target instead of 30% buys measurably less drawdown, and the return it costs is worth knowing before any funding-conditioned version of the same idea is built.",
+      "variable": "params.vol.target_annual — the sleeve's annual volatility target",
+      "patch": { "params.vol.target_annual": 0.25 },
+      "predictions": [
+        { "metric": "max_drawdown_pct", "direction": "decrease", "min_effect": 1.0,
+          "unit": "pp" },
+        { "metric": "net_return_pct", "direction": "decrease", "min_effect": 1.0,
+          "unit": "pp",
+          "note": "smaller size should cost return; a version of this that costs nothing has not actually reduced exposure" }
+      ],
+      "measurement": {
+        "method": "walk_forward", "timerange": "20230101-20260901", "folds": 2,
+        "pairs": [],
+        "baseline": "shipped configuration (30% target), same window, same measured costs",
+        "costs_applied": true,
+        "note": "short window and two folds on purpose — this is the nightly pass's size of study"
+      },
+      "falsifier": "Drawdown does not improve by at least 1 percentage point. If permanently smaller size does not buy less drawdown here, the conditional funding version has nothing to condition.",
+      "seed": "docs/design/crypto-research.md — funding predicts drawdown, not direction: P(7d dd < -8%) rises 17% -> 41% across funding buckets",
+      "author": "build-time seed"
+    },
+
+    {
+      "id": "2026-09-24-trend-ma-175",
+      "statement": "Moving the trend filter one legal step from 200 to 175 days changes neither risk-adjusted return nor drawdown materially, which is the test of whether 200 was chosen or merely inherited.",
+      "variable": "params.trend.ma_days — the moving-average length BTC's regime is read from",
+      "patch": { "params.trend.ma_days": 175 },
+      "predictions": [
+        { "metric": "sharpe_daily", "direction": "unchanged", "min_effect": 0.15,
+          "unit": "sharpe",
+          "note": "the plateau claim: MA50-250 all score 0.82-1.38, so one 25-day step should be inside the noise" },
+        { "metric": "max_drawdown_pct", "direction": "unchanged", "min_effect": 3.0,
+          "unit": "pp" }
+      ],
+      "measurement": {
+        "method": "walk_forward", "timerange": "20210101-20260901", "folds": 4,
+        "pairs": [],
+        "baseline": "shipped configuration (200d), same window, same measured costs",
+        "costs_applied": true
+      },
+      "falsifier": "Either metric moves by more than its stated band. That would mean 200 is a point on a slope rather than the middle of a plateau, and the exact number matters far more than the documentation claims — which is a finding about the documentation as much as about the parameter.",
+      "seed": "the measured MA sweep: MA200 alone Sharpe 0.76, the trend x vol product 0.82-1.38 across every MA from 50 to 250; the defensible choice is the middle of the plateau, not the MA50 peak",
+      "author": "build-time seed"
+    },
+
+    {
+      "id": "2026-09-24-rebalance-band-7pct",
+      "statement": "Widening the rebalance dead-band from 5% to 7% of NAV cuts annual turnover without materially changing total return.",
+      "variable": "execution.rebalance_band — the dead-band before a drifted weight is corrected",
+      "patch": { "execution.rebalance_band": 0.07 },
+      "predictions": [
+        { "metric": "turnover_annual", "direction": "decrease", "min_effect": 0.10,
+          "unit": "x" },
+        { "metric": "net_return_pct", "direction": "unchanged", "min_effect": 5.0,
+          "unit": "pp" }
+      ],
+      "measurement": {
+        "method": "walk_forward", "timerange": "20230101-20260901", "folds": 2,
+        "pairs": [],
+        "baseline": "shipped configuration (5% band), same window, same measured costs",
+        "costs_applied": true,
+        "note": "MEASURABLE, NOT PROPOSABLE. The band is read from the GATE config (strategies/SleeveA.py reads gate_cfg.rebalance_band, rendered into config/riskgate.json from config/earn.yaml execution.rebalance_band) and NOT from params-sleeve-a.json. The first real run of this loop measured `params.rebalance_band: 0.07` and every single metric came back bit-identical: that params leaf has a bounds entry and is wired to nothing. A finding here is for a human to act on."
+      },
+      "falsifier": "Turnover does not fall by at least 0.10 times a year, or return falls by more than 5 percentage points. A wider band that neither saves cost nor holds return is just a slower strategy.",
+      "seed": "the 1% NAV/month fee budget in risk.max_fee_pct_per_month — turnover is a cost this system already caps and has never tuned",
+      "author": "build-time seed"
+    },
+
+    {
+      "id": "2026-09-24-dca-chunk-7pct",
+      "statement": "Larger scheduled DCA chunks (7% of NAV instead of 5%) get exposure on faster in a rising market and raise total return, at the cost of a worse drawdown.",
+      "variable": "params.dca.chunk_pct_nav — the size of each scheduled accumulation chunk",
+      "patch": { "params.dca.chunk_pct_nav": 0.07 },
+      "predictions": [
+        { "metric": "net_return_pct", "direction": "increase", "min_effect": 2.0,
+          "unit": "pp" },
+        { "metric": "max_drawdown_pct", "direction": "increase", "min_effect": 0.5,
+          "unit": "pp",
+          "note": "getting in faster means being in more when it falls; predicting only the upside would make this unfalsifiable in the direction that matters" }
+      ],
+      "measurement": {
+        "method": "walk_forward", "timerange": "20230101-20260901", "folds": 2,
+        "pairs": [],
+        "baseline": "shipped configuration (5% chunks, 7-day interval), same window, same measured costs",
+        "costs_applied": true
+      },
+      "falsifier": "Return does not rise by at least 2 percentage points. Faster accumulation that does not accumulate faster is only a bigger position at a worse average price.",
+      "seed": "docs/design/crypto-research.md — entries and cadence; the shipped cadence was chosen, never measured",
+      "author": "build-time seed"
+    }
+  ]
+}

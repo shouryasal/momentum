@@ -82,8 +82,22 @@ def _render_runtime(root, sleeve, state, *, run_id=None):
     (d / f"freqtrade-{sleeve}.mode.json").write_text(json.dumps({"dry_run": not live}))
 
 
+def arm_autonomy(monkeypatch, root, level="proposing"):
+    """Answer the ONE autonomy gate, rather than restating its policy here."""
+    from ops import autonomy
+
+    def permit(job, **kw):
+        need = autonomy.required_level(job)
+        allowed = autonomy.astate.at_least(level, need)
+        return autonomy.Permit(job, allowed,
+                               "permitted" if allowed else "level_below_required",
+                               need, level, ("a", "b") if allowed else ())
+
+    monkeypatch.setattr(autonomy, "check", permit)
+
+
 @pytest.fixture
-def rr(tmp_path):
+def rr(tmp_path, monkeypatch):
     cfg = load_config()
     journal, knowledge = db.init_all(cfg, root=tmp_path)
     jdb, kdb = db.connect(journal), db.connect(knowledge)
@@ -112,6 +126,14 @@ def rr(tmp_path):
     from ops.lib import flags as flagslib
 
     flagslib.touch(ff, now=NOW)
+    # The autonomy gate answers NO by default (a missing state file is `off`), and that is
+    # correct — so every test below that expects the run to DECIDE has to arm it first, the
+    # way `tests/test_research/test_discovery.py::TestMainFlow._arm` does. These tests used
+    # to pass without it only because the in-process check had been deleted from
+    # `runs/research_run.py` during the autopilot -> autonomy_state refactor, which left the
+    # console's "Run research now" able to decide at any level. See
+    # `test_the_console_path_cannot_decide_below_the_required_level`.
+    arm_autonomy(monkeypatch, tmp_path)
     alerts = []
     runner = FakeRunner()
     r = ResearchRun(cfg, jdb, kdb, root=tmp_path, state_root=tmp_path, now=NOW,
@@ -167,6 +189,45 @@ def test_kill_switch_short_circuits(rr):
     assert r.main_flow("0830") == 0
     assert runner.calls == []
     assert jdb.execute("SELECT status FROM runs").fetchone()["status"] == "killed"
+
+
+def test_the_console_path_cannot_decide_below_the_required_level(rr, monkeypatch):
+    """Autonomy is enforced IN this run, not only by the cron line that wraps it.
+
+    The regression this pins: the `autopilot` -> `autonomy_state` refactor deleted the
+    in-process check and did not replace it. The cron line still asked the gate
+    (``ops.autonomy run research_run -- …``), but
+    ``console.services.decisions_service.run_research_now`` — the console's "Run research
+    now" button and every signal-triggered spawn — builds its command WITHOUT that wrapper
+    while its docstring claims to use "the same command cron and the planner use". So at
+    autonomy `observing` the button produced a real proposal and a real model bill.
+    """
+    r, runner, _, jdb, root, cfg = rr
+    arm_autonomy(monkeypatch, root, level="observing")   # may watch, may not decide
+    runner.script["decide:claude-opus-5"] = [ok(GOOD)]
+
+    assert r.main_flow("0830") == 0
+    assert runner.calls == [], "a paused run spent a model call"
+    assert not (root / cfg.paths.proposals_dir / "2026-09-22-0830.json").exists()
+    row = jdb.execute("SELECT status, error FROM runs WHERE stage='decide'").fetchone()
+    assert row["status"] == "skipped"
+    assert "needs proposing" in row["error"] and "observing" in row["error"]
+
+
+def test_an_unreadable_autonomy_gate_means_no(rr, monkeypatch):
+    """Fail closed: if the level cannot be read, the run does not get to assume yes."""
+    r, runner, _, jdb, root, cfg = rr
+    from ops import autonomy
+
+    def boom(job, **kw):
+        raise RuntimeError("the autonomy file is corrupt")
+
+    monkeypatch.setattr(autonomy, "check", boom)
+    runner.script["decide:claude-opus-5"] = [ok(GOOD)]
+    assert r.main_flow("0830") == 0
+    assert runner.calls == []
+    row = jdb.execute("SELECT status, error FROM runs WHERE stage='decide'").fetchone()
+    assert row["status"] == "skipped" and "corrupt" in row["error"]
 
 
 def test_idempotent_when_file_exists(rr):

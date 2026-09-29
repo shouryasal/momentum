@@ -69,9 +69,11 @@ import json
 import math
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -99,9 +101,16 @@ __all__ = [
     "load_perp_klines",
     "load_spot_candles",
     "oi_features",
+    "parse_perp_symbols",
+    "perp_coverage",
+    "perp_map_age_hours",
+    "perp_map_path",
+    "perp_symbols",
     "positioning_features",
     "quadrant_drawdown_ratio",
+    "read_perp_map",
     "symbol_for",
+    "write_perp_map",
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -188,6 +197,151 @@ _PAIR_TO_SYMBOL = {"BTC/USDT": "BTCUSDT", "ETH/USDT": "ETHUSDT"}
 def symbol_for(pair: str) -> str:
     """``"BTC/USDT"`` → ``"BTCUSDT"``. Accepts a symbol unchanged."""
     return _PAIR_TO_SYMBOL.get(pair, pair.replace("/", "").upper())
+
+
+# ------------------------------------------------------------------- perpetual coverage
+
+#: ``contractType`` of the contracts every funding/OI endpoint in this module assumes.
+PERPETUAL = "PERPETUAL"
+
+#: Filename of the discovery cache inside :func:`cache_dir`.
+PERP_MAP_NAME = "perp-map.json"
+
+#: How long a discovered map is trusted. Binance lists and delists perps on the order of
+#: days, so a daily refresh is ample and a whole day of 400s is not.
+PERP_MAP_TTL_H = 24.0
+
+
+def parse_perp_symbols(payload: Any) -> set[str]:
+    """Tradeable perpetual symbols out of an ``fapi/v1/exchangeInfo`` body.
+
+    Pure, so the whitelist-coverage test needs no network. Only ``status == "TRADING"``
+    counts: a ``SETTLING`` or ``PENDING_TRADING`` contract answers ``premiumIndex`` in ways
+    no caller here is prepared for, and a contract we cannot trade is not coverage.
+    """
+    if not isinstance(payload, dict):
+        return set()
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, list):
+        return set()
+    out: set[str] = set()
+    for row in symbols:
+        if not isinstance(row, dict):
+            continue
+        if row.get("contractType") != PERPETUAL or row.get("status") != "TRADING":
+            continue
+        name = row.get("symbol")
+        if isinstance(name, str) and name:
+            out.add(name.upper())
+    return out
+
+
+def perp_map_path(root: Path | str | None = None) -> Path:
+    return cache_dir(root) / PERP_MAP_NAME
+
+
+def read_perp_map(root: Path | str | None = None) -> dict:
+    """The cached map, or ``{}``. Never raises — a corrupt cache is a cache miss."""
+    try:
+        data = json.loads(perp_map_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or not isinstance(data.get("symbols"), list):
+        return {}
+    return data
+
+
+def write_perp_map(symbols: set[str] | list[str], *, now: datetime | None = None,
+                   root: Path | str | None = None) -> dict:
+    """Persist the map atomically. Returns what was written."""
+    ts = now or datetime.now(UTC)
+    data = {"fetched_at": _iso(ts), "symbols": sorted(str(s).upper() for s in symbols)}
+    path = perp_map_path(root)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return data
+
+
+def perp_map_age_hours(data: dict, now: datetime | None = None) -> float:
+    """Age of a cached map in hours; ``inf`` when it carries no usable stamp."""
+    stamp = data.get("fetched_at") if isinstance(data, dict) else None
+    if not isinstance(stamp, str):
+        return math.inf
+    try:
+        at = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return math.inf
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    return ((now or datetime.now(UTC)) - at).total_seconds() / 3600.0
+
+
+def perp_symbols(*, fetch=None, now: datetime | None = None,
+                 root: Path | str | None = None,
+                 ttl_hours: float = PERP_MAP_TTL_H,
+                 reraise: tuple[type[BaseException], ...] = ()) -> tuple[set[str], str]:
+    """``(tradeable perpetual symbols, source)`` — cached discovery, never an exception.
+
+    ``source`` is ``"cache"``, ``"live"``, ``"stale-cache"`` or ``"unavailable"``, so a
+    caller can tell "PEPE has no perp" (a fact) from "we could not find out" (an outage)
+    and degrade differently. An empty set with ``"unavailable"`` is the only case where a
+    caller has no map at all; it must not be read as "nothing has a perp".
+
+    ``fetch`` (a ``url -> payload`` callable) exists so ingest can pass its injectable
+    httpx client and tests can drive this with ``MockTransport`` instead of the network.
+
+    ``reraise`` names exceptions that must NOT be degraded into "discovery unavailable" —
+    ingest passes its rate-budget guard, because answering an IP-weight breach by reporting
+    "we could not find out" makes the caller query every symbol instead of stopping.
+    """
+    ts = now or datetime.now(UTC)
+    cached = read_perp_map(root)
+    if cached and perp_map_age_hours(cached, ts) < ttl_hours:
+        return {str(s).upper() for s in cached["symbols"]}, "cache"
+    getter = fetch or (lambda url: _get_json(url))
+    try:
+        payload = getter(f"{FUT}/fapi/v1/exchangeInfo")
+    except reraise:
+        raise
+    except Exception:  # noqa: BLE001 — discovery failing must degrade, never raise
+        payload = None
+    live = parse_perp_symbols(payload)
+    if live:
+        try:
+            write_perp_map(live, now=ts, root=root)
+        except OSError:
+            pass  # an unwritable cache costs a request next cycle, nothing more
+        return live, "live"
+    if cached:
+        return {str(s).upper() for s in cached["symbols"]}, "stale-cache"
+    return set(), "unavailable"
+
+
+def perp_coverage(pairs: Sequence[str], *, fetch=None, now: datetime | None = None,
+                  root: Path | str | None = None,
+                  ttl_hours: float = PERP_MAP_TTL_H,
+                  reraise: tuple[type[BaseException], ...] = (),
+                  ) -> tuple[list[str], list[str], str]:
+    """Split ``pairs`` into ``(with a perp, without one, source)`` by traded symbol.
+
+    Verified against the live endpoint on 2026-09-25: of Earn's 31 whitelisted pairs, 30
+    have a ``PERPETUAL`` contract and exactly one — ``PEPEUSDT`` — does not. Binance lists
+    PEPE's perp as ``1000PEPEUSDT``, a 1000-token-denominated contract whose ``markPrice``
+    is 1000x spot, so it is deliberately NOT aliased here: the funding *rate* would be
+    right and the mark price silently 1000x wrong, which is worse than a known gap.
+
+    When discovery is ``"unavailable"`` every pair is reported as covered, so the caller
+    tries them all and falls back on its own per-symbol tolerance rather than mistaking an
+    outage for a universe with no perps at all.
+    """
+    known, source = perp_symbols(fetch=fetch, now=now, root=root, ttl_hours=ttl_hours,
+                                 reraise=reraise)
+    if source == "unavailable":
+        return list(pairs), [], source
+    have = [p for p in pairs if symbol_for(p) in known]
+    missing = [p for p in pairs if symbol_for(p) not in known]
+    return have, missing, source
 
 
 def _iso(dt: datetime | pd.Timestamp | None) -> str | None:

@@ -17,14 +17,15 @@ Two things are deliberate:
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+import os
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from console.services import queries
-from ops.lib import claude_auth
+from ops.lib import claude_auth, envfile
 from runs.llm import health as health_mod
 from runs.llm.types import ALWAYS_LOCAL_FORBIDDEN, MIN_TIER_FLOOR
 
@@ -53,6 +54,42 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+#: Names this page needs to answer "is it configured". The two credentials are read only
+#: to test PRESENCE — nothing here returns, logs or stores a value. ``EARN_CLAUDE_AUTH_MODE``
+#: is not a secret; it is here because ``claude_auth.auth_mode`` reads it from the same
+#: ``.env`` that ``ops/envwrap.sh`` acted on, so the page reports the mode jobs really used.
+_PRESENCE_NAMES = (
+    claude_auth.OAUTH_VAR,
+    claude_auth.API_KEY_VAR,
+    claude_auth.AUTH_MODE_VAR,
+)
+
+
+def presence_environ(environ: Mapping[str, str] | None = None, *,
+                     env_path: Path | str | None = None) -> dict[str, str]:
+    """The environment to answer "is a credential configured" against.
+
+    The console deliberately does NOT carry model credentials: ``ops/envwrap.sh`` hands
+    them to model jobs and the console is in no allowlist. Checking presence against the
+    console's own process environment therefore always answered "no", so a correctly
+    configured system reported "Claude not connected" while every job authenticated fine.
+    Presence comes from ``.env`` — the same file the Secrets page reads, which is why
+    that page said "signed in" while the provider cards said the opposite — with the
+    process environment still winning when it has a value.
+    """
+    env = dict(environ if environ is not None else os.environ)
+    for name in _PRESENCE_NAMES:
+        if env.get(name):
+            continue
+        try:
+            value = envfile.value_of(name, path=env_path)
+        except Exception:  # noqa: BLE001 - presence must never break the page
+            value = None
+        if value:
+            env[name] = value
+    return env
+
+
 # --------------------------------------------------------------------------- providers
 
 
@@ -73,6 +110,7 @@ def provider_cards(
             for row in queries.read_rows(journal, "SELECT * FROM provider_health")
         }
     auth = models_cfg.auth
+    environ = presence_environ(environ)
     mode = claude_auth.auth_mode(environ, configured=auth.claude_mode)
     active = set(claude_auth.provider_order(mode, prefer=auth.prefer))
     session = claude_auth.login_session(home=home)

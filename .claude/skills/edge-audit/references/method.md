@@ -80,8 +80,99 @@ So a candidate must clear `baseline + expected_max_SR(N, T)`, not the baseline.
 a search whose expected best is 1.19 — that is a config finding, not a code one, and it
 belongs in a change proposal.
 
-`n_trials` lives in `knowledge/state/trial_counter.json` and **only grows**. A counter that
-resets when somebody forgets is a hurdle that only ever falls.
+---
+
+## 3a. What counts as a trial — and why it is not "every measurement ever"
+
+`expected_max_SR(N, T)` answers one question: *if I ran N zero-skill trials and reported the
+best, how good would the best look by luck alone?* So `N` has to be the size of the family
+the reported candidate was actually the maximum of. Getting that wrong in either direction
+breaks the gate — too small and noise walks through, too large and the bar leaves the
+reachable range and the loop silently proposes nothing for ever.
+
+It was wrong in the second direction, and the loop's own schedule is what exposed it.
+`config/earn.yaml: discovery.passes` runs `light` nightly with `propose: false` and `deep`
+weekly with `propose: true`. Every measurement incremented one counter and that counter fed
+the hurdle. So **six of every seven measurements were trials no change could ever come out
+of, and each one permanently raised the bar for the seventh.** The loop was paying
+multiple-testing interest on a search it never conducted.
+
+### The accounting
+
+`knowledge/state/trial_counter.json` keeps three numbers. `runs/discovery.py: TrialCounter`
+owns the shape; `audit_stats.py trials` writes the same file.
+
+| field | what it is | used for the hurdle |
+|---|---|---|
+| `n_trials` | every measurement ever made, whatever pass made it | **no** — audit trail only |
+| `n_selection_trials` | all-time trials that *could* have produced a change | no — shown so the gap is visible |
+| `family.n_selection_trials` | selection trials in the **open** family | **yes — this is N** |
+
+A measurement is a **selection trial** iff the pass spending it may propose
+(`passes.<p>.propose: true`). The pass spec is the only input: `--no-propose` and
+`--dry-run` are human overrides and still count, because letting an operator flag reclassify
+a trial as a screen would let somebody run a search without paying for it.
+
+A **screening** trial (a nightly `light` measurement) is recorded for ever in `n_trials` and
+does not raise the hurdle. That is not leniency, it is the definition: the loop never took a
+maximum over those trials, so deflating by them corrects for a selection that did not happen.
+
+### The two things that stop this being a loophole
+
+1. **A screen that gets acted on is charged.** If a proposable hypothesis names a screened
+   hypothesis in its `seed`, `TrialCounter.promote` charges that screened trial to the
+   selection family at the moment the candidate is measured. Screen-then-confirm is a
+   two-stage search and both stages are paid for. Charging on promotion rather than up front
+   is what keeps a screen that nobody acted on free — and a screen nobody acted on informed
+   no selection.
+2. **A family closes only behind a merged change.** `family.n_selection_trials` resets when
+   a change this loop authored reaches `status: "merged"` — meaning it first cleared the
+   current (high) hurdle and every other gate here, then `evals/verify_change.py` re-ran the
+   backtest and the walk-forward from the commit and `runs/apply_changes.py` merged it.
+   Closing a family is gated behind the very bar it lowers, so the loop cannot lower the bar
+   without first clearing it. A **rejected or held** proposal closes nothing: being wrong
+   must not buy a clean slate. A later revert does not reopen a closed family — the selection
+   event happened — and the all-time totals still carry every trial it contained.
+
+Nothing in this scheme ever decreases `n_trials` or `n_selection_trials`, and a file written
+before the split (no `n_selection_trials` key) reads back with the selection count set equal
+to `n_trials`. The migration can raise the hurdle; it cannot lower it.
+
+### What the hurdle will be after a year
+
+At the shipped schedule — 365 nightly `light` measurements plus 52 weekly `deep` passes at
+`hypotheses: 2` — one year adds 469 measurements, of which 104 could have produced a change.
+The deep window (`20210101-`) will be T ≈ 6.7 years by then; the shipped strategy's measured
+`sharpe_daily` baseline is 0.405.
+
+| accounting | N after a year | expected best SR | hurdle |
+|---|---|---|---|
+| old: every measurement | 471 | 1.477 | **1.88** |
+| new: no change merged all year | 106 | 1.316 | **1.72** |
+| new: one change merged mid-year | ~52 | 1.231 | **1.64** |
+| new: a family that closed last week | 1–2 | 0.45–0.71 | **0.85–1.12** |
+
+Say the rest of it out loud, because it is the part a table hides: `expected_max_SR` grows
+with `√(ln N)`, so re-scoping N from 471 to 106 buys **0.16 of Sharpe, not an order of
+magnitude**. Buy-and-hold BTC's own `sharpe_daily` over 2023-2026 was 1.13. A standing
+hurdle of 1.72 is still not a bar this strategy clears, and the fix above is not what makes
+it clearable — a *closed family* is. The scheme's real property is that the bar now moves
+with the search that is actually running and **returns to the reachable range each time the
+loop is right**, instead of ratcheting towards 2.5 on the strength of nightly work that was
+never allowed to propose anything.
+
+Two things this deliberately does **not** do, both named here so nobody mistakes them for
+oversights:
+
+* it does not lower the hurdle for a loop that keeps searching and never finds anything —
+  that loop's bar keeps climbing, which is the protection working;
+* it does not make a Sharpe edge provable on this sample. With ~6 years of daily returns the
+  standard error of an annualised Sharpe is ≈ 0.45, and `years_to_detect` on the one
+  hypothesis this loop has graded came back at **596.8 years**. The remaining finding is
+  separate and belongs to a human: `discovery.gates.require_hurdle` applies a *Sharpe*
+  hurdle to every candidate including ones whose pre-registered claim is a drawdown
+  reduction, which is the wrong instrument for that claim. That is a `config/earn.yaml`
+  decision (tier 2), so this skill reports it and does not move it.
 
 ---
 

@@ -1,0 +1,33 @@
+CPU zoo | threads=3 | cost=15.0 bps/side | seed={'seed': 0, 'random': True, 'numpy': True, 'torch': True, 'cuda': True}
+panel: 206,152 eligible rows, 394 segments, 2018-02-13 -> 2026-09-24 (0.2s)
+
+== xsret_1d (logret_1d, daily, 205,880 rows, 5 folds) ==
+  folds: 2: train 9970 -> test 43708 [2020-10-07..2021-12-16] purged 29 | 3: train 53543 -> test 41809 [2021-12-17..2023-02-24] purged 164 | 4: train 95453 -> test 37326 [2023-02-25..2024-05-05] purged 63 | 5: train 132675 -> test 47969 [2024-05-06..2025-07-15] purged 167 | 6: train 180729 -> test 25069 [2025-07-16..2026-09-23] purged 82
+    extra_trees       71.6s  {'min_samples_leaf': 50}
+  target                                                    model      n  rank_ic  ic_t  ic_periods  ic_hit_periods  dir_acc  dir_ci_lo  dir_ci_hi  beats_coinflip  xs_dir_acc  xs_dir_ci_lo  xs_dir_ci_hi  xs_beats_coinflip  r2_oos_vs_persistence    rmse  rmse_persistence  mape_ret_pct  mape_persistence_pct   family scale  fit_s
+xsret_1d                                              extra_trees 195881  0.08609 17.33        2178           0.666   0.5032     0.5010     0.5054            True      0.5327        0.5305        0.5349               True                    NaN     NaN           0.06422           NaN                 100.0   forest  rank  71.56
+xsret_1d            baseline: -vol_60_xs (project's best feature) 195881  0.07775 14.13        2178           0.630   0.5148     0.5126     0.5170            True      0.5272        0.5250        0.5294               True                    NaN     NaN           0.06422           NaN                 100.0 baseline  rank    NaN
+xsret_1d baseline: -vol_60_xs + age_days (audit's filter, ranked) 195881  0.07643 13.84        2178           0.626   0.5106     0.5083     0.5128            True      0.5277        0.5255        0.5299               True                    NaN     NaN           0.06422           NaN                 100.0 baseline  rank    NaN
+xsret_1d                                       baseline: age_days 195881  0.05094 10.76        2178           0.581   0.4852     0.4830     0.4874           False      0.5178        0.5156        0.5201               True                    NaN     NaN           0.06422           NaN                 100.0 baseline  rank    NaN
+xsret_1d                                         baseline: mom_30 195881 -0.02875 -6.24        2178           0.571   0.4994     0.4972     0.5016           False      0.4878        0.4856        0.4900              False                    NaN     NaN           0.06422           NaN                 100.0 baseline  rank    NaN
+xsret_1d                           baseline: persistence (pred 0) 195881      NaN   NaN           0             NaN      NaN        NaN        NaN           False         NaN           NaN           NaN              False                    0.0 0.06422           0.06422         100.0                 100.0 baseline   NaN    NaN
+
+== costed books (15 bps/side, long-only, rebalance = label horizon) ==
+  target  top_k                         book  CAGR   vol  Sharpe  MaxDD  turn/yr  cost drag %/yr  sharpe_se  years  n_periods  total_return_pct
+xsret_1d    5.0             extra_trees top5  3.53 71.92   0.415 -90.46   171.18           25.68       0.41   5.96       2177              23.0
+xsret_1d   10.0            extra_trees top10  2.60 73.88   0.411 -93.08   148.92           22.34       0.41   5.96       2177              16.6
+xsret_1d   20.0            extra_trees top20  1.53 78.79   0.422 -94.51   122.49           18.37       0.41   5.96       2177               9.5
+xsret_1d    NaN    equal-weight all eligible -4.91 86.07   0.382 -95.65     5.95            0.89       0.41   5.96       2177             -25.9
+xsret_1d    NaN             BTC buy-and-hold 41.42 57.48   0.890 -76.63     0.17            0.03       0.41   5.96       2177             690.1
+xsret_1d   10.0 -vol_60_xs top10 (1 feature) 24.09 66.13   0.663 -79.98    26.62            3.99       0.41   5.96       2177             262.3
+
+== winners: importance, time-proxy, label-shuffle ==
+  xsret_1d / extra_trees: top permutation drops -> above_ma_50 +0.0163, vol_60_xs +0.0153, vol_20_xs +0.0098, vol_60 +0.0088, amihud_30_xs +0.0083, age_days +0.0080
+
+== label-shuffle control (must collapse to the baseline) ==
+  target     scope                            model      n  rank_ic  ic_t  ic_periods  ic_hit_periods  dir_acc  dir_ci_lo  dir_ci_hi  beats_coinflip  xs_dir_acc  xs_dir_ci_lo  xs_dir_ci_hi  xs_beats_coinflip r2_oos_vs_persistence rmse  rmse_persistence mape_ret_pct  mape_persistence_pct scale
+xsret_1d    global    extra_trees [shuffled global] 195881 -0.00161 -0.61        2178           0.506   0.4870     0.4848     0.4892           False      0.4997        0.4975        0.5019              False                  None None           0.06377         None                 100.0  rank
+xsret_1d within_ts extra_trees [shuffled within_ts] 195881  0.00072  0.28        2178           0.503   0.4855     0.4833     0.4877           False      0.4997        0.4975        0.5019              False                  None None           0.06422         None                 100.0  rank
+
+trials this run: 1 selection, 5 screening
+artefacts -> /home/shourya/earn-wk/ml3/runs/ml/daily_checks  (446.0s)

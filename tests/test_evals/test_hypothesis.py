@@ -3,6 +3,12 @@
 Every test here is an attempt to do exactly that — predict after measuring, edit a
 prediction once the numbers are in, drop the inconvenient metric, re-grade until it
 passes — and the assertion is that each attempt raises.
+
+The last block is about a subtler version of the same question. A grade answers two things:
+"did my predictions come true" and "is this real". The first real graded hypothesis in this
+repo answered them in opposite directions and put the flattering one alone at the top of the
+file under the name `verdict`. These tests pin that only ONE field decides whether a result
+may become a change, and that it is false whenever the second question was not answered.
 """
 
 from __future__ import annotations
@@ -18,8 +24,12 @@ from evals.hypothesis import (
     Ledger,
     Measurement,
     Prediction,
-    verdict_for,
+    change_blockers,
+    prediction_verdict_for,
 )
+
+#: A validation that came back clean — the shape `runs.discovery.Validation.as_dict()` has.
+CLEAN = {"ok": True, "problems": []}
 
 
 def make(hid: str = "2026-09-23-profit-booking", **over) -> Hypothesis:
@@ -97,8 +107,9 @@ def test_record_then_grade_is_the_only_allowed_order(tmp_path: Path):
     grade = ledger.grade(
         "2026-09-23-profit-booking",
         {"max_drawdown_pct": 20.0, "calmar": 1.0},
-        {"max_drawdown_pct": 15.0, "calmar": 1.8})
-    assert grade.verdict == "supported"
+        {"max_drawdown_pct": 15.0, "calmar": 1.8}, validation=CLEAN)
+    assert grade.prediction_verdict == "supported"
+    assert grade.may_become_a_change
     assert grade.recorded_utc <= grade.measured_utc
 
 
@@ -148,8 +159,9 @@ def test_a_wrong_sign_falsifies_even_when_another_prediction_was_met(tmp_path: P
     ledger.record(make())
     grade = ledger.grade("2026-09-23-profit-booking",
                          {"max_drawdown_pct": 20.0, "calmar": 1.0},
-                         {"max_drawdown_pct": 26.0, "calmar": 1.9})
-    assert grade.verdict == "falsified"
+                         {"max_drawdown_pct": 26.0, "calmar": 1.9}, validation=CLEAN)
+    assert grade.prediction_verdict == "falsified"
+    assert not grade.may_become_a_change
     assert [o.result for o in grade.outcomes] == ["opposite", "met"]
 
 
@@ -158,8 +170,9 @@ def test_moves_too_small_to_count_are_inconclusive_not_supported(tmp_path: Path)
     ledger.record(make())
     grade = ledger.grade("2026-09-23-profit-booking",
                          {"max_drawdown_pct": 20.0, "calmar": 1.0},
-                         {"max_drawdown_pct": 19.5, "calmar": 1.05})
-    assert grade.verdict == "inconclusive"
+                         {"max_drawdown_pct": 19.5, "calmar": 1.05}, validation=CLEAN)
+    assert grade.prediction_verdict == "inconclusive"
+    assert not grade.may_become_a_change
 
 
 def test_an_unchanged_prediction_is_graded_as_one():
@@ -168,17 +181,17 @@ def test_an_unchanged_prediction_is_graded_as_one():
     assert p.evaluate(5.0) == "opposite"
 
 
-def test_verdict_for_is_the_only_place_a_verdict_is_decided():
+def test_prediction_verdict_for_is_the_only_place_a_prediction_verdict_is_decided():
     from evals.hypothesis import Outcome
 
     def out(result):
         return Outcome("m", "increase", 1.0, 0.0, 0.0, 0.0, result)
 
-    assert verdict_for([out("met"), out("met")]) == "supported"
-    assert verdict_for([out("met"), out("opposite")]) == "falsified"
-    assert verdict_for([out("too_small"), out("too_small")]) == "inconclusive"
-    assert verdict_for([out("met"), out("too_small")]) == "mixed"
-    assert verdict_for([]) == "inconclusive"
+    assert prediction_verdict_for([out("met"), out("met")]) == "supported"
+    assert prediction_verdict_for([out("met"), out("opposite")]) == "falsified"
+    assert prediction_verdict_for([out("too_small"), out("too_small")]) == "inconclusive"
+    assert prediction_verdict_for([out("met"), out("too_small")]) == "mixed"
+    assert prediction_verdict_for([]) == "inconclusive"
 
 
 def test_grade_has_no_field_the_caller_can_set_to_pass(tmp_path: Path):
@@ -187,9 +200,91 @@ def test_grade_has_no_field_the_caller_can_set_to_pass(tmp_path: Path):
     grade = ledger.grade("2026-09-23-profit-booking",
                          {"max_drawdown_pct": 20.0, "calmar": 1.0},
                          {"max_drawdown_pct": 30.0, "calmar": 0.4},
-                         note="I still believe in this one")
-    assert grade.verdict == "falsified"
+                         validation=CLEAN, note="I still believe in this one")
+    assert grade.prediction_verdict == "falsified"
     assert "FALSIFIED" in grade.describe()
+    # …and the decisive field is not an argument at all
+    with pytest.raises(TypeError):
+        ledger.grade("2026-09-23-profit-booking", {}, {}, may_become_a_change=True)
+
+
+# ------------------------------------------------- two verdicts, one that decides
+
+
+def test_a_supported_prediction_with_a_dirty_validation_may_not_become_a_change(
+        tmp_path: Path):
+    """The defect, in one test.
+
+    The real graded hypothesis of 2026-09-24 recorded `verdict: "supported"` — its two
+    predictions did come true — while its own validation said the result cleared no hurdle,
+    lost to both baselines and won 0% of its out-of-sample folds. Both answers were
+    legitimate; a reader could take the flattering one. Now only one of them decides, and it
+    is the one that carries the refusal with it.
+    """
+    ledger = Ledger(tmp_path)
+    ledger.record(make())
+    grade = ledger.grade(
+        "2026-09-23-profit-booking",
+        {"max_drawdown_pct": 20.0, "calmar": 1.0},
+        {"max_drawdown_pct": 15.0, "calmar": 1.8},
+        validation={"ok": False, "problems": [
+            "Sharpe 0.238 does not clear the deflated hurdle 1.008",
+            "out-of-sample win rate 0% is below 50%",
+            "loses to the shipped strategy AND to buy-and-hold BTC over the same window"]})
+    assert grade.prediction_verdict == "supported"     # the predictions did come true …
+    assert grade.may_become_a_change is False          # … and it is still not a change
+    assert len(grade.blocked_because) == 3
+    assert any("deflated hurdle" in b for b in grade.blocked_because)
+
+    # The file on disk cannot be misread either: ONE decisive field at the top, the
+    # prediction verdict nested under `prediction`, and no bare `verdict` key at all.
+    doc = json.loads(ledger.grade_path("2026-09-23-profit-booking").read_text())
+    assert doc["may_become_a_change"] is False
+    assert doc["prediction"]["verdict"] == "supported"
+    assert "verdict" not in doc, (
+        "a top-level `verdict` is the field that made the two answers confusable; a reader "
+        "or a future gate must not be able to reach for it")
+    assert doc["validation"]["ok"] is False
+
+
+def test_a_measurement_nobody_validated_can_never_become_a_change(tmp_path: Path):
+    """Omitting the validation is not a shortcut to a clean grade."""
+    ledger = Ledger(tmp_path)
+    ledger.record(make())
+    grade = ledger.grade("2026-09-23-profit-booking",
+                         {"max_drawdown_pct": 20.0, "calmar": 1.0},
+                         {"max_drawdown_pct": 15.0, "calmar": 1.8})
+    assert grade.prediction_verdict == "supported"
+    assert grade.may_become_a_change is False
+    assert any("no validation" in b for b in grade.blocked_because)
+
+
+def test_change_blockers_names_both_questions_independently():
+    assert change_blockers("supported", CLEAN) == ()
+    assert change_blockers("mixed", CLEAN)          # a partial win is not a change
+    assert change_blockers("supported", None)       # nobody asked "is this real"
+    assert change_blockers("falsified", {"ok": False, "problems": ["leaks"]}) == (
+        change_blockers("falsified", CLEAN) + ("leaks",))
+    # A validation that says neither yes nor no is not a pass.
+    assert change_blockers("supported", {})
+
+
+def test_a_grade_written_before_the_split_is_read_as_not_a_change(tmp_path: Path):
+    """A v1 grade file recorded the flattering answer and nothing else. Inferring the
+    decision from its buried validation would be exactly the confusion being removed, so it
+    reads back as a refusal with the reason spelled out."""
+    ledger = Ledger(tmp_path)
+    ledger.record(make())
+    ledger.dir.mkdir(parents=True, exist_ok=True)
+    ledger.grade_path("2026-09-23-profit-booking").write_text(json.dumps({
+        "hypothesis_id": "2026-09-23-profit-booking", "verdict": "supported",
+        "outcomes": [], "recorded_utc": "2026-09-24T01:00:00Z",
+        "measured_utc": "2026-09-24T02:00:00Z",
+        "evidence": {"validation": {"ok": False}}}), encoding="utf-8")
+    got = ledger.read_grade("2026-09-23-profit-booking")
+    assert got["prediction_verdict"] == "supported"
+    assert got["may_become_a_change"] is False
+    assert "v1" in got["blocked_because"][0]
 
 
 # ------------------------------------------------------------------------- listing
@@ -201,10 +296,15 @@ def test_the_listing_shows_open_and_graded_side_by_side(tmp_path: Path):
     ledger.record(make("2026-09-24-trailing-stop"))
     ledger.grade("2026-09-23-profit-booking",
                  {"max_drawdown_pct": 20.0, "calmar": 1.0},
-                 {"max_drawdown_pct": 15.0, "calmar": 1.8})
-    verdicts = {r["id"]: r["verdict"] for r in ledger.listing()}
-    assert verdicts == {"2026-09-23-profit-booking": "supported",
-                        "2026-09-24-trailing-stop": "open"}
+                 {"max_drawdown_pct": 15.0, "calmar": 1.8}, validation=CLEAN)
+    rows = {r["id"]: r for r in ledger.listing()}
+    assert rows["2026-09-23-profit-booking"]["state"] == "graded"
+    assert rows["2026-09-23-profit-booking"]["prediction_verdict"] == "supported"
+    assert rows["2026-09-23-profit-booking"]["may_become_a_change"] is True
+    assert rows["2026-09-24-trailing-stop"]["state"] == "open"
+    # The queue reads `state`, so an ungraded hypothesis is never confused with one whose
+    # predictions happen to be unresolved.
+    assert all("verdict" not in r for r in ledger.listing())
 
 
 def test_a_falsified_hypothesis_is_kept_not_deleted(tmp_path: Path):
@@ -212,7 +312,9 @@ def test_a_falsified_hypothesis_is_kept_not_deleted(tmp_path: Path):
     ledger.record(make())
     ledger.grade("2026-09-23-profit-booking",
                  {"max_drawdown_pct": 20.0, "calmar": 1.0},
-                 {"max_drawdown_pct": 30.0, "calmar": 0.5})
+                 {"max_drawdown_pct": 30.0, "calmar": 0.5}, validation=CLEAN)
     assert ledger.path("2026-09-23-profit-booking").exists()
     assert ledger.grade_path("2026-09-23-profit-booking").exists()
-    assert ledger.listing()[0]["verdict"] == "falsified"
+    row = ledger.listing()[0]
+    assert row["prediction_verdict"] == "falsified"
+    assert row["may_become_a_change"] is False

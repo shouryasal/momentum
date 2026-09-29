@@ -11,12 +11,14 @@ with new evidence and let a human decide.
 
 ## Why a ledger, rather than "just don't repeat yourself"
 
-Every idea costs a trial, and a trial is not free: the expected best in-sample Sharpe from
-N zero-skill trials on this repo's 9.1-year sample is **N=10 → 0.86 · N=50 → 1.05 ·
-N=200 → 1.19 · N=1000 → 1.33**. The trial counter in `edge-audit` only grows. So re-testing
-a dead idea does not merely waste an afternoon — it **raises the bar that every honest idea
-after it must clear**. A search process that does not know what it has already searched is
-a random walk with a report attached.
+Every idea that leaves this skill costs a **selection** trial, and a selection trial is not
+free: the expected best in-sample Sharpe from N zero-skill trials on this repo's 9.1-year
+sample is **N=10 → 0.86 · N=50 → 1.05 · N=200 → 1.19 · N=1000 → 1.33**. Every total in
+`edge-audit`'s counter only grows, and the N the hurdle uses falls only when a change of the
+loop's own clears the gate and merges (method.md §3a). So re-testing a dead idea does not
+merely waste an afternoon — it **raises the bar that every honest idea after it must
+clear**. A search process that does not know what it has already searched is a random walk
+with a report attached.
 
 ---
 

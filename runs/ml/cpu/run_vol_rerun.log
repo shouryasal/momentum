@@ -1,0 +1,53 @@
+CPU zoo | threads=3 | cost=15.0 bps/side | seed={'seed': 0, 'random': True, 'numpy': True, 'torch': True, 'cuda': True}
+panel: 206,152 eligible rows, 394 segments, 2018-02-13 -> 2026-09-24 (0.5s)
+
+== vol_7d (rvol_7d, weekly, 29,401 rows, 5 folds) ==
+  folds: 2: train 1191 -> test 5240 [2020-08-03..2021-10-18] purged 19 | 3: train 6301 -> test 6900 [2021-10-25..2023-01-09] purged 149 | 4: train 13302 -> test 4935 [2023-01-16..2024-04-01] purged 48 | 5: train 18133 -> test 7349 [2024-04-08..2025-06-23] purged 152 | 6: train 25553 -> test 3767 [2025-06-30..2026-09-14] purged 81
+    ridge              2.5s  {'alpha': 1000.0}
+    elasticnet       835.2s  {'alpha': 0.001, 'l1_ratio': 0.5}
+    lightgbm         589.3s  {'num_leaves': 15, 'min_child_samples': 200, 'n_estimators': 300}
+    xgboost          317.9s  {'max_depth': 3, 'n_estimators': 400}
+    catboost         101.9s  {'depth': 4, 'iterations': 400}
+    random_forest     62.4s  {'min_samples_leaf': 50}
+    extra_trees       33.5s  {'min_samples_leaf': 50}
+    har                2.0s  {}
+target                                        model     n  r2_vs_train_mean  r2_vs_test_mean    rmse   corr  spearman    qlike     bias   family  fit_s
+vol_7d                                     catboost 28191            0.1803           0.1325 0.61169 0.4275    0.4837  1.49318 -0.14704     gbdt 101.90
+vol_7d                                      xgboost 28191            0.1587           0.1096 0.61971 0.4023    0.4548  1.54236 -0.14883     gbdt 317.89
+vol_7d                                          har 28191            0.1356           0.0852 0.62816 0.3753    0.4401  1.51732 -0.15298     stat   2.04
+vol_7d                                     lightgbm 28191            0.1206           0.0693 0.63358 0.3669    0.4400  1.58394 -0.16701     gbdt 589.35
+vol_7d                                random_forest 28191            0.1069           0.0548 0.63849 0.3636    0.4555  1.57269 -0.17874   forest  62.39
+vol_7d                                  extra_trees 28191            0.0691           0.0148 0.65188 0.3276    0.4066  1.64032 -0.19285   forest  33.47
+vol_7d                 baseline: EWMA(0.94) untuned 28191           -0.1890          -0.2584 0.73671 0.3311    0.4379 13.12394  0.13355 baseline    NaN
+vol_7d                    baseline: trailing RV(30) 26652           -0.2751          -0.3362 0.74623 0.3280    0.4425  1.36948  0.15008 baseline    NaN
+vol_7d garch_lite (pooled GARCH(1,1), var-targeted) 25230           -0.3231          -0.3733 0.72469 0.2854    0.3737  1.29140  0.31059     stat    NaN
+vol_7d                     baseline: trailing RV(7) 27827           -0.5893          -0.6774 0.84562 0.3199    0.4157  1.84529  0.04509 baseline    NaN
+vol_7d                                        ridge 28191           -1.0323          -1.1508 0.96314 0.2295    0.4775  1.50530 -0.05861   linear   2.54
+vol_7d                                   elasticnet 28191           -1.2678          -1.4000 1.01743 0.2243    0.4669  1.53252 -0.04449   linear 835.17
+
+== vol_28d (rvol_28d, weekly, 29,227 rows, 5 folds) ==
+  folds: 2: train 1132 -> test 5083 [2020-08-03..2021-10-11] purged 72 | 3: train 5733 -> test 6982 [2021-10-18..2023-01-02] purged 554 | 4: train 13043 -> test 4670 [2023-01-09..2024-03-18] purged 226 | 5: train 17434 -> test 7461 [2024-03-25..2025-06-09] purged 505 | 6: train 25050 -> test 3827 [2025-06-16..2026-08-24] purged 350
+    ridge              1.8s  {'alpha': 10000.0}
+    elasticnet       612.6s  {'alpha': 0.001, 'l1_ratio': 0.5}
+    lightgbm          62.9s  {'num_leaves': 15, 'min_child_samples': 200, 'n_estimators': 300}
+    xgboost          330.6s  {'max_depth': 4, 'n_estimators': 800, 'learning_rate': 0.02}
+    catboost         309.6s  {'depth': 8, 'iterations': 600, 'l2_leaf_reg': 10.0}
+    random_forest     57.9s  {'min_samples_leaf': 50}
+    extra_trees       29.5s  {'min_samples_leaf': 50}
+    har                0.6s  {}
+ target                                        model     n  r2_vs_train_mean  r2_vs_test_mean    rmse   corr  spearman   qlike     bias   family  fit_s
+vol_28d                                      xgboost 28023            0.1973           0.1156 0.47702 0.4061    0.4511 1.39847 -0.08039     gbdt 330.56
+vol_28d                                     catboost 28023            0.1653           0.0803 0.48646 0.3727    0.4457 1.41847 -0.11467     gbdt 309.62
+vol_28d                                          har 28023            0.1638           0.0787 0.48688 0.3667    0.4508 1.41923 -0.11977     stat   0.56
+vol_28d                                random_forest 28023            0.1399           0.0524 0.49379 0.3509    0.4451 1.44013 -0.13487   forest  57.93
+vol_28d                                     lightgbm 28023            0.1213           0.0319 0.49909 0.3330    0.4091 1.46092 -0.12353     gbdt  62.87
+vol_28d                                  extra_trees 28023            0.1049           0.0139 0.50372 0.3116    0.3849 1.46875 -0.14628   forest  29.50
+vol_28d                                        ridge 28023           -0.1463          -0.2630 0.57007 0.3223    0.5131 1.38714 -0.08718   linear   1.76
+vol_28d                 baseline: EWMA(0.94) untuned 28023           -0.4189          -0.5634 0.63423 0.3529    0.4756 9.22581  0.07172 baseline    NaN
+vol_28d garch_lite (pooled GARCH(1,1), var-targeted) 25077           -0.4232          -0.5181 0.57669 0.3678    0.4607 1.28199  0.25199     stat    NaN
+vol_28d                    baseline: trailing RV(30) 26492           -0.5805          -0.7144 0.64101 0.3582    0.4864 1.46296  0.09018 baseline    NaN
+vol_28d                    baseline: trailing RV(28) 26599           -0.5889          -0.7259 0.64565 0.3583    0.4845 1.48500  0.08479 baseline    NaN
+vol_28d                                   elasticnet 28023           -1.2645          -1.4950 0.80123 0.3144    0.4528 1.44225  0.00987   linear 612.63
+
+trials this run: 18 selection, 58 screening
+artefacts -> /home/shourya/earn-wk/ml3/runs/ml/vol2  (4111.9s)

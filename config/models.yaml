@@ -115,7 +115,10 @@ tasks:
     retry: 0
     effort: low
     escalation_effort: medium    # a malformed extraction is re-read harder, same model
-    max_turns: 1
+    # 2, not 1: a structured-output call needs a turn to answer AND the turn the
+    # SDK spends emitting it. At 1 every cloud attempt died with "Reached maximum
+    # number of turns (1)" after paying for the tokens - measured, 3 runs of 3.
+    max_turns: 2
     max_usd_per_run: 0.10
     monthly_budget_usd: 4
     deadline_s: 120
@@ -134,7 +137,10 @@ tasks:
     retry: 0
     effort: low
     escalation_effort: medium
-    max_turns: 1
+    # 2, not 1: a structured-output call needs a turn to answer AND the turn the
+    # SDK spends emitting it. At 1 every cloud attempt died with "Reached maximum
+    # number of turns (1)" after paying for the tokens - measured, 3 runs of 3.
+    max_turns: 2
     max_usd_per_run: 0.20
     monthly_budget_usd: 5
     deadline_s: 120
@@ -155,7 +161,10 @@ tasks:
     effort: low
     # No escalation_effort, for the same reason as `scan`: the chain head is local and has
     # no effort dial. `escalation: haiku` is the whole escalation.
-    max_turns: 1
+    # 2, not 1: a structured-output call needs a turn to answer AND the turn the
+    # SDK spends emitting it. At 1 every cloud attempt died with "Reached maximum
+    # number of turns (1)" after paying for the tokens - measured, 3 runs of 3.
+    max_turns: 2
     max_usd_per_run: 0.10
     monthly_budget_usd: 4
     deadline_s: 90
@@ -177,10 +186,24 @@ tasks:
     min_tier: 1
     retry: 0
     effort: low
-    max_turns: 1
-    max_usd_per_run: 0.05
+    # 4, where 2 is the universal floor. 2 is enough for a short structured answer (one turn
+    # to write, one for the SDK to emit) but NOT for this one: screening a full evidence pack
+    # returns tens of items, and on 2026-09-24T23:01:53Z — after the 1 -> 2 fix — a scan call
+    # still died on "Reached maximum number of turns (2)" having spent 2,741 output tokens and
+    # $0.0563. A turn cap below what the answer needs does not save money, it spends it and
+    # discards the result.
+    max_turns: 4
+    # 0.05 was a throttle dressed up as a safety net: one haiku screen of a full evidence
+    # pack costs more than that, so the gray-zone second opinion aborted mid-flight with
+    # "Reached maximum budget ($0.05)" every time. Per-run caps are runaway-loop safety
+    # only (see `budget.mode: telemetry` below); the monthly figure is the real bound.
+    max_usd_per_run: 0.25
     monthly_budget_usd: 3
-    deadline_s: 90
+    # 180, not 90: the binding party is the CLOUD escalation, not the local model. Measured
+    # 2026-09-25 over 16 haiku scan calls, p50 79.7s and p95 110.8s on the production prompt —
+    # so 90 cut off a call that was going to succeed, and the journal carries the local
+    # counterpart too (`ollama timed out after 90.0s`, x4).
+    deadline_s: 180
     prompt: research.stage_prompts.scan
     on_all_failed: skip_screen
 

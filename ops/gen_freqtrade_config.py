@@ -412,6 +412,12 @@ def build_riskgate_json(cfg: EarnConfig, config_path: Path = DEFAULT_CONFIG,
     return {
         "generated_from": "config/earn.yaml",
         "source_sha256": _source_sha(config_path),
+        # Which profile overlay produced this render (``""`` = the shipped configuration).
+        # Stamped rather than inferred: ``source_sha256`` is the sha of earn.yaml, which a
+        # profile does not change, so without this a rendered config could not say whether
+        # a profile was in force. The gate ignores the key; it is provenance for the human,
+        # the journal and the post-mortem.
+        "profile": cfg.profiles.active or "",
         "phase": COMMITTED_PHASE,
         "risk": cfg.risk.model_dump(),
         "universe": universe,
@@ -439,6 +445,30 @@ def build_params(cfg: EarnConfig, sleeve: Sleeve) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- var/runtime
+
+
+def assert_profile_not_live(cfg: EarnConfig, state: ms.ModeState) -> None:
+    """Refuse to render a runtime for REAL MONEY while a profile overlay is active.
+
+    A profile changes cadence and entry/exit logic — deliberately, and without the years of
+    walk-forward the shipped strategy carries. DEMO is exactly what one is for and is
+    allowed; LIVE is not, and this is a render-time refusal rather than a note in a document
+    so the file a live container would read cannot be produced at all.
+
+    ``sl.is_live`` is real money only: demo places real orders with free money and is
+    deliberately not in ``LIVE_MODES``.
+    """
+    name = cfg.profiles.active
+    if not name:
+        return
+    live = [s for s in paths.SLEEVES if state.sleeve(s).is_live]
+    if live:
+        raise RenderError(
+            f"profiles.active is {name!r} and sleeve(s) {', '.join(live)} are LIVE. A "
+            f"profile is a test configuration: it may run in TEST and on DEMO, never "
+            f"against real money. Set profiles.active to null and regenerate, or take the "
+            f"sleeve out of live first."
+        )
 
 
 def venue_of(sl: ms.SleeveState) -> Venue | None:
@@ -784,6 +814,7 @@ def render_runtime(
 ) -> dict[Path, str]:
     """The ``var/runtime/`` files as {path: content}, without writing them."""
     state = state if state is not None else ms.load()
+    assert_profile_not_live(cfg, state)
     target = runtime_dir or paths.runtime_dir()
     out: dict[Path, str] = {}
     for sleeve in paths.SLEEVES:
@@ -835,6 +866,10 @@ def main(argv: list[str] | None = None) -> int:
     check = "--check" in argv
     skip_runtime = "--no-runtime" in argv or check
     cfg = load_config()
+    profile = cfg.profiles.active
+    print(f"profile: {profile or 'none (shipped configuration)'}"
+          + (f"  [{cfg.trading.timeframe}, sleeves "
+             f"{cfg.sleeves.a.strategy}/{cfg.sleeves.b.strategy}]" if profile else ""))
 
     regenerated = {
         CONFIG_DIR / "freqtrade-a.json": _dump(build_bot_config(cfg, "a")),

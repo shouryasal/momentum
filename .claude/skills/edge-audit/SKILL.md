@@ -29,7 +29,7 @@ deflated hurdle is not reviewable.
 |---|---|---|
 | Labels, uniqueness, EFFECTIVE_N, purged folds | `knowledge/state/edge_audit.json` | `python3 ${CLAUDE_SKILL_DIR}/scripts/audit_stats.py` |
 | Quarterly feature decay panel | `knowledge/state/feature_decay.json` | `python3 ${CLAUDE_SKILL_DIR}/scripts/decay_panel.py` |
-| Persistent search-trial count | `knowledge/state/trial_counter.json` | `audit_stats.py trials --add "<what was searched>"` |
+| Search-trial counts: all-time measurements, all-time selection trials, and the open family that forms N | `knowledge/state/trial_counter.json` | `audit_stats.py trials --add "<what was searched>" [--screen]`, and `runs/discovery.py: TrialCounter` |
 | Candidate change and its backtest | `changes/*.json` | `strategy-lab` |
 
 Numbers come from the scripts. Never compute a t-stat, a Sharpe or a sample size in your
@@ -45,12 +45,21 @@ head, and never restate one from a previous report without re-running it.
    ```
 
 2. Count the search, then form the hurdle. Every parameter sweep, prompt variant and
-   feature tried is a trial — add it before asking for the hurdle:
+   feature tried is a trial — add it before asking for the hurdle. Add `--screen` when the
+   search **could not have produced a change** (a nightly `discovery light` pass, an
+   exploratory look): it is recorded for ever in `n_trials` and does not raise the hurdle,
+   because the loop never took a maximum over trials no change could come out of.
 
    ```
    python3 ${CLAUDE_SKILL_DIR}/scripts/audit_stats.py trials --add "<what was searched>"
+   python3 ${CLAUDE_SKILL_DIR}/scripts/audit_stats.py trials --add "<a screen>" --screen
    python3 ${CLAUDE_SKILL_DIR}/scripts/audit_stats.py hurdle --baseline <benchmark sharpe>
    ```
+
+   `hurdle` takes N from `family.n_selection_trials` — the trials that could actually have
+   produced a change, spent since the last change of the loop's own that the gate merged —
+   and prints the all-time totals beside it so the gap is never hidden. `method.md` §3a is
+   the reasoning, including what the scheme deliberately does not buy.
 
 3. Re-test the shipped features for decay:
 
@@ -79,8 +88,23 @@ head, and never restate one from a previous report without re-running it.
   `audit_stats.py check --claim <file>` and quote the refusal verbatim.
 - **Refuse an unpurged score.** Any CV number computed without a purge and an embargo is
   refused, however good it looks.
-- **Never lower the hurdle, and never reset the trial count.** `n_trials` only grows; the
-  hurdle is `baseline + expected_max_sharpe(N, T)`.
+- **Never lower the hurdle, and never reset the trial count.** `n_trials` and
+  `n_selection_trials` only grow; the hurdle is `baseline + expected_max_sharpe(N, T)` with
+  `N = family.n_selection_trials`. The open family resets **only** when a change the
+  discovery loop authored reaches `status: "merged"` — the gate having recomputed every
+  number in it — never on a rejected or held proposal, never by hand, and never because a
+  counter looked inconveniently high. §3a of `method.md` is the argument; do not re-derive
+  it per report.
+- **Refuse a hurdle quoted against the wrong N.** A claim whose `n_trials` is the all-time
+  measurement count is over-corrected and a claim that reset the family without a merged
+  change is under-corrected. Both are refusals, and both get the number that belongs there.
+- **Two verdicts are never interchangeable.** A graded hypothesis
+  (`knowledge/research/hypotheses/<id>.grade.json`) carries `prediction.verdict` — "did the
+  author's predictions come true" — and `may_become_a_change` — "is this real enough to
+  turn into a change". Only the second one licenses anything, and a `supported` prediction
+  with a dirty validation is still a no. A grade with no `may_become_a_change` field at all
+  predates the split and may not be proposed from; quote the reason rather than inferring
+  one.
 - **A good quarter is not validation.** Distinguishing Sharpe 1.14 from 0.83 at 80% power
   needs about **245 years**. Say the number rather than the sentiment.
 - **Retirement is a recommendation, not an action.** A feature failing `|t| > 1.5` for two

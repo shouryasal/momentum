@@ -54,12 +54,19 @@ STEP_UP: frozenset[str] = frozenset(
         "POST /api/bots/{sleeve}/restart",
         "POST /api/changes/{change_id}/attach",
         "POST /api/changes/{change_id}/revert",
-        # The control surface. Arming and resuming raise how much the system does by
-        # itself, and flatten sells — so all three step up. Pause and stop deliberately do
-        # not: the brake is never behind a door.
-        "PUT /api/control/level",
-        "POST /api/control/resume",
+        # The control surface (`console/routers/autonomy.py`, mounted at /control): every
+        # mutation steps up, because each of them changes what the system does without a
+        # human — installing the schedule, starting, pausing, stopping, moving a level, and
+        # selling everything.
         "POST /api/control/flatten",
+        "PUT /api/control/level",
+        "POST /api/control/pause",
+        "POST /api/control/schedule",
+        "POST /api/control/start",
+        "POST /api/control/stop",
+        # Installing the console's own supervisor changes what happens when the console
+        # dies, which is a change to what the system does without a human present.
+        "POST /api/control/units",
         "DELETE /api/kill",
         "POST /api/mode/recover",
         "POST /api/mode/transition",

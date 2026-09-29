@@ -273,11 +273,11 @@ class SpendCap(_Model):
 
     daily_usd: float | None = F(
         10.0, desc="Model spend a bot may incur in one UTC day before at_cap applies.",
-        group="autonomy", unit="usd", ge=0,
+        group="autonomy", unit="usdt", ge=0,
     )
     monthly_usd: float | None = F(
         150.0, desc="Model spend a bot may incur in one UTC month before at_cap applies.",
-        group="autonomy", unit="usd", ge=0,
+        group="autonomy", unit="usdt", ge=0,
     )
 
 
@@ -1180,6 +1180,79 @@ class ExchangeLimits(_Model):
     )
 
 
+class FastSignals(_Model):
+    """Signal settings for the short-horizon test strategy ``strategies/SleeveFast.py``.
+
+    **Inert for the shipped sleeves.** Neither ``SleeveA`` nor ``SleeveB`` reads this
+    block; it exists so a *profile* (see :class:`Profiles`) can select a fast strategy and
+    shape it without a new config namespace, and so those settings reach the container
+    through ``riskgate.json: trading.sleeves.<s>`` like every other mechanic rather than
+    through a second file nobody blesses.
+
+    Nothing here is a risk limit. ``target_pct_nav`` is an *intent*: the gate still clamps
+    it to the asset's tier cap, ``risk.min_position_pct_nav``, ``risk.max_order_notional_pct``
+    and the exchange's own filters, exactly as it clamps a Sleeve A weight or a Sleeve B
+    proposal.
+    """
+
+    ema_fast: int = F(
+        9, desc="Fast EMA length, in candles of trading.timeframe. The trend side of the "
+                "entry rule SleeveFast uses in place of a 200-day moving average.",
+        group="trading.fast", protected=True, ge=2, le=200,
+    )
+    ema_slow: int = F(
+        21, desc="Slow EMA length, in candles. ema_fast > ema_slow is 'trend up' for "
+                 "SleeveFast; losing it is the exit signal.",
+        group="trading.fast", protected=True, ge=3, le=400,
+    )
+    breakout_lookback: int = F(
+        12, desc="Candles of prior highs an entry must break above. 0 disables the "
+                 "breakout leg and leaves the EMA trend as the whole entry rule.",
+        group="trading.fast", protected=True, ge=0, le=500,
+    )
+    atr_period: int = F(
+        14, desc="ATR period for the volatility filter, in candles.",
+        group="trading.fast", protected=True, ge=2, le=200,
+    )
+    min_atr_pct: float = F(
+        0.0025, desc="Volatility floor: ATR as a fraction of price below which a breakout "
+                     "is range noise and is not traded.",
+        group="trading.fast", unit="fraction", protected=True, ge=0, lt=1,
+    )
+    max_atr_pct: float = F(
+        0.060, desc="Volatility ceiling: above this ATR/price a fixed-percentage stop is "
+                    "inside one candle's normal range, so the name is skipped.",
+        group="trading.fast", unit="fraction", protected=True, gt=0, lt=1,
+    )
+    target_pct_nav: float = F(
+        0.05, desc="Target weight SleeveFast asks for per signalled pair, as a fraction of "
+                   "sleeve NAV. An INTENT only: the gate clamps it to the tier cap, the "
+                   "position floor and the order-notional cap.",
+        group="trading.fast", unit="fraction", protected=True, gt=0, le=1,
+    )
+    exit_on_trend_loss: bool = F(
+        True, desc="Raise exit_long when the fast EMA falls back under the slow one. The "
+                   "discretionary exit that keeps holding periods measured in hours.",
+        group="trading.fast", protected=True,
+    )
+    min_entry_spacing_min: int = F(
+        0, desc="Minimum minutes between this sleeve's NEW trades, sleeve-wide. 0 is off. "
+                "Purely a cadence control and never a limit: risk.max_trades_per_day still "
+                "caps the count. It exists because the measured signal supply is ~50x that "
+                "cap, so without spacing the whole day's budget is spent in the first hour "
+                "and an observation window later in the day sees nothing — and because four "
+                "entries inside one candle are four bets on the same move, which the "
+                "measured pairwise correlation says is worth about one.",
+        group="trading.fast", unit="minutes", protected=True, ge=0, le=1440,
+    )
+    risk_window_days: int = F(
+        60, desc="Daily observations SleeveFast resamples from its own intraday frame for "
+                 "the gate's beta and correlation checks, so those keep the 60-day window "
+                 "they were measured on even on a 1h timeframe.",
+        group="trading.fast", unit="days", protected=True, ge=5, le=365,
+    )
+
+
 class TradingDefaults(_Model):
     sizing_mode: Literal["target_weight", "signal_entries"] = F(
         "target_weight", desc="How position size is derived: from target weights or per signal.",
@@ -1210,6 +1283,10 @@ class TradingDefaults(_Model):
     exchange_limits: ExchangeLimits = F(default_factory=ExchangeLimits,
                                         desc="Exchange minimum/backoff handling.",
                                         group="trading.limits", protected=True)
+    fast: FastSignals = F(default_factory=FastSignals,
+                          desc="Signal settings for the short-horizon SleeveFast strategy; "
+                               "read by no shipped sleeve.",
+                          group="trading.fast", protected=True)
 
 
 #: ``TradingDefaults`` sub-model -> its all-optional twin, so the tree is built once.
@@ -2172,6 +2249,192 @@ class Paths(_Model):
 # --------------------------------------------------------------------------- root
 
 
+# --------------------------------------------------------------------------- profiles
+
+
+class Profiles(_Model):
+    """A named OVERLAY over this file, selected by one key.
+
+    ``active: null`` is the shipped system, and every default in this file means exactly
+    what it says. A name selects ``<dir>/<name>.yaml``, whose keys are deep-merged over
+    ``earn.yaml`` *at load time* and then re-validated by the whole ``EarnConfig`` schema
+    and every cross-check in :func:`_cross_validate` — so a profile can never produce a
+    configuration this file could not have contained. Switching back is this one key.
+
+    What a profile may touch is an ALLOWLIST, :data:`PROFILE_ALLOWED_PREFIXES`: the
+    cadence (``trading.timeframe``), the entry/exit and take-profit mechanics, the
+    execution bands, the sleeve parameter defaults and which strategy class each sleeve
+    runs. Everything else is refused by name with a reason, ``risk`` first — a profile
+    exists to change *when* and *how* Earn acts, never *how much it may lose*. On top of
+    the allowlist, :func:`assert_profile_preserves_protection` re-derives both configs and
+    refuses the profile unless ``risk``, ``bounds``, ``universe`` and ``modes`` are
+    byte-identical to the shipped ones and no per-trade stop got looser.
+
+    The profile reaches the bots the same way everything else does — through
+    ``config/riskgate.json`` and ``config/freqtrade-<s>.json``, which are in
+    ``config_guard.BLESSED_FILES``. So an active profile cannot change what a bot does
+    without changing a blessed file, and preflight sees it.
+    """
+
+    active: str | None = F(
+        None,
+        desc="Name of the profile overlay to apply, without the '.yaml'. null is the "
+             "shipped configuration. This one key switches a profile on and off.",
+        group="profiles", protected=True, effects=REGEN_AND_RESTART,
+    )
+    dir: str = F(
+        "config/profiles",
+        desc="Directory the named overlay is read from, relative to the repo root.",
+        group="profiles", widget="path", protected=True,
+    )
+
+
+#: Dotted prefixes a profile overlay may set. Deny by default: anything that does not
+#: start with one of these is refused by name. Longest match wins, so
+#: ``sleeves.a.strategy`` is allowed while the rest of ``sleeves`` is not.
+PROFILE_ALLOWED_PREFIXES: tuple[str, ...] = (
+    "trading",
+    "execution",
+    "sleeve_a",
+    "sleeve_b",
+    "sleeves.a.strategy",
+    "sleeves.b.strategy",
+)
+
+#: Why a well-known tier-2 section is refused to a profile. Used for the message only —
+#: the allowlist above is what actually decides — so a refusal says *why* rather than
+#: "unknown prefix", which is the difference between a fixable mistake and a mystery.
+PROFILE_DENIED_REASONS: dict[str, str] = {
+    "risk": "every risk limit is human-only: a profile changes cadence, never the caps, "
+            "the stops that protect capital or anything the gate enforces",
+    "bounds": "the tier-1 bounds table is human-only",
+    "universe": "what Earn may trade is human-only; the whitelist comes from the "
+                "point-in-time snapshot",
+    "modes": "capital and the live/test guards are human-only",
+    "exchange": "the venue and the assumed costs are human-only",
+    "autonomy": "how much the loop does alone is human-only",
+    "security": "the agent user and the CLI wrapper are human-only",
+    "runtime": "host facts are discovered by setup and re-checked by preflight",
+    "git": "branch and worktree layout is human-only",
+    "paths": "where Earn's data lives is human-only",
+    "console": "console settings are human-only",
+    "profiles": "a profile may not select another profile",
+    "proposal": "the proposal contract is human-only",
+    "sleeves": "only sleeves.<s>.strategy may be profiled; a sleeve's label and seed "
+               "are human-only",
+    "meta": "file identity is not a profile variable",
+}
+
+
+def _overlay_leaves(node: Any, prefix: str = "") -> list[str]:
+    """Every dotted path an overlay actually sets. A list or an empty dict is a leaf."""
+    if isinstance(node, dict) and node:
+        out: list[str] = []
+        for key, child in node.items():
+            here = f"{prefix}.{key}" if prefix else str(key)
+            out.extend(_overlay_leaves(child, here))
+        return out
+    return [prefix] if prefix else []
+
+
+def _profile_allows(path: str) -> bool:
+    return any(path == a or path.startswith(f"{a}.") for a in PROFILE_ALLOWED_PREFIXES)
+
+
+def _profile_denial(path: str) -> str:
+    parts = path.split(".")
+    for i in range(len(parts), 0, -1):
+        reason = PROFILE_DENIED_REASONS.get(".".join(parts[:i]))
+        if reason is not None:
+            return reason
+    allowed = ", ".join(PROFILE_ALLOWED_PREFIXES)
+    return f"a profile may only set {allowed} (deny by default)"
+
+
+def check_profile_overlay(overlay: Mapping[str, Any], *, source: str) -> None:
+    """Refuse a profile overlay that reaches outside :data:`PROFILE_ALLOWED_PREFIXES`.
+
+    Raises :class:`ConfigError` naming every offending path and why, rather than dropping
+    the key: an overlay that is quietly ignored produces a run labelled with a change that
+    never happened.
+    """
+    problems = [
+        f"{path}: REFUSED — {_profile_denial(path)}"
+        for path in sorted(_overlay_leaves(dict(overlay)))
+        if not _profile_allows(path)
+    ]
+    if problems:
+        raise ConfigError(
+            f"{source}: this profile overlay may not be applied:\n  " + "\n  ".join(problems)
+        )
+
+
+def profile_path(raw: Mapping[str, Any], name: str, *, root: Path | None = None) -> Path:
+    """Where the overlay named ``name`` lives, from the raw config's ``profiles.dir``."""
+    if "/" in name or "\\" in name or name.startswith("."):
+        raise ConfigError(
+            f"profiles.active {name!r} must be a bare name, not a path: the overlay is "
+            f"read from profiles.dir and nowhere else"
+        )
+    directory = str((raw.get("profiles") or {}).get("dir") or "config/profiles")
+    return (root or REPO_ROOT) / directory / f"{name}.yaml"
+
+
+def load_profile_overlay(raw: Mapping[str, Any], name: str,
+                         *, root: Path | None = None) -> dict[str, Any]:
+    """Read and namespace-check one profile overlay. Never merges; never validates types."""
+    path = profile_path(raw, name, root=root)
+    try:
+        overlay = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as e:
+        raise ConfigError(
+            f"profiles.active is {name!r} but {path} does not exist; set profiles.active "
+            f"to null for the shipped configuration"
+        ) from e
+    except yaml.YAMLError as e:
+        raise ConfigError(f"{path}: not valid YAML: {e}") from e
+    if overlay is None:
+        overlay = {}
+    if not isinstance(overlay, dict):
+        raise ConfigError(f"{path}: a profile overlay must be a mapping of config keys")
+    check_profile_overlay(overlay, source=str(path))
+    return overlay
+
+
+def assert_profile_preserves_protection(base: EarnConfig, profiled: EarnConfig,
+                                        *, name: str) -> None:
+    """Belt and braces: prove a profile changed cadence and mechanics and nothing else.
+
+    The allowlist already refuses a ``risk:`` key. This re-derives both configurations and
+    compares the sections that bound how much can be lost, so the guarantee holds even if
+    the allowlist is ever widened by mistake — and it additionally refuses a profile that
+    makes a per-trade stop LOOSER, which the allowlist alone would let through because
+    ``trading.defaults.stoploss`` is legitimately profilable (to tighten it).
+    """
+    for section in ("risk", "bounds", "universe", "modes", "autonomy", "exchange"):
+        before, after = getattr(base, section), getattr(profiled, section)
+        if isinstance(before, dict):
+            same = {k: v.model_dump() for k, v in before.items()} == {
+                k: v.model_dump() for k, v in after.items()}
+        else:
+            same = before.model_dump() == after.model_dump()
+        if not same:
+            raise ConfigError(
+                f"profile {name!r} changes '{section}', which no profile may touch: a "
+                f"profile changes cadence and entry/exit logic, never the caps, the stops "
+                f"that protect capital or anything the gate enforces"
+            )
+    for sleeve in ("a", "b"):
+        before_stop = trading_for(base, sleeve).stoploss.fixed_pct
+        after_stop = trading_for(profiled, sleeve).stoploss.fixed_pct
+        if after_stop > before_stop + 1e-12:
+            raise ConfigError(
+                f"profile {name!r} widens sleeve {sleeve}'s per-trade stop from "
+                f"{before_stop} to {after_stop}. A profile may tighten a stop and never "
+                f"loosen one."
+            )
+
+
 class EarnConfig(_Model):
     meta: Meta = F(..., desc="File identity and display settings.", group="meta")
     runtime: Runtime = F(default_factory=Runtime, desc="Host facts setup and preflight check.",
@@ -2240,6 +2503,11 @@ class EarnConfig(_Model):
                            widget="path")
     paths: Paths = F(..., desc="Where Earn's data lives, relative to the state root.",
                      group="paths")
+    profiles: Profiles = F(
+        default_factory=Profiles,
+        desc="Named overlays over this file. null = the shipped configuration.",
+        group="profiles", protected=True, effects=REGEN_AND_RESTART,
+    )
 
     # ---- computed, never stored -------------------------------------------------
 
@@ -2717,20 +2985,63 @@ def _fill_derived(cfg: EarnConfig) -> EarnConfig:
     return cfg
 
 
-def load_config(path: Path | str | None = None, *, root: Path | None = None) -> EarnConfig:
+def _build_config(raw: Mapping[str, Any], *, source: str,
+                  root: Path | None) -> EarnConfig:
+    try:
+        cfg = EarnConfig.model_validate(dict(raw))
+    except ValidationError as e:
+        raise ConfigError(f"{source} {_first_error(e)}") from e
+    cfg = _fill_derived(cfg)
+    _cross_validate(cfg, root)
+    return cfg
+
+
+def load_config(path: Path | str | None = None, *, root: Path | None = None,
+                profile: str | None | bool = True) -> EarnConfig:
+    """The typed config, with ``profiles.active`` applied when one is selected.
+
+    ``profile`` is an escape hatch for the two callers that need the *shipped* answer:
+    ``False`` (or ``None``) ignores the overlay entirely, a string forces a named one.
+    The default ``True`` honours ``profiles.active`` — which is ``null`` in the shipped
+    file, so the default behaviour is unchanged by construction.
+
+    ``profiles.active`` is the name of the profile that WAS APPLIED, so the unprofiled
+    answer carries ``None`` there even while a profile is selected in the file. It used to
+    carry the selected name regardless, which made the escape hatch lie in two places that
+    read the label rather than the values: ``build_riskgate_json`` stamped a rendered gate
+    config with a profile whose settings were not in it, and ``assert_profile_not_live``
+    refused a live render on the strength of a profile it had just been told to ignore.
+
+    The shipped configuration is validated FIRST and always, even when a profile is
+    active: a profile must not be able to hide a broken base, and the comparison in
+    :func:`assert_profile_preserves_protection` needs both sides anyway.
+    """
     p = Path(path) if path else DEFAULT_CONFIG
     try:
         raw = yaml.safe_load(p.read_text())
     except FileNotFoundError as e:
         raise ConfigError(f"config file not found: {p}") from e
     raw = _strip_legacy(raw, str(p))
-    try:
-        cfg = EarnConfig.model_validate(raw)
-    except ValidationError as e:
-        raise ConfigError(f"earn.yaml {_first_error(e)}") from e
-    cfg = _fill_derived(cfg)
-    _cross_validate(cfg, root)
-    return cfg
+    cfg = _build_config(raw, source=f"{p.name}", root=root)
+
+    if profile is False or profile is None:
+        if cfg.profiles.active is None:
+            return cfg
+        shipped = {**dict(raw), "profiles": {**(raw.get("profiles") or {}), "active": None}}
+        return _build_config(shipped, source=f"{p.name} (shipped, no overlay)", root=root)
+    name = profile if isinstance(profile, str) else cfg.profiles.active
+    if not name:
+        return cfg
+    overlay = load_profile_overlay(raw, name, root=root)
+    merged = _deep_merge(dict(raw), overlay)
+    # An applied profile always names itself on the config it produced, so every consumer
+    # — the renderer's provenance stamp, the console, a post-mortem reading a journal row —
+    # can answer "which configuration was this?" from the object it was handed. `profiles`
+    # is denied to overlays, so this can only ever be the name that was actually applied.
+    merged["profiles"] = {**(merged.get("profiles") or {}), "active": name}
+    profiled = _build_config(merged, source=f"{p.name} + profile {name!r}", root=root)
+    assert_profile_preserves_protection(cfg, profiled, name=name)
+    return profiled
 
 
 def config_schema() -> dict[str, Any]:
@@ -2741,15 +3052,23 @@ def config_schema() -> dict[str, Any]:
 __all__ = [
     "CONFIG_VERSION",
     "DEFAULT_CONFIG",
+    "PROFILE_ALLOWED_PREFIXES",
+    "PROFILE_DENIED_REASONS",
     "REPO_ROOT",
     "ConfigError",
     "ConfigWarning",
     "EarnConfig",
+    "FastSignals",
+    "Profiles",
     "TradingDefaults",
     "TradingOverrides",
     "TradingSleeves",
+    "assert_profile_preserves_protection",
+    "check_profile_overlay",
     "config_schema",
     "load_config",
+    "load_profile_overlay",
+    "profile_path",
     "max_weight_for",
     "resolver_args",
     "seed_for",

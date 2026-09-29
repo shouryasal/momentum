@@ -1,8 +1,21 @@
 """5-minute watchdog: container heartbeats (+restart with an hourly cap), data
-staleness flag, missed-run rerun-once, **autonomy liveness**, gate-breach and
-proposal-failure alerts, TCA threshold alert, mode/bless consistency, alert-outbox drain,
-KILL processing, and the 21:00 daily digest (silence is an alert — the optional
-healthchecks.io dead-man ping makes that silence machine-detected).
+staleness flag, missed-run rerun-once, **autonomy liveness**, **blocked trading**,
+**console supervision**, gate-breach and proposal-failure alerts, TCA threshold alert,
+mode/bless consistency, alert-outbox drain, KILL processing, and the 21:00 daily digest
+(silence is an alert — the optional healthchecks.io dead-man ping makes that silence
+machine-detected).
+
+:meth:`Healthcheck.check_trading_blocked` is the check this file was missing on
+2026-09-24, and it is the most important one here. Every other check in this module asks
+whether a *component* is healthy. That one asks whether the system has *done anything*,
+because on that night every component was healthy — containers up, jobs on schedule,
+crontab installed, liveness "alive" — while the risk gate refused 655 consecutive entries
+for fourteen hours behind a ``data_stale`` flag written with ``expires_at: null``. The gate
+was right. The silence was the failure. See its docstring for the chain.
+
+:meth:`Healthcheck.check_console_supervised` is the other half of that silence: the console
+process had died with nothing to restart it, so the one surface that could have shown a red
+state had no voice at all.
 
 The autonomy check (:meth:`Healthcheck.check_autonomy`) is the one that would have caught
 this host's real state: bots notionally switched on, ``ops/crontab`` rendered but never
@@ -10,7 +23,7 @@ installed, so nothing ever fired by itself and no page said so. It is a critical
 missed-run check now asks the same gate first — a job the operator has deliberately
 switched off is not a missed run.
 
-Three bugs this file used to have, all fixed here:
+Four bugs this file used to have, all fixed here:
 
 * **Reruns died inside the watchdog's own timeout.** A missed job was rerun with
   ``subprocess.run`` *inside* healthcheck's 240 s cron budget, so a 2700 s research run
@@ -25,6 +38,13 @@ Three bugs this file used to have, all fixed here:
 * **The first-cron-start cascade.** On a fresh install every schedule looked "missed" for
   its whole history. An ``install_utc`` floor in ``ops_state`` (stamped on first run)
   suppresses every fire time that predates installation.
+* **A staleness flag that could not expire.** ``data_stale`` was written with
+  ``expires_at: null``, so the only thing that could ever lift it was this process noticing
+  the data had recovered. On 2026-09-24 the flag latched at 06:00:03Z, this watchdog then
+  stopped running, and the gate refused 655 consecutive entries over 14 hours with no way
+  back without a human. The flag now carries an expiry (:data:`STALE_FLAG_TTL_MULT`) that is
+  re-armed on every tick the data is still stale, and ``runs/ingest.py`` re-evaluates it too
+  — see :meth:`Healthcheck.check_data_freshness`.
 
 Every dependency (bot APIs, subprocess runner, spawner, clock, Telegram) is injected so
 the whole thing is unit-testable; main() wires the real ones.
@@ -57,6 +77,34 @@ from ops.lib.freqtrade_api import BotApi
 #: hour (and, at a day boundary, the wrong day) for any operator not in the Gulf.
 #: :func:`display_tz` resolves the configured zone and falls back to this.
 GULF = timezone(timedelta(hours=4))
+
+#: ``data_stale`` expiry, as a multiple of ``ops.staleness_min``, floored by
+#: :data:`STALE_FLAG_TTL_FLOOR_MIN`. This watchdog runs every 5 minutes and re-arms the
+#: expiry on every tick the data is still stale, so the flag only actually lapses when
+#: *nothing* is re-arming it — i.e. when the watchdog itself has stopped. Letting it lapse
+#: then is the safe choice, not the reckless one: the risk gate reads the freshness sidecar
+#: age directly as well as the flag, so genuinely stale data still blocks every entry on
+#: that second, independent check. What the expiry removes is the failure mode where a dead
+#: watchdog leaves a permanent block nobody can lift.
+STALE_FLAG_TTL_MULT = 4
+STALE_FLAG_TTL_FLOOR_MIN = 60
+
+#: :meth:`Healthcheck.check_model_calls` thresholds. A model stage that answers nothing
+#: does not fail loudly — every one of them has an ``on_all_failed`` that degrades to a
+#: rule, holds the last value or skips, which is correct behaviour and completely silent.
+#: Measured on 2026-09-25: ``scan`` had produced no answer on 10 of its 14 runs (71%) and
+#: ``classify`` on 2 of 24, for two reasons that were pure misconfiguration — ``max_turns: 1``
+#: cannot serve a structured answer, and a $0.05 per-run cap is below what one screen costs.
+#: Nothing alerted, because each individual run "handled" its failure. A third of decisions
+#: silently replaced by fallbacks is not a healthy system, so this is where it gets said.
+MODEL_FAIL_WINDOW_H = 6
+MODEL_FAIL_MIN_RUNS = 4
+MODEL_FAIL_RATIO = 0.34
+#: A stage with NO successes is a different animal from a flaky one and must not have to
+#: wait for :data:`MODEL_FAIL_MIN_RUNS` samples. Run against the real journal on
+#: 2026-09-25, the ratio rule stayed silent about ``scan`` failing 3 of 3 — a total outage,
+#: one sample short of the minimum. Two consecutive dead runs and no success is enough.
+MODEL_FAIL_TOTAL_RUNS = 2
 
 # job -> (envwrap job name, module) for the rerun path. The lock name comes from
 # ops.gen_ops_files.JOBS so a rerun contends with the cron line, never races it.
@@ -141,6 +189,8 @@ class Healthcheck:
             text, severity, dedupe_key=key, ttl_min=60, conn=None))
         self.flags_path = self.root / cfg.paths.flags_file
         self.freshness_path = self.root / freshlib.FRESHNESS_REL
+        #: One :func:`ops.autonomy.liveness` per tick — see :meth:`liveness_view`.
+        self._liveness_view: dict | None = None
 
     @staticmethod
     def _real_runner(cmd: list[str], timeout: int = 600) -> int:
@@ -262,28 +312,145 @@ class Healthcheck:
         if seen:
             freshlib.record_many(seen, now=self.now, path=path)
 
-    def check_data_freshness(self) -> None:
-        from strategies.riskgate import data_age_minutes
+    def stale_flag_expiry(self) -> str:
+        """When a ``data_stale`` set now should lapse if nothing re-arms it."""
+        minutes = max(STALE_FLAG_TTL_MULT * int(self.cfg.ops.staleness_min),
+                      STALE_FLAG_TTL_FLOOR_MIN)
+        return _iso(self.now + timedelta(minutes=minutes))
 
-        self.refresh_freshness()
-        age = data_age_minutes(self.freshness_path, self.now)
+    def _raw_flag(self, name: str) -> dict | None:
+        """The flag as written, expired or not — ``active_flags`` hides expired ones."""
         try:
-            active = flagslib.active_flags(self.flags_path, self.now)
+            data = flagslib.read_flags(self.flags_path)
         except flagslib.FlagsError:
-            active = {}
-        stale_flag = "data_stale" in active
-        if age > self.cfg.ops.staleness_min:
-            if not stale_flag:
-                flagslib.set_flag(self.flags_path, "data_stale", severity="block_entries",
-                                  reason=f"data age {age:.0f} min", set_by="healthcheck",
-                                  now=self.now, audit_conn=self.kdb)
+            return None
+        flag = data.get("flags", {}).get(name)
+        return flag if isinstance(flag, dict) else None
+
+    def check_data_freshness(self) -> None:
+        """Block entries while the PRICE feeds are stale; say so, loudly, and recover alone.
+
+        Three things are deliberately separate here:
+
+        * **What blocks.** ``freshlib.data_age_minutes`` measures the blocking bucket of the
+          sidecar only — candles and the order book. A stale news or funding feed used to sit
+          in the same clock, which meant a quiet RSS wire could stop trading; it now degrades
+          instead (below). The block itself is unchanged and stays fail-closed: a missing or
+          corrupt sidecar is ``inf`` and blocks.
+        * **What alerts.** Every tick the data is stale re-sends the critical (``tg`` dedupes
+          on the key) and re-arms the flag's expiry, so the flag stays live exactly as long
+          as something is watching.
+        * **What lifts it.** An expiry, so a dead watchdog cannot leave a permanent block,
+          plus ``runs.ingest`` re-evaluating the same condition — two independent processes
+          able to recover, instead of the single point of failure that cost 14 hours.
+
+        The flag is cleared for any automated setter, not just this one, because ingest can
+        set the same latch; ``flags.clear_flag`` still refuses to clear a human's flag.
+        """
+        self.refresh_freshness()
+        age = freshlib.data_age_minutes(self.freshness_path, self.now)
+        limit = float(self.cfg.ops.staleness_min)
+        raw = self._raw_flag("data_stale")
+        latched = bool(raw and raw.get("active"))
+        if age > limit:
+            # Re-set unconditionally while stale: that both (re-)raises the block and pushes
+            # the expiry out, so the flag never lapses under a live watchdog.
+            flagslib.set_flag(self.flags_path, "data_stale", severity="block_entries",
+                              reason=f"data age {age:.0f} min", set_by="healthcheck",
+                              expires_at=self.stale_flag_expiry(),
+                              now=self.now, audit_conn=self.kdb)
             self.sender(f"market data stale ({age:.0f} min) — entries blocked",
                         "critical", key="data_stale", ttl=60)
             self._incident("stale_data", f"age {age:.0f} min")
-        elif stale_flag and active["data_stale"].get("set_by") == "healthcheck":
+        elif latched and raw.get("set_by") != "human":
             flagslib.clear_flag(self.flags_path, "data_stale", by="healthcheck",
                                 now=self.now, audit_conn=self.kdb)
             self.sender("market data fresh again — entries unblocked", "info")
+        self.check_feed_degradation()
+
+    def check_feed_degradation(self) -> None:
+        """Advisory feeds going quiet: report it, never block on it.
+
+        News and funding inform a decision; they do not price one. A stale advisory feed is
+        therefore a warning and a recorded incident — so the silence that let 14 hours pass
+        unnoticed is broken — and explicitly *not* a flag. The crisis audit's point was that
+        news had no business in the gate's staleness clock, not that a dead news feed is
+        fine; this is where it gets said out loud.
+        """
+        stale = freshlib.degraded(float(self.cfg.ops.staleness_min),
+                                  path=self.freshness_path, now=self.now)
+        names = ",".join(sorted(stale))
+        if names != (self._state("degraded_feeds") or ""):
+            # One incident per CHANGE, not per tick. A news wire can be legitimately quiet
+            # for a whole weekend; at twelve rows an hour that would bury every real incident
+            # under its own noise, which is the same disease as a permanently red panel.
+            self._set_state("degraded_feeds", names)
+            if names:
+                self._incident("feed_degraded", names)
+        if not stale:
+            return
+        detail = ", ".join(f"{name} {'never' if age == float('inf') else f'{age:.0f}m'}"
+                           for name, age in sorted(stale.items()))
+        self.sender(f"advisory feed stale ({detail}) — decisions degraded, entries NOT blocked",
+                    "warn", key="feed_degraded", ttl=180)
+
+    # ------------------------------------------------------------- model stages
+
+    def check_model_calls(self) -> None:
+        """A model stage that keeps answering nothing, while every fallback hides it.
+
+        This is :meth:`check_trading_blocked`'s disease in a different organ. Each task has
+        an ``on_all_failed`` — ``skip_screen``, ``rule``, ``hold_last`` — so a failed run is
+        *handled*, journaled, and invisible. Run it a thousand times and the system quietly
+        stops using its models at all while every dashboard stays green.
+
+        The measure is per RUN, not per call: a run that fell down the chain and got its
+        answer from the second entry succeeded, and must not be counted against anything. A
+        run with no ``ok`` row anywhere produced nothing, and that is the only thing worth
+        alerting on. The alert names the task, the rate, and the most common error, because
+        "the models are unhealthy" is not something an operator can act on — whereas
+        ``scan: 10 of 14 runs answered nothing — Reached maximum budget ($0.05)`` is a fix.
+        """
+        since = _iso(self.now - timedelta(hours=MODEL_FAIL_WINDOW_H))
+        rows = self.jdb.execute(
+            """
+            SELECT task,
+                   COUNT(*)                          AS runs,
+                   SUM(CASE WHEN got = 0 THEN 1 END) AS dead
+            FROM (SELECT task, run_ref, SUM(status = 'ok') AS got
+                  FROM llm_calls WHERE ts_utc >= ? GROUP BY task, run_ref)
+            GROUP BY task
+            """, (since,)).fetchall()
+        broken: list[str] = []
+        for row in rows:
+            runs, dead = int(row["runs"]), int(row["dead"] or 0)
+            total = dead == runs and runs >= MODEL_FAIL_TOTAL_RUNS
+            partial = runs >= MODEL_FAIL_MIN_RUNS and dead / runs >= MODEL_FAIL_RATIO
+            if not (total or partial):
+                continue
+            err = self.jdb.execute(
+                "SELECT error, COUNT(*) n FROM llm_calls WHERE task = ? AND ts_utc >= ?"
+                " AND status != 'ok' AND error IS NOT NULL AND error != ''"
+                " GROUP BY error ORDER BY n DESC LIMIT 1", (row["task"], since)).fetchone()
+            reason = (err["error"] if err else "no error recorded").strip().splitlines()[0]
+            count = ("EVERY ONE of its " + str(runs) if total else f"{dead} of {runs}")
+            broken.append(f"  {row['task']}: {count} runs answered nothing"
+                          f" — {reason[:120]}")
+        names = ",".join(sorted(line.strip().split(":")[0] for line in broken))
+        if names != (self._state("model_stages_failing") or ""):
+            # One incident per change of set, for the same reason check_feed_degradation
+            # does it: a row every five minutes buries the incident log it is written to.
+            self._set_state("model_stages_failing", names)
+            if names:
+                self._incident("model_stage_failing", names)
+        if not broken:
+            return
+        self.sender(
+            "\n".join([f"MODEL STAGES ARE FAILING SILENTLY (last {MODEL_FAIL_WINDOW_H}h) — "
+                       "each one degraded to its fallback and said nothing:", *broken,
+                       "  these runs did not use a model at all; they used the rule "
+                       "behind it."]),
+            "warn", key="model_stage_failing", ttl=120)
 
     # ------------------------------------------------------------- missed runs
 
@@ -411,15 +578,22 @@ class Healthcheck:
         """Is ``job`` allowed to run at the current autonomy level?
 
         A job the autonomy gate is deliberately skipping has no missing artifact to alert
-        about — it has a *reason*, recorded in its heartbeat. Alerting on it, or reraning
+        about — it has a *reason*, recorded in its heartbeat. Alerting on it, or rerunning
         it detached, would be the watchdog fighting the operator's own setting.
 
-        A failure to answer is treated as "permitted", so a broken gate can never silence
-        the missed-run alarm as well.
+        **Silence needs proof.** This may only suppress an alarm when the autonomy state is
+        *trusted* — signature verified, or corroborated by its receipt. A missing or
+        untrusted state means "nobody has ever set a level on this host", which is the
+        pre-autonomy world and every checkout that has not run ``ops.autonomy start`` yet;
+        there the missed-run alarm must behave exactly as it always did. Failing to answer
+        at all is treated the same way, so a broken gate can never silence it either.
         """
         try:
             from ops import autonomy
+            from ops.lib import autonomy_state
 
+            if not autonomy_state.load().trusted:
+                return True
             return autonomy.check(job, cfg=self.cfg, root=self.state_root,
                                   now=self.now).allowed
         except Exception:  # noqa: BLE001 - never let this module break the watchdog
@@ -490,17 +664,152 @@ class Healthcheck:
         It never engages the kill switch. There is nothing to stop: the problem is that
         nothing is running.
         """
-        from ops import autonomy
-
-        view = autonomy.liveness(self.cfg, root=self.state_root, now=self.now)
+        view = self.liveness_view()
         verdict = view["verdict"]
-        if verdict in ("alive", "off"):
+        # `blocked` has its own, far more specific alert in check_trading_blocked; repeating
+        # it here as "AUTONOMY BLOCKED" would be two alarms for one fact.
+        if verdict in ("alive", "off", "blocked"):
             return
         severity = "critical" if verdict in ("not_scheduled", "never_ran") else "warn"
         self.sender(f"AUTONOMY {verdict.upper()}: {view['headline']}", severity,
                     key=f"autonomy_{verdict}", ttl=60)
         if verdict in ("not_scheduled", "never_ran"):
             self._incident("autonomy_not_running", view["headline"])
+
+    # ------------------------------------------------------------- blocked trading
+
+    def liveness_view(self) -> dict:
+        """One :func:`ops.autonomy.liveness` call per tick, shared by the checks below.
+
+        It shells out to ``crontab -l`` and ``systemctl``, so computing it twice for two
+        checks that ask about the same tick would be two different answers about one moment.
+        """
+        if getattr(self, "_liveness_view", None) is None:
+            from ops import autonomy
+
+            self._liveness_view = autonomy.liveness(
+                self.cfg, root=self.state_root, now=self.now, jdb=self.jdb, kdb=self.kdb,
+                flags_path=self.flags_path, freshness_path=self.freshness_path)
+        return self._liveness_view
+
+    def check_trading_blocked(self) -> None:
+        """**The alert the overnight failure did not have.**
+
+        What happened on 2026-09-24 is the whole specification. PEPE/USDT has no perpetual
+        contract; Binance answered 400 for ``premiumIndex?symbol=PEPEUSDT``; one symbol's
+        400 failed the entire funding phase; the phase failure stopped ingest; freshness
+        froze at 06:20; :meth:`check_data_freshness` raised a ``data_stale`` flag that was
+        written with ``expires_at: null`` and so could never lapse; and the risk gate then
+        refused 655 consecutive entries while the strategy went on finding signals every
+        single cycle. The gate was right to refuse. Everything else was wrong, and the worst
+        of it was that **nothing said anything** for fourteen hours.
+
+        The flag's missing expiry is fixed elsewhere in this file (:data:`STALE_FLAG_TTL_MULT`)
+        and this check does not depend on that fix, or on any other. A wedge can now also be
+        a flag that *does* expire and keeps being re-armed, a reason nobody has invented yet,
+        or no flag at all — the measure is the refusals and the clock, not the mechanism.
+
+        This check alerts on the *class*, not the instance: any state in which the system has
+        been unable to act for hours. It does not know what ``data_stale`` is. It knows that
+        entries are being refused, for how long, by what, and what would ever lift it — so
+        the next wedge, with a flag nobody has invented yet, fires the same alarm.
+
+        Three things make it hard to ignore rather than merely present:
+
+        * it is ``critical`` with a one-hour TTL, so it repeats until it is fixed rather than
+          being deduped into silence for a day;
+        * it says what will clear the block, because "trading is blocked" without that is a
+          message an operator cannot act on at 3am;
+        * it says out loud when the loop is simultaneously reporting itself **healthy**,
+          which is the property that made this invisible. An alert that reads
+          "and the loop calls itself alive" is the one an operator cannot dismiss as noise.
+
+        Severity never depends on *which* flag is up: a wedge is a wedge.
+        """
+        from ops import autonomy
+
+        view = self.liveness_view()
+        raw = view.get("acting")
+        if raw is None:
+            # The measurement itself failed. That is not "fine" — it is the one state where
+            # this check cannot see, and it has to say so rather than pass quietly.
+            self.sender(
+                "cannot measure whether the system is trading: "
+                f"{view.get('acting_error')}", "warn", key="acting_unmeasurable", ttl=6 * 60)
+            return
+        if raw["verdict"] != "not_trading":
+            if self._state("trading_blocked_since"):
+                self.kdb.execute("DELETE FROM ops_state WHERE key='trading_blocked_since'")
+                self.kdb.commit()
+                self.sender(f"Trading is possible again — {raw['headline']}", "info")
+            return
+
+        lines = [f"TRADING IS BLOCKED — {raw['headline']}",
+                 f"  blocked: {raw['blocked_what'] or 'new entries'}"]
+        # The reason for the silence happening *now*, with the window's dominant reason only
+        # as a fallback. They differ on a host that was wedged yesterday and is fine today,
+        # and naming the older one there would send an operator to a fixed problem.
+        if raw.get("current_reason"):
+            lines.append(f"  why: {raw['current_reason']} ({raw['current_words']}) — "
+                         f"{raw['refused_since_last_allowed']} refused since the last entry "
+                         f"got through, {raw['entries_refused']} in the last "
+                         f"{raw['window_hours']}h")
+        elif raw["refusals"]:
+            top = raw["refusals"][0]
+            lines.append(f"  why: {top['reason']} ({top['words']}) — "
+                         f"{top['count']} refused in the last {raw['window_hours']}h")
+        if raw["blocked_since"]:
+            lines.append(f"  since: {raw['blocked_since']}"
+                         f" ({autonomy._humanise_minutes(raw['blocked_minutes'])} ago)")
+        if raw["last_allowed_entry"]:
+            lines.append(f"  last entry actually allowed: {raw['last_allowed_entry']}")
+        else:
+            lines.append("  no entry has ever been allowed on this host")
+        for flag in raw["blocking_flags"]:
+            forever = "" if flag["can_expire"] else " — IT HAS NO EXPIRY"
+            lines.append(f"  flag {flag['name']}: set by {flag['set_by']} at "
+                         f"{flag['set_at']} ({flag['reason']}){forever}")
+        lines.append(f"  clears when: {raw['clears_when'] or 'unknown'}")
+        stale = [s["source"] for s in raw["sources"] if s["stale"]]
+        if stale:
+            lines.append(f"  stale sources: {', '.join(stale)}")
+        for phase in raw["phases"]:
+            if phase["failing"]:
+                lines.append(
+                    f"  ingest phase {phase['phase']} failing since "
+                    f"{phase['last_fail']} (last success {phase['last_ok'] or 'never'}): "
+                    f"{phase['last_error']}")
+        # The sentence that makes this undismissable. `blocked` is now the liveness verdict
+        # itself, so a view still calling the loop alive means something else is wrong too.
+        if view.get("verdict") in ("alive", "late", "failing"):
+            lines.append(f"  AND THE LOOP CALLS ITSELF '{view['verdict'].upper()}': every "
+                         "job is running on schedule and achieving nothing.")
+        self.sender("\n".join(lines), "critical", key="trading_blocked", ttl=60)
+        if not self._state("trading_blocked_since"):
+            self._set_state("trading_blocked_since", raw["blocked_since"] or _iso(self.now))
+            self._incident("trading_blocked", raw["headline"])
+
+    def check_console_supervised(self) -> None:
+        """Will anything restart the console when it dies? On the night in question, no.
+
+        The console is the only surface that says "trading is blocked" in words a person
+        reads, so it is the one process whose death is itself an incident. ``unknown`` is
+        never an alarm — a watchdog that shouts when it cannot see gets muted — but a
+        definite "nothing supervises it" is a warning that repeats twice a day, and a unit
+        that is enabled and *not running* is a critical, because that is a console that has
+        already fallen over and stayed down.
+        """
+        view = self.liveness_view()
+        sup = view.get("supervisor") or {}
+        verdict = sup.get("verdict")
+        if verdict == "unsupervised":
+            self.sender(f"{sup['note']} Install it (no root needed): "
+                        f"{sup.get('install_hint')}", "warn",
+                        key="console_unsupervised", ttl=12 * 60)
+        elif verdict == "failing":
+            self.sender(f"CONSOLE DOWN — {sup['note']}", "critical",
+                        key="console_down", ttl=30)
+            self._incident("console_down", str(sup.get("note")))
 
     # ------------------------------------------------------------- gate + proposals
 
@@ -801,7 +1110,10 @@ class Healthcheck:
     def run(self) -> int:
         for check in (self.check_containers, self.check_data_freshness,
                       self.check_missed_runs, self.check_autonomy,
-                      self.check_gate_and_proposals,
+                      # After check_data_freshness so a flag this tick just set is counted,
+                      # and after check_autonomy so both read one liveness_view().
+                      self.check_trading_blocked, self.check_console_supervised,
+                      self.check_gate_and_proposals, self.check_model_calls,
                       self.check_tca_threshold, self.check_mode_consistency,
                       self.check_config_bless, self.check_kill, self.daily_summary,
                       self.drain_alert_outbox, self.ping_deadman):

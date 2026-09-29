@@ -169,7 +169,12 @@ def _one_turn(provider: Any, ctx: _Ctx, label: str) -> tuple[bool, str]:
         model=ModelRef(alias=alias, provider="claude", model_id=model_id, tier=2),
         output_schema={"type": "object", "properties": {"ok": {"type": "boolean"}},
                        "required": ["ok"]},
-        tools_profile="none", max_turns=1, max_usd=0.05,
+        # max_turns=2 because one turn is never enough: the model answers in the first and
+        # the SDK spends a second emitting the structured result, so max_turns=1 failed
+        # EVERY probe with "Reached maximum number of turns (1)" — a working credential
+        # reported as broken. max_usd is runaway safety, not a throttle; at 0.05 the probe
+        # aborted with "Reached maximum budget" instead.
+        tools_profile="none", max_turns=2, max_usd=0.50,
         deadline_s=min(ctx.timeout_s * 3, 60.0),
     )
     result = provider.run(req)

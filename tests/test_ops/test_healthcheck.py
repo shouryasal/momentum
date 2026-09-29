@@ -116,6 +116,208 @@ def test_freshness_sidecar_is_republished_from_the_db(hc):
     assert freshlib.data_age_minutes(h.freshness_path, NOW) == 0.0
 
 
+# ------------------------------------------- 2026-09-24: a latch with no way back
+#
+# `data_stale` was written with `expires_at: null`. The only thing that could lift it was
+# this watchdog noticing recovery — and this watchdog had stopped running. The flag latched
+# at 06:00:03Z and the gate refused 655 consecutive entries for 14 hours.
+#
+# The block itself is correct and every test here keeps it. What is fixed is that it can now
+# end without a human: an expiry that a live watchdog re-arms, and a clear path open to the
+# other automated process that can set it.
+
+
+class TestTheStalenessLatchCanEnd:
+    def test_the_flag_carries_an_expiry(self, hc, cfg):
+        h, *_, root = hc
+        h.check_data_freshness()                     # empty DB -> inf -> stale
+        flag = flagslib.read_flags(root / cfg.paths.flags_file)["flags"]["data_stale"]
+        assert flag["expires_at"], "a flag with expires_at=null can never lift itself"
+        expiry = datetime.fromisoformat(flag["expires_at"].replace("Z", "+00:00"))
+        # long enough that a live watchdog (every 5 min) always re-arms it first...
+        assert expiry - NOW >= timedelta(minutes=cfg.ops.staleness_min)
+        # ...and >= the documented floor, so a small staleness_min cannot make it flappy
+        assert expiry - NOW >= timedelta(minutes=60)
+
+    def test_a_dead_watchdog_no_longer_leaves_a_permanent_block(self, hc, cfg):
+        """Nothing re-arms the flag, so it lapses — and the gate's own age check takes over.
+
+        This is the 14-hour failure. The flag lapsing is safe because the risk gate reads the
+        freshness sidecar age directly as well as the flag; that second, independent check is
+        what keeps genuinely stale data blocked (``test_..._still_blocks_on_its_own`` below).
+        """
+        h, *_, root = hc
+        flags_path = root / cfg.paths.flags_file
+        h.check_data_freshness()
+        assert flagslib.entries_blocked(flags_path, "BTC/USDT", now=NOW)[0]
+        much_later = NOW + timedelta(hours=14)       # watchdog dead the whole time
+        blocked, why = flagslib.entries_blocked(flags_path, "BTC/USDT", now=much_later)
+        assert not blocked, f"the flag is still latched 14h later ({why!r})"
+
+    def test_stale_data_still_blocks_on_its_own_after_the_flag_lapses(self, hc, cfg):
+        """The safety net the expiry leans on. Must hold, or the expiry is reckless."""
+        import math
+
+        h, *_, root = hc
+        h.check_data_freshness()
+        much_later = NOW + timedelta(hours=14)
+        assert freshlib.data_age_minutes(h.freshness_path, much_later) == math.inf
+        assert freshlib.data_age_minutes(h.freshness_path,
+                                         much_later) > cfg.ops.staleness_min
+
+    def test_the_expiry_is_pushed_out_while_the_data_is_still_stale(self, hc, cfg):
+        h, *_, root = hc
+        flags_path = root / cfg.paths.flags_file
+        h.check_data_freshness()
+        first = flagslib.read_flags(flags_path)["flags"]["data_stale"]["expires_at"]
+        h.now = NOW + timedelta(minutes=5)           # the next watchdog tick
+        h.check_data_freshness()
+        second = flagslib.read_flags(flags_path)["flags"]["data_stale"]["expires_at"]
+        assert second > first, "a live watchdog must keep the block armed"
+        assert flagslib.entries_blocked(flags_path, "BTC/USDT", now=h.now)[0]
+
+    def test_the_flag_is_cleared_whichever_automated_process_set_it(self, hc, cfg, ):
+        """Ingest can set the same latch; healthcheck must still be able to lift it."""
+        h, sent, _, _, _, kdb, root = hc
+        flags_path = root / cfg.paths.flags_file
+        flagslib.set_flag(flags_path, "data_stale", severity="block_entries",
+                          reason="stale", set_by="ingest", now=NOW)
+        _fresh_data(kdb)
+        h.check_data_freshness()
+        assert not flagslib.entries_blocked(flags_path, "BTC/USDT", now=NOW)[0]
+
+    def test_a_human_flag_is_never_lifted_automatically(self, hc, cfg):
+        h, *_, kdb, root = hc
+        flags_path = root / cfg.paths.flags_file
+        flagslib.set_flag(flags_path, "data_stale", severity="block_entries",
+                          reason="I am looking into it", set_by="human", now=NOW)
+        _fresh_data(kdb)
+        h.check_data_freshness()
+        assert flagslib.entries_blocked(flags_path, "BTC/USDT", now=NOW)[0]
+
+
+class TestAdvisoryFeedsDegradeInsteadOfBlocking:
+    def test_a_stale_news_feed_warns_and_does_not_block(self, hc, cfg):
+        """News had no business in the gate's staleness clock — but silence is not the fix."""
+        h, sent, _, _, _, kdb, root = hc
+        flags_path = root / cfg.paths.flags_file
+        flagslib.touch(flags_path, now=NOW)          # an existing, clean flags file
+        _fresh_data(kdb)
+        freshlib.record_many({freshlib.SOURCE_NEWS: NOW - timedelta(days=14)},
+                             now=NOW, path=h.freshness_path)
+        h.check_data_freshness()
+        blocked, why = flagslib.entries_blocked(flags_path, "BTC/USDT", now=NOW)
+        assert not blocked, f"a two-week-old news item blocked every entry ({why!r})"
+        assert h.cfg.ops.staleness_min >= freshlib.data_age_minutes(h.freshness_path, NOW)
+        warns = [t for s, t, _ in sent if s == "warn" and "advisory feed stale" in t]
+        assert warns, "an advisory feed went quiet and nobody said anything"
+        assert "entries NOT blocked" in warns[0]
+        assert h.kdb.execute("SELECT COUNT(*) FROM ops_incidents WHERE kind='feed_degraded'"
+                             ).fetchone()[0] == 1
+
+    def test_one_incident_per_change_not_one_per_tick(self, hc):
+        """A news wire can be quiet all weekend; 12 incident rows an hour would bury the real ones."""
+        h, sent, _, _, _, kdb, root = hc
+        _fresh_data(kdb)
+        freshlib.record_many({freshlib.SOURCE_NEWS: NOW - timedelta(days=14)},
+                             now=NOW, path=h.freshness_path)
+        for tick in range(6):                       # half an hour of watchdog ticks
+            h.now = NOW + timedelta(minutes=5 * tick)
+            h.check_data_freshness()
+        n = kdb.execute("SELECT COUNT(*) FROM ops_incidents WHERE kind='feed_degraded'"
+                        ).fetchone()[0]
+        assert n == 1, f"six ticks of the same outage opened {n} incidents"
+        # a SECOND feed joining the outage is a change, and does get its own row
+        freshlib.record_many({freshlib.SOURCE_FUNDING: NOW - timedelta(days=1)},
+                             now=h.now, path=h.freshness_path)
+        h.check_data_freshness()
+        assert kdb.execute("SELECT COUNT(*) FROM ops_incidents WHERE kind='feed_degraded'"
+                           ).fetchone()[0] == 2
+
+    def test_fresh_advisory_feeds_say_nothing(self, hc):
+        h, sent, _, _, _, kdb, root = hc
+        _fresh_data(kdb)
+        freshlib.record_many({freshlib.SOURCE_NEWS: NOW - timedelta(minutes=3),
+                              freshlib.SOURCE_FUNDING: NOW},
+                             now=NOW, path=h.freshness_path)
+        h.check_data_freshness()
+        assert not [t for s, t, _ in sent if "advisory feed stale" in t]
+
+
+class TestModelStagesCannotFailInSilence:
+    """The 2026-09-25 finding, written as the scenario that produced it.
+
+    ``scan`` had answered nothing on 10 of its 14 runs — ``max_turns: 1`` cannot serve a
+    structured answer and a $0.05 per-run cap is below the cost of one screen — and because
+    every failure was "handled" by ``on_all_failed: skip_screen``, no alert existed to fire.
+    """
+
+    @staticmethod
+    def _call(jdb, task, run_ref, *, ok: bool, ts, error=""):
+        jdb.execute(
+            "INSERT INTO llm_calls(ts_utc, task, run_ref, stage, provider, model,"
+            " auth_source, attempt, status, error, latency_ms, input_tokens,"
+            " output_tokens, cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ts.strftime("%Y-%m-%dT%H:%M:%SZ"), task, run_ref, task,
+             "claude:subscription", "claude-haiku-4-5-20251001", "none", 0,
+             "ok" if ok else "error", "" if ok else error, 900, 10, 20, 0.02))
+        jdb.commit()
+
+    def test_a_task_that_answers_nothing_is_alerted_with_its_reason(self, hc):
+        h, sent, _, _, _, _, _ = hc
+        for i in range(10):
+            self._call(h.jdb, "scan", f"scan-{i}", ok=False, ts=NOW - timedelta(minutes=i),
+                       error="Claude Code returned an error result: "
+                             "Reached maximum budget ($0.05) (exit code: 1)")
+        for i in range(10, 14):
+            self._call(h.jdb, "scan", f"scan-{i}", ok=True, ts=NOW - timedelta(minutes=i))
+        h.check_model_calls()
+        warns = [t for s, t, _ in sent if s == "warn" and "MODEL STAGES ARE FAILING" in t]
+        assert warns, "a task answered nothing 10 times in 14 and nobody said anything"
+        assert "scan: 10 of 14 runs answered nothing" in warns[0]
+        assert "Reached maximum budget" in warns[0], "an alert without the cause is not actionable"
+        assert h.kdb.execute(
+            "SELECT COUNT(*) FROM ops_incidents WHERE kind='model_stage_failing'"
+        ).fetchone()[0] == 1
+
+    def test_a_run_that_fell_down_the_chain_and_succeeded_is_not_a_failure(self, hc):
+        """The whole point of a chain is that entry one may fail. That is not an outage."""
+        h, sent, _, _, _, _, _ = hc
+        for i in range(8):
+            self._call(h.jdb, "classify", f"c-{i}", ok=False, ts=NOW - timedelta(minutes=i),
+                       error="ollama timed out after 90.0s")
+            self._call(h.jdb, "classify", f"c-{i}", ok=True, ts=NOW - timedelta(minutes=i))
+        h.check_model_calls()
+        assert not [t for s, t, _ in sent if "MODEL STAGES ARE FAILING" in t], \
+            "a healthy chain fallback was reported as a failing stage"
+
+    def test_a_total_outage_alerts_without_waiting_for_a_fourth_sample(self, hc):
+        """Run against the real journal, the ratio rule missed `scan` failing 3 of 3."""
+        h, sent, _, _, _, _, _ = hc
+        for i in range(3):
+            self._call(h.jdb, "scan", f"only-{i}", ok=False, ts=NOW - timedelta(minutes=i),
+                       error="ollama timed out after 90.0s")
+        h.check_model_calls()
+        warns = [t for s, t, _ in sent if "MODEL STAGES ARE FAILING" in t]
+        assert warns, "a stage that has never once succeeded was not reported"
+        assert "EVERY ONE of its 3 runs" in warns[0]
+
+    def test_one_dead_run_on_its_own_is_not_an_outage(self, hc):
+        """A single failure is noise; this alert must not cry wolf on the first one."""
+        h, sent, _, _, _, _, _ = hc
+        self._call(h.jdb, "scan", "one", ok=False, ts=NOW, error="transient")
+        h.check_model_calls()
+        assert not [t for s, t, _ in sent if "MODEL STAGES ARE FAILING" in t]
+
+    def test_calls_older_than_the_window_do_not_keep_an_old_outage_alive(self, hc):
+        h, sent, _, _, _, _, _ = hc
+        old = NOW - timedelta(hours=9)
+        for i in range(12):
+            self._call(h.jdb, "scan", f"old-{i}", ok=False, ts=old, error="boom")
+        h.check_model_calls()
+        assert not [t for s, t, _ in sent if "MODEL STAGES ARE FAILING" in t]
+
+
 # --------------------------------------------------------------------------- containers
 
 

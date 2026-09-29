@@ -62,7 +62,7 @@ def post_preview(
     except PreviewError as e:
         raise http_error(_STATUS.get(e.code, 500), e.code, e.message, e.detail) from e
     audit_event(actor=actor.actor, action="preview.run", target=sleeve,
-                detail={"run_id": result.get("run_id"), "cost_usd": result.get("cost_usd"),
+                detail={"preview_id": result.get("preview_id"), "cost_usd": result.get("cost_usd"),
                         "ok": result.get("ok")},
                 result="ok" if result.get("ok") else "error")
     return result

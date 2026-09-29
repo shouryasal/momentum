@@ -44,6 +44,7 @@ import { sleeveFullName } from '@/lib/plain';
 import { routeBlurb } from '@/routes';
 
 import type { PortfolioPayload } from '../portfolio/api';
+import { ControlCard } from './ControlCard';
 import { HomeDetail, HOME_DETAIL_SUBTITLE, HOME_DETAIL_TITLE, LEGACY_DETAIL_KINDS } from './HomeDetail';
 import { MoneyBadge } from './MoneyBadge';
 import { HOME_SLEEVES, overviewApi, overviewKeys } from './api';
@@ -190,6 +191,19 @@ export default function OverviewPage() {
     <MasterDetail detail={detailPane}>
       <Stack gap="md" data-testid="overview-page">
         <PageIntro title="Home" blurb={routeBlurb('overview')} />
+
+        {/*
+          0: is it running by itself, and how much does it do alone?
+
+          Home was four things and the brief said so. The owner then asked a question this
+          screen could not answer — "is there a button on the UI that starts the autonomous
+          running?" — and the honest answer was no: every run so far had been typed by a
+          human and nothing here said so. A number is meaningless if you do not know whether
+          anything is producing it, so the control goes above the money rather than beside
+          it. It is one block, not five: the liveness line, both bots with whose money and
+          how much each does by itself, and the preview.
+        */}
+        <ControlCard />
 
         {/* 1 and 2: what went in, what it is worth, and the one BTC comparison. */}
         <Group align="stretch" gap="md" grow wrap="wrap" data-testid="money-cards">

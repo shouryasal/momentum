@@ -283,7 +283,17 @@ def test_ordinary_bash_is_allowed(cmd):
     "python3 -m pytest .claude/skills/post-mortem/tests",
     # every other way of running code this hook cannot read
     "python -c \"open('config/earn.yaml','w').write('x')\"",
-    "/home/shourya/earn-dev/.venv/bin/python -c 'import os'",
+    # PATH-QUALIFIED interpreters, which were allowed until 2026-09-25: the anchor demanded
+    # whitespace or a line start right before the name, so one `/` in front of it skipped the
+    # whole interpreter check. No developer's absolute home path here — that is what the
+    # parameter used to be, and it made this a test of one machine rather than of the rule.
+    "./.venv/bin/python -c 'import os'",
+    "/usr/local/bin/python3.12 -c 'import os'",
+    "~/earn/.venv/bin/python -c 'import os'",
+    "./venv/bin/python -m pytest .claude/skills/post-mortem/tests",
+    "/bin/sh -c 'rm ops/killdir/KILL'",
+    "/opt/node/bin/node -e 'require(\"fs\")'",
+    "/usr/bin/perl -e 'print 1'",
     "sh -c 'rm ops/killdir/KILL'",
     "perl -pi -e 's/a/b/' strategies/riskgate.py",
     "gawk -i inplace '{print}' config/earn.yaml",

@@ -21,7 +21,6 @@ from pathlib import Path
 from evals import snapshot as snapshotlib
 from ops import db
 from ops.config import REPO_ROOT, EarnConfig, load_config
-from ops.lib import autopilot
 from ops.lib import kill as killlib
 from ops.lib import locks, paths, tg
 from runs import build_prompt, decision_core, router
@@ -406,13 +405,34 @@ class ResearchRun:
             self.journal("decide", "killed")
             return 0
         # "How much it does by itself" is a second, independent switch from "whose money".
-        # Below `proposing` this run must not spend a model call or write a plan: the
-        # operator has said the system may watch but not decide. This is the only place a
-        # decision can start — cron, a trigger spawn and the console's "Run now" all land
-        # here — so one check makes the level true for every path.
-        if not autopilot.may_decide(autopilot.load(
-                path=autopilot.autopilot_path({"EARN_STATE_ROOT": str(self.state_root)}))):
-            self.journal("decide", "paused")
+        # Below the level `research_run` requires, this run must not spend a model call or
+        # write a plan: the operator has said the system may watch but not decide.
+        #
+        # The cron line already asks the same question
+        # (``python -m ops.autonomy run research_run -- …``), so on the scheduled path this
+        # is a second, identical answer. It is here for the paths cron does not cover, and
+        # they are the ones that matter: ``console.services.decisions_service.run_research_now``
+        # (the console's "Run research now" button and every signal-triggered spawn) builds
+        # its command WITHOUT that wrapper, while its docstring claims to use "the same
+        # command cron and the planner use". Until this check came back, pressing that button
+        # at autonomy `observing` produced a real proposal and a real bill.
+        #
+        # `runs/discovery.py: permit()` does exactly this, for exactly this reason. An
+        # unreadable gate means NO.
+        try:
+            from ops import autonomy
+
+            permit = autonomy.check("research_run", cfg=self.cfg, root=self.root)
+        except Exception as exc:  # noqa: BLE001 - an unreadable gate means NO, not yes
+            # `skipped`, not `paused`: the `runs.status` CHECK constraint does not accept
+            # `paused` (the deleted code wrote it and would have raised here), and
+            # `runs/discovery.py` already journals this same refusal as `skipped`.
+            self.journal("decide", "skipped", error=f"autonomy gate unreadable: {exc}")
+            return 0
+        if not permit.allowed:
+            self.journal("decide", "skipped",
+                         error=f"autonomy: {permit.reason} (needs {permit.required}, "
+                               f"highest level is {permit.level})")
             return 0
         target = self.root / self.cfg.paths.proposals_dir / proposal_filename(slot, self.now)
         if target.exists():

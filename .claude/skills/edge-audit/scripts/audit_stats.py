@@ -9,10 +9,13 @@ only answers whether a claim is supportable at the sample size that actually exi
     python3 audit_stats.py hurdle  --baseline 0.83 --trials 200 --years 9.1
     python3 audit_stats.py power   --sharpe-a 1.14 --sharpe-b 0.83
     python3 audit_stats.py trials  --add "ma lookback sweep 50..250"
+    python3 audit_stats.py trials  --add "nightly screen: vol target 0.25" --screen
     python3 audit_stats.py --self-test
 
 `labels`, `cv` and `hurdle` write their result into `knowledge/state/edge_audit.json`; the
-trial counter lives in `knowledge/state/trial_counter.json` and only ever grows.
+trial counter lives in `knowledge/state/trial_counter.json`, every total in it only ever
+grows, and the hurdle's N is the OPEN selection family rather than the all-time total —
+see `trial_counter` and `../references/method.md` §3.
 
 Definitions and the measured numbers behind the thresholds: `../references/method.md`.
 """
@@ -110,30 +113,72 @@ def cv_report(pair: str, timeframe: str, *, splits: int, embargo_pct: float,
 # --------------------------------------------------------------------------- hurdle
 
 
-def trial_counter(add: str | None = None) -> dict:
-    """The persistent count of search trials. It only ever grows.
+def trial_counter(add: str | None = None, *, selection: bool = True) -> dict:
+    """The persistent count of search trials. Every total in it only ever grows.
 
-    A hurdle that resets when somebody forgets is a hurdle that only ever falls, so the
-    counter is stored beside the state and `max()`-ed on every write.
+    The file is shared with `runs/discovery.py: TrialCounter`, which owns the shape and the
+    reasoning; `../references/method.md` §3 states the rule. Three numbers, because they
+    answer different questions:
+
+    * `n_trials` — every measurement ever. The audit trail. Never a hurdle on its own.
+    * `n_selection_trials` — all-time trials that *could* have produced a change.
+    * `family.n_selection_trials` — **the hurdle's N**: the selection trials spent since
+      the last change of the loop's own that the gate merged.
+
+    `selection=False` records a screening trial — a measurement made by a pass that cannot
+    propose. It still lands in `n_trials` for ever; it does not raise the hurdle, because
+    the loop never took a maximum over trials no change could come out of.
     """
     path = _state_path("trial_counter.json")
     state = read_json(path, {"n_trials": 0, "history": []})
+    n = max(int(state.get("n_trials", 0)), 0)
+    state["n_trials"] = n
+    # A file written before the split has no selection count: read it as equal to n_trials,
+    # so the migration can only leave the hurdle where it was or above it.
+    state["n_selection_trials"] = (max(int(state.get("n_selection_trials") or 0), 0)
+                                   if "n_selection_trials" in state else n)
+    fam = state.get("family")
+    if not isinstance(fam, dict):
+        fam = {"opened_utc": None, "closed_by": None,
+               "n_selection_trials": state["n_selection_trials"]}
+    fam["n_selection_trials"] = max(int(fam.get("n_selection_trials") or 0), 0)
+    state["family"] = fam
     if add:
-        state["n_trials"] = max(int(state.get("n_trials", 0)) + 1, 1)
-        state.setdefault("history", []).append({"utc": iso(utcnow()), "what": add})
+        state["n_trials"] = max(state["n_trials"] + 1, 1)
+        if selection:
+            state["n_selection_trials"] = max(state["n_selection_trials"] + 1, 1)
+            fam["n_selection_trials"] += 1
+            if not fam.get("opened_utc"):
+                fam["opened_utc"] = iso(utcnow())
+        state.setdefault("history", []).append(
+            {"utc": iso(utcnow()), "what": add, "selection": bool(selection),
+             "hypothesis": "", "pass": "edge-audit"})
         write_json_atomic(path, state)
     return state
 
 
-def hurdle_report(baseline: float, trials: int, years: float) -> dict:
+def hurdle_trials(state: dict | None = None) -> int:
+    """The N the hurdle is formed from: the OPEN selection family, never the all-time total."""
+    st = state if state is not None else trial_counter()
+    return int((st.get("family") or {}).get("n_selection_trials") or 0)
+
+
+def hurdle_report(baseline: float, trials: int, years: float,
+                  state: dict | None = None) -> dict:
     expected = smp.expected_max_sharpe(trials, years)
+    st = state or {}
     return {
         "baseline_sharpe": round(float(baseline), 4),
         "n_trials": int(trials), "years": float(years),
+        "n_selection_trials_all_time": int(st.get("n_selection_trials") or trials),
+        "n_measurements_all_time": int(st.get("n_trials") or trials),
         "expected_max_sharpe": round(float(expected), 4),
         "deflated_hurdle": round(float(baseline + expected), 4),
-        "note": ("a candidate must beat the deflated hurdle, not the baseline; "
-                 "the hurdle is never lowered and n_trials never decreases"),
+        "note": ("a candidate must beat the deflated hurdle, not the baseline. N is the "
+                 "OPEN selection family — the trials that could actually have produced a "
+                 "change, spent since the last merged change of the loop's own. No total "
+                 "in the counter ever decreases, and a family closes only behind a change "
+                 "the gate recomputed and merged"),
     }
 
 
@@ -179,7 +224,10 @@ def check_claim(claim: dict) -> list[str]:
     if not claim.get("embargo_bars"):
         problems.append("CV score has no embargo — serial correlation leaks across the boundary")
     if "sharpe" in claim:
-        trials = int(claim.get("n_trials") or 0)
+        # A claim written under the split accounting says which N it means. Prefer it: the
+        # hurdle is formed from the trials that could actually have produced a change, and
+        # scoring such a claim against its all-time measurement count over-corrects it.
+        trials = int(claim.get("n_selection_trials") or claim.get("n_trials") or 0)
         years = float(claim.get("years") or 0)
         if trials < 1 or years <= 0:
             problems.append("no trial count or sample length, so no deflated hurdle can be formed")
@@ -280,6 +328,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("trials", help="read or increment the persistent trial counter")
     p.add_argument("--add", help="describe the search that was run")
+    p.add_argument("--screen", action="store_true",
+                   help="this search could not have produced a change (a screening pass): "
+                        "count it in n_trials for ever, but not in the hurdle's N")
 
     p = sub.add_parser("check", help="may this claim be reported at all?")
     p.add_argument("--claim", required=True, help="path to a JSON claim")
@@ -303,11 +354,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"verdict={out['verdict']} total_leaks={out['total_leaks']} "
               f"EFFECTIVE_N={out['effective_n']} per_fold={out['effective_n_per_fold']}")
     elif args.cmd == "hurdle":
-        trials = args.trials if args.trials is not None else int(
-            trial_counter().get("n_trials", 0)) or 1
-        out = hurdle_report(args.baseline, trials, args.years)
+        state = trial_counter()
+        trials = args.trials if args.trials is not None else hurdle_trials(state) or 1
+        out = hurdle_report(args.baseline, trials, args.years, state)
         _merge_state("hurdle", out)
-        print(f"n_trials={out['n_trials']} expected_max_sharpe={out['expected_max_sharpe']} "
+        print(f"n_trials={out['n_trials']} (open selection family; "
+              f"{out['n_selection_trials_all_time']} selection trials all time, "
+              f"{out['n_measurements_all_time']} measurements all time) "
+              f"expected_max_sharpe={out['expected_max_sharpe']} "
               f"deflated_hurdle={out['deflated_hurdle']}")
     elif args.cmd == "power":
         out = power_report(args.sharpe_a, args.sharpe_b, args.power)
@@ -315,8 +369,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"years_to_detect={out['years_to_detect_two_sided']} (two-sided), "
               f"{out['years_to_detect_one_sided']} (one-sided)")
     elif args.cmd == "trials":
-        out = trial_counter(args.add)
-        print(f"n_trials={out.get('n_trials', 0)}")
+        out = trial_counter(args.add, selection=not args.screen)
+        print(f"hurdle_N={hurdle_trials(out)} "
+              f"n_selection_trials={out.get('n_selection_trials', 0)} "
+              f"n_trials={out.get('n_trials', 0)}")
     elif args.cmd == "check":
         claim = read_json(Path(args.claim), {})
         problems = check_claim(claim)

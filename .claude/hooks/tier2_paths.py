@@ -94,14 +94,27 @@ CONSOLE_PATTERNS = (re.compile(r"127\.0\.0\.1"), re.compile(r"\blocalhost\b"),
 #: its payload from the command line, from stdin or from a heredoc is by definition code
 #: the model wrote itself. ``pytest`` is on the list for the same reason — a skill's
 #: ``tests/**`` is tier 1, i.e. model-writable, and pytest imports it.
+#: A command word, bare OR PATH-QUALIFIED. Every interpreter below anchors on this rather
+#: than on whitespace alone, because ``./.venv/bin/python -c '…'`` is exactly as opaque as
+#: ``python -c '…'`` — and until 2026-09-25 it was ALLOWED. The old anchor demanded a line
+#: start or a separator immediately before the interpreter name, so a single ``/`` in front
+#: of it defeated the entire interpreter check: ``./.venv/bin/python -c``,
+#: ``~/x/.venv/bin/python -c`` and any absolute path ran arbitrary model-written code in an
+#: automated run. The one path-qualified case that *did* get refused, ``/usr/bin/python3 -c``,
+#: was refused by :func:`bash_touches_tier2` mistaking the interpreter for a tier-2 file —
+#: an accident of the path rules, not a control. Fail closed: a prefix that over-matches
+#: costs an automated run a command it has an allowlisted script for anyway.
+_CMD = r"(?:^|[\s;&|(])(?:[^\s;&|()<>]*/)?"
+
 INTERPRETER_PATTERNS = (
-    re.compile(r"(?:^|[\s;&|(])(?:python|py)[0-9.]*\s+(?:-[BEISOuvx]+\s+)*"
+    re.compile(_CMD + r"(?:python|py)[0-9.]*\s+(?:-[BEISOuvx]+\s+)*"
                r"(?:-[A-Za-z]*c|-)(?=[\s'\"])"),
-    re.compile(r"(?:^|[\s;&|(])(?:sh|bash|zsh|dash|ksh)\s+-[A-Za-z]*c(?=[\s'\"])"),
-    re.compile(r"(?:^|[\s;&|(])(?:perl|ruby|php|lua|osascript)\b"),
-    re.compile(r"(?:^|[\s;&|(])node\s+-[A-Za-z]*e(?=[\s'\"])"),
-    re.compile(r"(?:^|[\s;&|(])(?:pytest|py\.test|tox|nox)\b"),
-    re.compile(r"(?:^|[\s;&|(])(?:python|py)[0-9.]*\s+-m\s+(?:pytest|py_compile|code)\b"),
+    re.compile(_CMD + r"(?:sh|bash|zsh|dash|ksh)\s+-[A-Za-z]*c(?=[\s'\"])"),
+    re.compile(_CMD + r"(?:perl|ruby|php|lua|osascript)\b"),
+    re.compile(_CMD + r"node\s+-[A-Za-z]*e(?=[\s'\"])"),
+    re.compile(_CMD + r"(?:pytest|py\.test|tox|nox)\b"),
+    re.compile(_CMD + r"(?:python|py)[0-9.]*\s+-m\s+(?:pytest|py_compile|code)\b"),
+    # Shell builtins: they have no path form, so these keep the plain anchor.
     re.compile(r"(?:^|[\s;&|(])(?:eval|exec|source)\s"),
     re.compile(r"(?:^|[\s;&|(])\.\s+\S"),
 )

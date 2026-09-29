@@ -1,0 +1,134 @@
+# config/profiles/fast-test.yaml — the SHORT-HORIZON PLUMBING PROFILE.
+#
+# Select it with ONE key: `profiles.active: fast-test` in config/earn.yaml, then
+# `python -m ops.gen_freqtrade_config`. Switch back by setting that key to null and
+# regenerating. config/earn.yaml itself is never edited either way, so the shipped system
+# is always one key away and always exactly what it was.
+#
+# WHAT IT IS FOR: exercising every code path — entry sizing, the gate's 26 checks, limit
+# pricing, fills, the take-profit ladder, ROI, the trailing stop, the fixed stop, the
+# re-entry cooldown, the rebalance band, the journal and the local watcher — inside a
+# ten-hour observation window, instead of the shipped strategy's roughly one trade a month
+# (4h candles, a 200-day MA trend filter, a 24h re-entry cooldown and no profit taking at
+# all). It is a PLUMBING TEST, not an edge test. The 1h EMA/breakout rule below is a
+# conventional intraday trend entry; it is not one of the measured findings in
+# docs/design/wide-universe.md and is not claimed to be one. Measured over the last 30 days
+# with costs on it LOSES about 1.3% — see the evidence block at the bottom.
+#
+# WHAT IT DOES NOT CHANGE, by construction and not by promise: risk, bounds, universe,
+# modes, autonomy and exchange are not in ops.config.PROFILE_ALLOWED_PREFIXES, so a key
+# under any of them is refused BY NAME at load time; and
+# ops.config.assert_profile_preserves_protection then re-derives both configurations and
+# refuses this file unless those sections are identical to the shipped ones and no
+# per-trade stop got looser. Every cap, every gate check, every daily counter, the
+# stoploss guard, the daily and monthly stops and the whole kill-switch path are
+# untouched. ops.gen_freqtrade_config.assert_profile_not_live additionally refuses to
+# render a runtime for real money while any profile is active: TEST and DEMO only.
+#
+# THE UNIVERSE IS ALREADY WIDE and is not touched. The whitelist is the point-in-time
+# snapshot's tradeable tier — 31 pairs on 2026-09-23: 2 core, 6 major, 23 satellite. What
+# changes is that SleeveFast treats every whitelisted pair symmetrically instead of sizing
+# BTC/ETH from base_weights and rotating four satellites, so majors are in play too. The
+# 30-day backtest traded 20 distinct pairs.
+
+trading:
+  # 1h, not 15m: the candle store and `ingest.timeframes` carry 1h/4h/1d, so 1h is the
+  # fastest cadence that can be BACKTESTED on data we already have. Claiming 15m would be
+  # claiming candles nobody has downloaded.
+  timeframe: "1h"
+  # The base class derives startup from bounds['sleeve_a.trend.ma_days'].max + 20 days,
+  # which at 1h is 7,680 candles for indicators whose longest lookback is 18. 1,500 is
+  # ~62 days: exactly enough for the 60 DAILY observations the gate's beta and correlation
+  # caps were measured on, which SleeveFast resamples out of this same 1h frame.
+  startup_candles: 1500
+  defaults:
+    # Marketable limit orders both ways. Still LIMIT orders — risk.market_entries_allowed
+    # stays false — but priced across the spread, so a ten-hour test produces fills instead
+    # of a queue of cancelled bids. This costs the spread; the backtest's --fee carries
+    # 5 bps of slippage per side from config/backtest.yaml to say so.
+    entry_price: { side: other, offset_bps: 3 }
+    exit_price:  { side: other, offset_bps: -3 }
+    reprice_on_timeout: true
+    stoploss:
+      # 0.06 is TIGHTER than the shipped 0.10 (a profile may only tighten) and was tuned
+      # UP from 0.04: at 0.04 the 30 days took 18 losing stop exits, and three losing stops
+      # inside 48h is exactly what risk.stoploss_guard locks the book for 24 hours over —
+      # which would have silenced the observation window. At 0.06 it took 4.
+      fixed_pct: 0.06
+      # Activation at +1.5% is deliberate, not timid: freqtrade's StoplossGuard counts only
+      # stop exits with close_profit < 0, so a trailing stop that fires in profit does not
+      # arm the 24h lock, while a hair-trigger one would.
+      trailing: { enabled: true, activate_profit_pct: 0.015, distance_pct: 0.008,
+                  only_offset_reached: true }
+      reentry_cooldown_hours: 2   # was 24: short enough that the cooldown is both observed
+                                  # AND released inside a ten-hour window.
+    # PROFIT BOOKING ON. The shipped config books none at all — roi_table {"0": 10.0} means
+    # "never", and the ladder is empty — and that is the single biggest hole this test
+    # closes. Two ladder rungs first, then ROI, decaying with time in trade.
+    take_profit:
+      roi_table: { "0": 0.020, "90": 0.010, "300": 0.005 }
+      ladder:
+        - { at_profit_pct: 0.006, sell_fraction: 0.30 }
+        - { at_profit_pct: 0.012, sell_fraction: 0.40 }
+    rebalance: { min_interval_hours: 1 }   # was 4: matches the 1h candle.
+    fast:
+      ema_fast: 6                  # tuned from 9/21: 3.07 trades/day vs 3.03, and a
+      ema_slow: 18                 # materially better net (-1.3% vs -2.3% over the 30 days)
+      breakout_lookback: 3
+      atr_period: 14
+      min_atr_pct: 0.0015
+      max_atr_pct: 0.070
+      target_pct_nav: 0.05         # an INTENT; the gate clamps it to the tier cap (0.05 for
+                                   # a satellite, 0.15 major, 0.40/0.30 for BTC/ETH)
+      exit_on_trend_loss: true
+      risk_window_days: 60
+      # THE MOST IMPORTANT NUMBER IN THIS FILE for a ten-hour test. The rule produces 40-220
+      # entry candidates a Gulf day across the 31 pairs against a risk.max_trades_per_day of
+      # 4, so without spacing the whole day's allowance is spent in the first candles and
+      # 47% of ten-hour windows contained no entry at all. Spending the same 4 evenly took
+      # that to 11%. It can only ever delay an entry, never authorise one.
+      min_entry_spacing_min: 300
+  sleeves:
+    # SleeveA's `dca: {enabled: false}` override is about SleeveA's calendar DCA and means
+    # nothing here. Both sleeves run identical rules, so the two bots differ only in mode —
+    # which is what makes one of them a control.
+    a: {}
+    b: {}
+
+execution:
+  rebalance_band: 0.02   # was 0.05; bounds.min. A tighter band means a partially filled
+                         # entry is topped up instead of left short.
+
+sleeves:
+  # Both bots run the fast rules, so the DEMO bot and the SIMULATED control are the same
+  # system on the same signals. Note what this parks for the duration: SleeveB stops
+  # trading proposals, so the proposal path is exercised by the research jobs and the
+  # journal rather than by a fill. Deleting the `b:` line below is the one-line variant
+  # that keeps SleeveB on proposals.
+  a: { strategy: SleeveFast }
+  b: { strategy: SleeveFast }
+
+# ---------------------------------------------------------------------------------------
+# MEASURED, 20260824-20260923, 1h, all 31 whitelisted pairs, sleeve A, 10,000 USDT,
+# --enable-protections, fee 15 bps per side (10 fee + 5 slippage, config/backtest.yaml):
+#
+#   92 trades in 30 days = 3.07 per Gulf day; at the gate's 4/day cap on 16 of 30 days;
+#   20 distinct pairs traded; median hold 4h, p90 15h; mean stake 478 USDT (4.8% of NAV).
+#   net -1.29%   max drawdown 1.46%   fees paid 1.35% of starting balance
+#   exits: roi 49 (100% win, +2.59%) | exit_signal 27 (0% win, -2.80%)
+#          trailing_stop_loss 12 (50% win, +0.10%) | stop_loss 4 (0% win, -1.17%)
+#   rolling 10h windows (702 of them): entries mean 1.38, P(none) 11.1%;
+#          ORDER FILLS mean 2.88, median 3, p10 1, p90 5, P(none) 6.0%.
+#
+# THREE THINGS THIS PROFILE RUNS INTO, all of them the risk limits working as designed:
+#   * risk.max_trades_per_day = 4 is the ceiling, not the signal rule. Supply exceeds it
+#     ~15x. Tuning the rule harder buys nothing.
+#   * risk.max_fee_pct_per_month = 0.01 is exhausted in about 22 days at this cadence
+#     (September's fees reached 97.2 of the 100 USDT budget by the 20th) and the gate then
+#     refuses every entry until the Gulf month rolls over. The last 3 days of the backtest
+#     are silent for exactly that reason. In ten hours the fee spend is ~0.019% of NAV, so
+#     it cannot bind on the test — but this profile must not be left running.
+#   * risk.min_notional_usdt = 25 with target_pct_nav 0.05 needs NAV >= 500 to place an
+#     entry at all, and NAV >= ~1,700 for the 30% first rung to be a sendable order. Below
+#     that the rung is burned as `below_min_exit` and the position leaves via ROI instead.
+# ---------------------------------------------------------------------------------------

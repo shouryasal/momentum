@@ -19,11 +19,11 @@ ENVWRAP = REPO_ROOT / "ops" / "envwrap.sh"
 
 #: Every job envwrap knows. A new job must be added here deliberately.
 ALL_JOBS = ("research", "review", "daily_review", "maintenance", "signals", "scanner",
-            "ingest", "healthcheck", "digest", "telegram", "nav", "nav_tick", "reconcile",
-            "preflight", "backup", "console", "tca", "excel")
+            "ingest", "discovery", "healthcheck", "digest", "telegram", "nav", "nav_tick",
+            "reconcile", "preflight", "backup", "console", "tca", "excel")
 
 MODEL_JOBS = ("research", "review", "daily_review", "maintenance", "signals", "scanner",
-              "ingest")
+              "ingest", "discovery")
 
 BASE_ENV = """\
 TELEGRAM_BOT_TOKEN=tg-token

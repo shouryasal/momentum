@@ -12,6 +12,24 @@ Everything is idempotent (INSERT OR REPLACE / OR IGNORE keyed on natural keys;
 re-fetching from the last stored candle corrects the previously in-progress one). HTTP is
 injectable (httpx client) so tests use MockTransport.
 
+Which failures are allowed to stop the job (:data:`TRADING_PHASES`)
+------------------------------------------------------------------
+Isolation was only half the guarantee. Every phase already ran, but ``run()`` returned 1
+whenever *any* of them failed, and on 2026-09-24 that turned one missing perpetual contract
+into a dead data pipeline: ``PEPEUSDT`` has no perp, ``fapi/v1/premiumIndex`` answers 400,
+the funding phase raised on the 16th of 31 pairs, and the non-zero exit took the whole
+ingest job down with it. Candles then froze for 14 hours, the staleness flag latched, and
+the gate — correctly — refused 655 entries in a row.
+
+So the exit code now reflects only the phases a trade is *priced* off: candles and the order
+book. A funding, news or classifier outage is recorded, alerted on and reported as
+``degraded``, and ingest still exits 0, because candles kept arriving and the gate has no
+business blocking on a funding feed. Phases that matter failing still exits non-zero.
+
+And a missing perpetual is no longer a failure at all: :meth:`perp_pairs` discovers coverage
+from ``fapi/v1/exchangeInfo``, caches it for a day, and funding is queried only for the pairs
+that have a contract. The rest are recorded as ``no perp`` — a known, stated gap.
+
 Config, not code (spec §3): the ingested timeframes, the cold-start window and both news
 keyword tables come from ``earn.yaml``; the module constants below are only the fallback
 for a file that predates them. The classifier prompt is the tier-1 file named by
@@ -25,9 +43,11 @@ import json
 import re
 import sqlite3
 import sys
+from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 import feedparser
 import httpx
@@ -36,6 +56,7 @@ import yaml
 from ops import db
 from ops.config import REPO_ROOT, EarnConfig, load_config
 from ops.lib import flags as flagslib
+from ops.lib import freshness as freshlib
 from ops.lib import locks
 
 SPOT = "https://api.binance.com"
@@ -43,6 +64,46 @@ FUT = "https://fapi.binance.com"
 TFS = ("1h", "4h", "1d")
 TF_MS = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
 COLD_START_DAYS = 7  # bulk history comes from ops/bootstrap_data.sh, not the API loop
+
+#: The phases whose failure is allowed to fail the job. Deliberately only the two feeds a
+#: trade is priced off — see the module docstring. Keep this in step with
+#: ``ops.lib.freshness.BLOCKING_SOURCES``: the same two feeds block entries in the gate.
+TRADING_PHASES = ("candles", "books")
+
+#: ``_phase`` statuses, written to ``ingest_runs.status``.
+#:
+#: ``degraded`` is a phase that ran but could NOT collect something it should have — some
+#: symbols failed, a sub-feed was down, a cached map went stale. It is never fatal, but it is
+#: a fault: ``ops/autonomy.py`` folds every non-``ok`` status into "this phase is failing",
+#: which is right for a fault and wrong for a known gap. A pair with no perpetual contract is
+#: a *known gap*, so the funding phase stays ``ok`` and merely says so in ``detail`` —
+#: otherwise PEPE having no perp would light up the ops panel for ever, and a panel that
+#: cries wolf permanently is how the real 14-hour outage went unnoticed in the first place.
+STATUS_OK = "ok"
+STATUS_DEGRADED = "degraded"
+STATUS_ERROR = "error"
+
+
+class RateBudgetExceeded(RuntimeError):
+    """The IP weight guard tripped. Distinct type so per-symbol tolerance cannot eat it.
+
+    Skipping a symbol that 400s or 500s is right; "skipping" a rate-limit breach and asking
+    for the next thirty symbols anyway is how a soft guard becomes a ban. This must abort the
+    phase, so every ``except`` that forgives one symbol re-raises it.
+    """
+
+
+class PhaseNote(NamedTuple):
+    """A phase's own verdict on itself: the status to record and why.
+
+    Returning one is how a phase says "I finished, and here is what you should know" —
+    ``PhaseNote(STATUS_OK, "no perp: PEPE/USDT")`` for a stated gap,
+    ``PhaseNote(STATUS_DEGRADED, ...)`` for something that genuinely did not work.
+    Returning ``None`` means a clean, unremarkable pass.
+    """
+
+    status: str
+    detail: str
 
 EVENT_KEYWORDS = {
     "etf": ["etf"], "hack": ["hack", "exploit", "stolen", "breach"],
@@ -107,6 +168,33 @@ class Ingest:
     def event_keywords(self) -> dict[str, list[str]]:
         return dict(self.cfg.news.event_keywords or EVENT_KEYWORDS)
 
+    @staticmethod
+    def _kw_hit(title_l: str, keywords: Iterable[str]) -> bool:
+        """Does any keyword appear in the title AS A WORD?
+
+        Substring matching made the rule labels barely better than a coin flip. Measured on
+        88 real headlines (2026-09-25): the keyword rule was **51% correct**, and 41 of its
+        43 errors were false positives from one keyword — ``lawsuit: [sec, …]`` matching
+        "seconds", "secretary", "Security" and "securities". A false ``lawsuit`` is not free:
+        `news_event` lists it as a fast-path event class, and `on_all_failed: rule` makes
+        this the FLOOR the classify task falls back to, so the cheapest tier failing silently
+        handed the gate a label that was wrong more often than not.
+
+        The rule is "starts a word, and ends one after at most a plain inflection". A bare
+        ``\\b…\\b`` was the obvious fix and the wrong one: it stops "seconds" but it also stops
+        ``hack`` matching "hacked" and ``delist`` matching "delisted", which is most of what
+        these stems are for. ``(?:s|es|ed|ing|d)?`` keeps the stems working while still
+        refusing "seconds", "secretary", "securities" and "Security" for ``sec``, because
+        none of those continues with an inflection and then a boundary.
+
+        Kept in code rather than as a curated keyword list, because the list lives in
+        ``config/earn.yaml`` — blessed, tier 2 — and any keyword added later deserves the
+        same protection without a config change. Multi-word keywords still work: the
+        boundary applies to the whole phrase.
+        """
+        return any(re.search(rf"\b{re.escape(k.strip())}(?:s|es|ed|ing|d)?\b", title_l)
+                   for k in keywords if k and k.strip())
+
     @property
     def asset_keywords(self) -> dict[str, list[str]]:
         return dict(self.cfg.news.asset_keywords or ASSET_KEYWORDS)
@@ -126,7 +214,7 @@ class Ingest:
         r.raise_for_status()
         used = r.headers.get("x-mbx-used-weight-1m")
         if used and int(used) > 3000:  # ~50% of the 6000/min IP budget
-            raise RuntimeError(f"rate budget guard: used-weight-1m={used}")
+            raise RateBudgetExceeded(f"rate budget guard: used-weight-1m={used}")
         return r
 
     def _record(self, phase: str, status: str, detail: str = "") -> None:
@@ -139,19 +227,41 @@ class Ingest:
         self.kdb.commit()
 
     def _phase(self, name: str, fn) -> bool:
+        """Run one phase in isolation. Returns False only on an outright failure.
+
+        A phase may return a :class:`PhaseNote` to record its own status and detail — ``ok``
+        with a note for a known gap, ``degraded`` for something that genuinely did not work.
+        Degraded is not a failure: it is recorded, printed, and left to :meth:`run` to decide
+        whether it matters. Freshness is re-stamped either way, so a phase that failed cannot
+        leave the sidecar claiming data it never wrote.
+        """
         try:
-            fn()
-            self._record(name, "ok")
+            note = fn()
+            if isinstance(note, PhaseNote):
+                self._record(name, note.status, note.detail)
+                if note.status != STATUS_OK:
+                    print(f"ingest phase {name} {note.status}: {note.detail}",
+                          file=sys.stderr)
+            elif isinstance(note, str) and note:
+                self._record(name, STATUS_DEGRADED, note)
+                print(f"ingest phase {name} degraded: {note}", file=sys.stderr)
+            else:
+                self._record(name, STATUS_OK)
             ok = True
         except Exception as e:  # noqa: BLE001 — phases are isolated by design
-            self._record(name, "error", str(e))
+            self._record(name, STATUS_ERROR, str(e))
             print(f"ingest phase {name} failed: {e}", file=sys.stderr)
             ok = False
         self.write_freshness()
         return ok
 
     def freshness_sources(self) -> dict[str, datetime]:
-        """The newest timestamp of every source the gate's staleness check watches."""
+        """The newest timestamp of every source the freshness sidecar tracks.
+
+        Blocking and advisory feeds both — ``ops.lib.freshness`` routes each name into the
+        right bucket, so ``news`` and ``funding`` land under ``advisory`` and cannot block an
+        entry, while candles and books land under ``sources`` and can.
+        """
         out: dict[str, datetime] = {}
         book = self.kdb.execute(
             "SELECT MAX(captured_at) AS t FROM book_snapshots").fetchone()
@@ -170,6 +280,16 @@ class Ingest:
         if news and news["t"]:
             try:
                 out["news"] = datetime.fromisoformat(str(news["t"]).replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        # The funding feed gets its own stamp so an outage is *visible* rather than silent.
+        # It is advisory: it degrades a decision, it never stops one.
+        funding = self.kdb.execute(
+            "SELECT MAX(updated_at) AS t FROM funding_current").fetchone()
+        if funding and funding["t"]:
+            try:
+                out[freshlib.SOURCE_FUNDING] = datetime.fromisoformat(
+                    str(funding["t"]).replace("Z", "+00:00"))
             except ValueError:
                 pass
         return out
@@ -253,10 +373,66 @@ class Ingest:
 
     # ------------------------------------------------------------------ funding + OI
 
-    def refresh_funding(self) -> None:
-        for pair in self.cfg.universe.pairs:
+    def perp_pairs(self) -> tuple[list[str], list[str], str]:
+        """``(pairs with a perpetual, pairs without one, discovery source)``.
+
+        Which of our pairs are even *on* the futures venue is a fact to look up, not to
+        assume. ``fapi/v1/exchangeInfo`` is the authority; the answer is cached for a day
+        under ``knowledge/cache/derivatives/perp-map.json`` so this costs one request a day
+        rather than one a cycle. The lookup goes through :attr:`http`, so MockTransport
+        drives it in tests exactly like every other endpoint here.
+
+        Discovery being down yields every pair as covered — the caller then tries them all
+        and relies on its own per-symbol tolerance. Guessing "no perps" from an outage would
+        silently stop collecting funding for the whole book.
+        """
+        from runs.features import derivatives as deriv
+
+        def fetch(url: str):
+            return self._get(url, {}).json()
+
+        return deriv.perp_coverage(list(self.cfg.universe.pairs), fetch=fetch,
+                                   now=self.now, root=self.root / "knowledge" / "cache"
+                                   / "derivatives", reraise=(RateBudgetExceeded,))
+
+    def refresh_funding(self) -> PhaseNote | None:
+        """Funding, funding history and open interest for every pair that has a perpetual.
+
+        Two independent reasons this phase can no longer be killed by one symbol:
+
+        1. Pairs with no perpetual contract are never queried. They are a known, recorded
+           gap ("no perp: PEPE/USDT"), not an error — ``premiumIndex`` answering 400 for a
+           spot-only pair is the endpoint working correctly.
+        2. A symbol that fails anyway — delisted between discovery and now, a transient
+           5xx — is counted and skipped. The phase reports itself degraded and the other
+           thirty pairs are still written and committed.
+
+        The two are reported differently on purpose. A pair with no perp is ``ok`` with a
+        note: nothing failed, there is simply nothing there to collect, and a permanent
+        "failing" badge for a permanent fact trains everyone to ignore the panel. A symbol
+        that should have worked and did not is ``degraded``. Raises only when *every* covered
+        pair failed, which is a real futures-API outage rather than a symbol problem.
+        """
+        have, missing, source = self.perp_pairs()
+        known_gaps: list[str] = []
+        faults: list[str] = []
+        if missing:
+            known_gaps.append("no perp: " + ",".join(missing))
+        if source in ("stale-cache", "unavailable"):
+            faults.append(f"perp map {source}")
+        failed: list[str] = []
+        for pair in have:
             s = sym(pair)
-            prem = self._get(f"{FUT}/fapi/v1/premiumIndex", {"symbol": s}).json()
+            try:
+                prem = self._get(f"{FUT}/fapi/v1/premiumIndex", {"symbol": s}).json()
+                hist = self._get(f"{FUT}/fapi/v1/fundingRate",
+                                 {"symbol": s, "limit": 16}).json()
+                oi = self._get(f"{FUT}/fapi/v1/openInterest", {"symbol": s}).json()
+            except RateBudgetExceeded:
+                raise                # never forgiven: stop asking, do not walk the book
+            except Exception as e:  # noqa: BLE001 — one symbol must not cost the other 30
+                failed.append(f"{s}:{type(e).__name__}")
+                continue
             self.kdb.execute(
                 "INSERT OR REPLACE INTO funding_current(symbol, last_rate,"
                 " next_funding_time, mark_price, updated_at) VALUES (?,?,?,?,?)",
@@ -264,20 +440,26 @@ class Ingest:
                  prem.get("nextFundingTime"), float(prem.get("markPrice", 0)),
                  now_iso(self.now)),
             )
-            hist = self._get(f"{FUT}/fapi/v1/fundingRate", {"symbol": s, "limit": 16}).json()
             self.kdb.executemany(
                 "INSERT OR REPLACE INTO funding(symbol, funding_time, rate, mark_price)"
                 " VALUES (?,?,?,?)",
                 [(s, h["fundingTime"], float(h["fundingRate"]),
                   float(h.get("markPrice") or 0)) for h in hist],
             )
-            oi = self._get(f"{FUT}/fapi/v1/openInterest", {"symbol": s}).json()
             self.kdb.execute(
                 "INSERT OR REPLACE INTO open_interest(symbol, ts_utc, oi, oi_value_usdt)"
                 " VALUES (?,?,?,?)",
                 (s, now_iso(self.now), float(oi.get("openInterest", 0)), None),
             )
         self.kdb.commit()
+        if have and len(failed) == len(have):
+            raise RuntimeError(f"funding: every covered symbol failed ({failed[0]} ...)")
+        if failed:
+            faults.append(f"failed {len(failed)}/{len(have)}: " + ",".join(failed[:5]))
+        detail = "; ".join(known_gaps + faults)
+        if not detail:
+            return None
+        return PhaseNote(STATUS_DEGRADED if faults else STATUS_OK, detail)
 
     # ------------------------------------------------------------------ news
 
@@ -377,7 +559,11 @@ class Ingest:
             choice = router.resolve("classify",
                                     models_cfg=router.load_models_cfg(
                                         self.root / "config" / "models.yaml"))
-            res = self.stage_runner(prompt, model=choice.model, max_turns=1,
+            # `choice.max_turns`, never a literal: a structured answer costs one turn to
+            # write and one for the SDK to emit, so a hardcoded 1 here failed every call it
+            # made while `config/models.yaml` said 2. The config is the only place this lives.
+            res = self.stage_runner(prompt, model=choice.model,
+                                    max_turns=choice.max_turns,
                                     max_usd=choice.max_usd, effort=choice.effort,
                                     allowed_tools=[], output_schema=schema,
                                     deadline_s=120)
@@ -413,7 +599,7 @@ class Ingest:
         pending = []
         for r in rows:
             title_l = r["title"].lower()
-            if any(k in title_l for kws in events.values() for k in kws):
+            if any(self._kw_hit(title_l, kws) for kws in events.values()):
                 continue  # the keyword rule will label it in corroborate
             pending.append({"url_hash": r["url_hash"], "title": r["title"]})
         if not pending:
@@ -453,9 +639,9 @@ class Ingest:
                 event = r["event_class"]
             else:
                 assets = sorted(a for a, kws in asset_kw.items()
-                                if any(k in title_l for k in kws))
+                                if self._kw_hit(title_l, kws))
                 event = next((ev for ev, kws in event_kw.items()
-                              if any(k in title_l for k in kws)), None)
+                              if self._kw_hit(title_l, kws)), None)
             ts = r["published_at"] or r["fetched_at"]
             bucket = ts[:11] + ("00" if ts[11:13] < "12" else "12")
             tokens = frozenset(re.findall(r"[a-z]{4,}", title_l))
@@ -573,8 +759,55 @@ class Ingest:
 
     # ------------------------------------------------------------------ main
 
+    def reconcile_staleness_flag(self) -> PhaseNote | None:
+        """Clear ``data_stale`` once the price feeds are fresh again — without a human.
+
+        The flag is set by ``ops/healthcheck.py``, and until now only healthcheck could
+        clear it. That made recovery depend on a single process staying alive: on 2026-09-24
+        the flag latched at 06:00, healthcheck stopped running, and the gate refused every
+        entry for 14 hours with no way back. Ingest is the process that actually *restores*
+        freshness, so it is the natural second place to re-evaluate: whatever else is broken,
+        the cycle that fixes the data is the cycle that lifts the block.
+
+        Deliberately asymmetric. Ingest only ever *clears*, and only when
+        :func:`ops.lib.freshness.data_age_minutes` — blocking feeds only — is back inside
+        ``ops.staleness_min``. It never sets the flag (that is healthcheck's alerting job)
+        and it never touches a flag a human set; ``flags.clear_flag`` enforces the latter.
+        Clearing early would be harmless in any case: the gate checks the sidecar age
+        directly as well, so it stays fail-closed on its own while data is really stale.
+        """
+        flags_path = self.root / self.cfg.paths.flags_file
+        age = freshlib.data_age_minutes(self.root / freshlib.FRESHNESS_REL, self.now)
+        limit = float(self.cfg.ops.staleness_min)
+        if age > limit:
+            # Genuinely degraded: entries are blocked and this is the row that says so every
+            # cycle, so the outage is visible in ingest_runs instead of only in the flag file.
+            return PhaseNote(STATUS_DEGRADED,
+                             f"data_stale stands: blocking age {age:.0f} > {limit:.0f} min")
+        try:
+            current = flagslib.active_flags(flags_path, self.now)
+        except flagslib.FlagsError:
+            return PhaseNote(STATUS_DEGRADED, "flags unreadable")
+        flag = current.get("data_stale")
+        if not flag:
+            return None
+        if flag.get("set_by") == "human":
+            # Nothing is broken — someone chose this. `ok` with a note, not a fault.
+            return PhaseNote(STATUS_OK, "data_stale was set by a human — left alone")
+        flagslib.clear_flag(flags_path, "data_stale", by="ingest",
+                            now=self.now, audit_conn=self.kdb)
+        print(f"ingest: data_stale cleared, blocking age {age:.0f} min", file=sys.stderr)
+        return PhaseNote(STATUS_OK, f"data_stale cleared, blocking age {age:.0f} min")
+
     def run(self) -> int:
-        ok = True
+        """Run every phase; exit non-zero only when a phase that matters for trading failed.
+
+        ``TRADING_PHASES`` — candles and books — are the feeds a trade is priced off and the
+        only ones whose failure is worth a non-zero exit. Everything else failing is recorded
+        and reported; ingest still succeeds, because the alternative is what happened on
+        2026-09-24: a funding outage marking the whole job failed while candles were fine.
+        """
+        failed: list[str] = []
         for name, fn in (("candles", self.refresh_candles),
                          ("books", self.snapshot_books),
                          ("funding", self.refresh_funding),
@@ -582,10 +815,16 @@ class Ingest:
                          ("classify", self.classify_news),
                          ("corroborate", self.corroborate),
                          ("claimcheck", self.claimcheck),
-                         ("macro", self.update_macro_blackout)):
-            ok = self._phase(name, fn) and ok
+                         ("macro", self.update_macro_blackout),
+                         ("staleness", self.reconcile_staleness_flag)):
+            if not self._phase(name, fn):
+                failed.append(name)
         self._maybe_trigger()
-        return 0 if ok else 1
+        fatal = [name for name in failed if name in TRADING_PHASES]
+        if failed and not fatal:
+            print("ingest: degraded but exiting 0 — failed phases do not price a trade:"
+                  f" {','.join(failed)}", file=sys.stderr)
+        return 1 if fatal else 0
 
     def _maybe_trigger(self) -> None:
         """Post-ingest signal evaluation — fully isolated: a failure here never fails

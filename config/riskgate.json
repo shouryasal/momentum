@@ -40,6 +40,7 @@
   },
   "generated_from": "config/earn.yaml",
   "phase": "paper",
+  "profile": "",
   "proposal": {
     "max_age_hours": 48,
     "schema": "schemas/proposal.json",
@@ -105,7 +106,7 @@
   "sleeve_b": {
     "drift_to_a_after_h": 48
   },
-  "source_sha256": "6edeb7f1f8c919af1c0972cc3a248283529489ca1492e1fd6e15d170eefa8ebc",
+  "source_sha256": "a024b7889bd027a241b41e9067c88ecd1b12b5228f164e0f144261ee392ac852",
   "trading": {
     "plan_bounds": {
       "allow_model_urgency": false,
@@ -148,6 +149,18 @@
         "exit_price": {
           "offset_bps": 0.0,
           "side": "ask"
+        },
+        "fast": {
+          "atr_period": 14,
+          "breakout_lookback": 12,
+          "ema_fast": 9,
+          "ema_slow": 21,
+          "exit_on_trend_loss": true,
+          "max_atr_pct": 0.06,
+          "min_atr_pct": 0.0025,
+          "min_entry_spacing_min": 0,
+          "risk_window_days": 60,
+          "target_pct_nav": 0.05
         },
         "order_types": {
           "entry": "limit",
@@ -220,6 +233,18 @@
         "exit_price": {
           "offset_bps": 0.0,
           "side": "ask"
+        },
+        "fast": {
+          "atr_period": 14,
+          "breakout_lookback": 12,
+          "ema_fast": 9,
+          "ema_slow": 21,
+          "exit_on_trend_loss": true,
+          "max_atr_pct": 0.06,
+          "min_atr_pct": 0.0025,
+          "min_entry_spacing_min": 0,
+          "risk_window_days": 60,
+          "target_pct_nav": 0.05
         },
         "order_types": {
           "entry": "limit",

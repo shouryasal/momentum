@@ -55,11 +55,21 @@ UI: dict[str, tuple[str, str]] = {
         (DIALOG, "pages/self-improvement/ChangeDetail.tsx"),
     "POST /api/changes/{change_id}/revert":
         (DIALOG, "pages/self-improvement/ChangeDetail.tsx"),
+    "POST /api/control/flatten":
+        (DIALOG, "pages/overview/ControlCard.tsx"),
     "PUT /api/control/level":
         (DIALOG, "pages/overview/ControlCard.tsx"),
-    "POST /api/control/resume":
+    "POST /api/control/pause":
         (DIALOG, "pages/overview/ControlCard.tsx"),
-    "POST /api/control/flatten":
+    "POST /api/control/schedule":
+        (DIALOG, "pages/overview/ControlCard.tsx"),
+    "POST /api/control/start":
+        (DIALOG, "pages/overview/ControlCard.tsx"),
+    "POST /api/control/stop":
+        (DIALOG, "pages/overview/ControlCard.tsx"),
+    # "Make it restart itself" on Home. The console died overnight with nothing to bring it
+    # back, and the affordance for fixing that has to be on the screen that noticed.
+    "POST /api/control/units":
         (DIALOG, "pages/overview/ControlCard.tsx"),
     "DELETE /api/kill":
         (DIALOG, "components/KillButton.tsx"),

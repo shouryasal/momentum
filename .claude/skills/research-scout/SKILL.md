@@ -16,12 +16,15 @@ moment an idea survives this skill it is handed to `hypothesis-lab`, which state
 falsifier before any number is computed, and to `edge-audit`, which decides whether the
 number means anything.
 
-The reason this skill exists is arithmetic. Every idea costs a trial, and the trial counter
-only grows (`edge-audit`: `expected_max_sharpe(N, T)`). At N=10 zero-skill trials the best
-in-sample Sharpe on this repo's 9.1-year sample is already **0.86**; at N=200 it is
-**1.19**. Re-testing something the repo has already killed does not cost nothing — it
-raises the bar for every honest idea that comes after it. **A search that does not know what
-has already been searched is not a search, it is a random walk with a report attached.**
+The reason this skill exists is arithmetic. Every idea handed on from here costs a
+**selection** trial — one that could end in a change — and that is the N the hurdle is
+formed from (`edge-audit`: `expected_max_sharpe(N, T)`, method.md §3a). At N=10 zero-skill
+trials the best in-sample Sharpe on this repo's 9.1-year sample is already **0.86**; at
+N=200 it is **1.19**. Re-testing something the repo has already killed does not cost
+nothing — it raises the bar for every honest idea that comes after it, and the bar falls
+again only when a change of the loop's own survives the gate and merges. **A search that
+does not know what has already been searched is not a search, it is a random walk with a
+report attached.**
 
 ## When this runs
 

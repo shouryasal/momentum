@@ -228,6 +228,39 @@ class TestOllamaProvider:
             p.run(local_req())
         assert excinfo.value.failure_class == "empty_output"
 
+    def test_thinking_is_switched_off_on_every_call(self):
+        """Reasoning tokens are paid for in wall-clock and then thrown away.
+
+        Ollama turns thinking ON by default for any model that supports it and puts the
+        reasoning in ``message.thinking`` — a field this provider does not read. Measured on
+        this host with a trivial schema-constrained call: qwen3.5:4b generated 323 tokens
+        instead of 6, granite4.2:3b 102 instead of 6. Generation, not prompt processing, is
+        the local bottleneck, so this was most of the local tier's latency.
+        """
+        bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            return chat_response('{"verdict":"x"}')
+
+        p = OllamaProvider("http://127.0.0.1:11434", client=transport(handler))
+        assert p.run(local_req(output_schema=SCHEMA)).ok
+        assert bodies and bodies[0]["think"] is False
+
+    def test_reasoning_with_no_answer_says_so(self):
+        """`empty_output` alone reads exactly like a dead daemon. It cost a day of diagnosis."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            r = chat_response("")
+            body = json.loads(r.content)
+            body["message"]["thinking"] = "Let me consider each candidate in turn. " * 10
+            return httpx.Response(200, json=body)
+
+        p = OllamaProvider("http://127.0.0.1:11434", client=transport(handler))
+        with pytest.raises(LLMError) as excinfo:
+            p.run(local_req())
+        assert excinfo.value.failure_class == "empty_output"
+        assert "`thinking`" in str(excinfo.value) and "no content" in str(excinfo.value)
+
     def test_a_connect_error_is_provider_down(self):
         def handler(request):
             raise httpx.ConnectError("connection refused", request=request)

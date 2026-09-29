@@ -60,6 +60,12 @@ ALWAYS_DISALLOWED = ["WebFetch", "WebSearch", "Task", "Edit", "NotebookEdit"]
 #: gate (``evals.skill_eval``) under containment instead.
 AUTOMATED_SKILL_SCRIPT_BASH = [
     "Bash(python3 .claude/skills/asset-dossier/scripts/*)",
+    # The three research skills the `discover` stage runs, in the order the stage uses
+    # them: where to look, whether the result is real, and the statistics that decide it.
+    # Each lives in a tier-2 scripts/ directory, so none of them is code the model wrote.
+    "Bash(python3 .claude/skills/research-scout/scripts/*)",
+    "Bash(python3 .claude/skills/hypothesis-lab/scripts/*)",
+    "Bash(python3 .claude/skills/edge-audit/scripts/*)",
     "Bash(python3 .claude/skills/post-mortem/scripts/*)",
     "Bash(python3 .claude/skills/risk-gate/scripts/*)",
     "Bash(python3 .claude/skills/skill-smith/scripts/*)",

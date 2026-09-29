@@ -1,0 +1,27 @@
+{
+  "registered_final": 78,
+  "registered_prior": 129,
+  "counter_path": "/home/shourya/earn-ml-data/cache/ml_trial_counter.json",
+  "n_selection_trials": 439,
+  "n_measurements_all_time": 288,
+  "hurdle": {
+    "baseline_sharpe": 0.8,
+    "n_trials": 439,
+    "years": 6.0,
+    "expected_max_sharpe": 1.5496570281414337,
+    "deflated_hurdle": 2.3496570281414337,
+    "n_measurements_all_time": 288,
+    "note": "N is the count of SELECTION trials, which only ever grows. A hurdle that resets is decorative."
+  },
+  "hurdle_at_distinct_configs_only": {
+    "n_trials": 78,
+    "years": 6.0,
+    "expected_max_sharpe": 1.349713397123884,
+    "deflated_hurdle": 2.149713397123884,
+    "note": "78 = the distinct (target x model family) configurations whose test score exists in scorecard.csv. The 439 figure additionally charges every superseded re-measurement and the 232 trials sibling agents had already registered. Both hurdles are far above the best measured book Sharpe of 0.833, so the choice between them does not change any conclusion."
+  },
+  "best_measured_book_sharpe": 0.833,
+  "btc_buy_and_hold_sharpe_same_folds": 0.827,
+  "sharpe_standard_error": 0.41,
+  "verdict": "Nothing in the CPU zoo clears the deflated hurdle. The best costed book (extra_trees on xsret_7d, top 5, 0.833) is 0.006 above costed BTC buy-and-hold on the same dates (0.827), against a Sharpe standard error of about 0.41 per book and a deflation of 1.35 to 1.55."
+}

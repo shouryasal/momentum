@@ -263,6 +263,24 @@ def test_the_committed_file_loads_into_the_v2_model(mc):
     assert mc.tier_of("fable") > mc.tier_of("opus") > mc.tier_of("sonnet")
 
 
+def test_no_task_may_ask_for_a_single_turn(mc, tmp_path):
+    """``max_turns: 1`` is unserveable, so the config layer refuses it rather than paying.
+
+    Every task here asks for structured output, and the SDK spends one turn on the answer
+    and one emitting it. Measured against haiku, 3 runs of 3: at 1 the call dies with
+    ``Reached maximum number of turns (1)`` *after* the tokens are billed; at 2 it succeeds
+    for a fifth of the cost. Four tasks shipped with 1 — extract, classify, holdings_watch
+    and scan — so every cloud escalation of the cheap, high-volume tier failed in silence.
+    """
+    assert all(t.max_turns is None or t.max_turns >= 2 for t in mc.tasks.values()), \
+        "a task with max_turns == 1 can never return a structured answer"
+    one_turn = {"version": 2,
+                "models": {"haiku": {"provider": "claude", "id": "claude-haiku-4-5", "tier": 2}},
+                "tasks": {"classify": {"chain": ["haiku"], "max_turns": 1}}}
+    with pytest.raises(ConfigError, match="max_turns"):
+        load_models_cfg(_write(tmp_path, one_turn), overlay=None)
+
+
 def test_v1_task_fields_become_a_chain(tmp_path):
     """A v1 file still loads. The committed file is v2 since P3, so this uses a fixture."""
     v1 = {
@@ -274,7 +292,7 @@ def test_v1_task_fields_become_a_chain(tmp_path):
             "flags": {"model": "haiku", "fallback": "keep_last", "retry": 1,
                       "max_usd_per_run": 0.4, "max_turns": 6},
             "classify": {"model": "haiku", "fallback": "rule", "retry": 0,
-                         "max_usd_per_run": 0.2, "max_turns": 1},
+                         "max_usd_per_run": 0.2, "max_turns": 2},
         },
     }
     old = load_models_cfg(_write(tmp_path, v1), overlay=None)

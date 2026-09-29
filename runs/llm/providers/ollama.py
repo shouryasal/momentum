@@ -138,6 +138,15 @@ class OllamaProvider(BaseProvider):
                 + [{"role": "user", "content": prompt}]
             ),
             "stream": False,
+            # Thinking is ON by default for any model that supports it, and Ollama puts the
+            # reasoning in `message.thinking` — a field this provider does not read. So the
+            # tokens were paid for in wall-clock and then discarded, and when a model put
+            # EVERYTHING in `thinking` the empty `content` below became `empty_output`. That
+            # is the real reason qwen3.5:4b "screened nothing": it was returning an empty
+            # string, not a judgement. Measured on this host, trivial schema-constrained call:
+            # qwen 323 generated tokens -> 6, granite4.2:3b 102 -> 6, llama3.1:8b unaffected
+            # (it does not think). Accepted by every local model here, so it is unconditional.
+            "think": False,
             "options": options,
         }
         if self.keep_alive:
@@ -165,9 +174,16 @@ class OllamaProvider(BaseProvider):
         except ValueError as e:
             raise LLMError(f"ollama returned non-JSON: {_body(resp)[:200]}",
                            failure_class="error") from e
-        content = ((data.get("message") or {}).get("content") or "").strip()
+        message = data.get("message") or {}
+        content = (message.get("content") or "").strip()
         if not content:
-            raise LLMError("ollama returned an empty message",
+            # Name the cause when it is this one. An empty `content` beside a full `thinking`
+            # is a model that reasoned and never answered, which reads identically to a dead
+            # model unless the error says so — and that ambiguity cost a day of diagnosis.
+            thinking = (message.get("thinking") or "").strip()
+            detail = (f" (the model returned {len(thinking)} characters of `thinking` and no"
+                      f" content, despite `think: false`)" if thinking else "")
+            raise LLMError(f"ollama returned an empty message{detail}",
                            failure_class="empty_output")
         return content, data
 

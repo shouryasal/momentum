@@ -427,11 +427,22 @@ def dip_from_high(ctx: Ctx) -> list[Candidate]:
         dip = ctx.fget(pair, "dip_from_high_pct")
         if dip is None or dip < dc.pct:
             continue
+        # Cite `high_30d` ONLY where it exists. This detector fires off `dip_from_high_pct`,
+        # which is a CHEAP key, so it runs on every watchlist name — but `high_30d` is rich
+        # tier only (`features.CHEAP_KEYS`), so on ~110 of ~130 pairs this declared a key the
+        # evidence pack could not show. Measured 2026-09-25: 146 of 788 keys offered in
+        # CANDIDATES were absent from FEATURES, every one of them this key, and it was the
+        # only key any local model was ever seen to "invent" — because we advertised it first.
+        # A screening model's citation is verified against the pack and dropped when it fails,
+        # so this bug read as a hallucination rate and cost the cheap tier its credibility.
+        keys = [ctx.fkey(pair, "dip_from_high_pct")]
+        if ctx.fget(pair, "high_30d") is not None:
+            keys.append(ctx.fkey(pair, "high_30d"))
         out.append(Candidate(
             detector="dip_from_high", pair=pair, direction=DIRECTION_DOWN,
             strength=_ratio_strength(dip, dc.pct),
             reason=f"dip_from_high:{pair.split('/')[0]}:{dip:.1f}",
-            feature_keys=(ctx.fkey(pair, "dip_from_high_pct"), ctx.fkey(pair, "high_30d")),
+            feature_keys=tuple(keys),
             detail={"tf": dc.tf, "pct": round(dip, 3), "threshold": dc.pct,
                     "lookback_days": dc.lookback_days}))
     return out

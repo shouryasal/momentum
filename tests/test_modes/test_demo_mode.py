@@ -308,6 +308,33 @@ class TestTheDemoPreflight:
         assert _item(result, "track_record").status == pf.SKIP
         assert _item(result, "propose_track_record").status == pf.SKIP
 
+    def test_a_skipped_item_is_not_labelled_blocking(self, cfg, demo_world):
+        """"Not applicable to this transition" and "blocking" cannot both be true.
+
+        The Mode page printed a red BLOCKING badge beside ``track_record`` on every demo
+        arming — the one item demo is defined not to need. A skipped item has no verdict
+        to block on, so it carries ``blocking=False``.
+        """
+        result = pf.run_preflight(cfg, _demo_request(), deps=demo_world)
+        skipped = [c for c in result.items if c.status == pf.SKIP]
+        assert skipped, "this transition should skip the live-only gates"
+        for check in skipped:
+            assert check.blocking is False, f"{check.id} is skipped but marked blocking"
+
+    def test_live_keeps_every_blocking_flag_the_table_gives_it(self, cfg, demo_world):
+        """The fix is labelling only: a LIVE arming skips nothing, so nothing is relabelled."""
+        demo_world.venue = Venue.LIVE
+        demo_world.venue_probe = _prober(Venue.LIVE)
+        result = pf.run_preflight(
+            cfg,
+            pf.PreflightRequest(sleeve="a", target="LIVE_EXECUTE", seed_usdt=500.0),
+            deps=demo_world,
+        )
+        assert [c.id for c in result.items if c.status == pf.SKIP] == []
+        for check in result.items:
+            if pf.CHECK_BLOCKING[check.id]:
+                assert check.blocking, f"{check.id} lost its blocking flag on a live target"
+
     def test_a_three_day_old_test_run_does_not_block_demo(self, cfg, demo_world, jdb):
         """The same world blocks LIVE and clears DEMO — that is the point of demo mode."""
         db.write(

@@ -115,13 +115,25 @@ def providers(
     if ollama_cfg is not None and ollama_cfg.enabled:
         try:
             with llm_service.open_ro(knowledge) as conn:
-                detected = health_mod.cached_ollama_url(conn)
+                # `ollama_base_url`, not `cached_ollama_url`: the cache has a ten-minute TTL
+                # and only a model job ever refills it, so after ten quiet minutes this page
+                # said "Ollama not detected" about a local model that was up and answering.
+                # That is the same mistake as checking Claude's credential against the
+                # console's own environment. This honours the cache first and only probes
+                # when it has gone stale — the same call `/ollama/pull` already makes.
+                detected = health_mod.ollama_base_url(
+                    ollama_cfg, kdb=conn, client=_http_client(request))
         except Exception:  # noqa: BLE001 - a missing database is "not detected"
             detected = None
+    # Both the mode and the credential cards must be judged against what `ops/envwrap.sh`
+    # gives a job, not against the console's own environment — the console is in no
+    # credential allowlist, so its process env always looks unconfigured.
+    environ = llm_service.presence_environ(
+        env_path=getattr(request.app.state, "env_file", None))
     return ProvidersResponse(
-        auth_mode=claude_auth.auth_mode(configured=mc.auth.claude_mode),
+        auth_mode=claude_auth.auth_mode(environ, configured=mc.auth.claude_mode),
         providers=llm_service.provider_cards(mc, journal=journal, knowledge=knowledge,
-                                             detected_url=detected),
+                                             environ=environ, detected_url=detected),
         rate_limit=llm_service.rate_limit(knowledge),
         month=llm_service.month_totals(journal),
     )

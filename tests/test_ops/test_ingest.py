@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from ops.lib import flags as flagslib
-from runs.ingest import Ingest
+from runs.ingest import FUT, TRADING_PHASES, Ingest
 
 from .conftest import NOW
 
@@ -22,15 +22,46 @@ ITEM = ("<item><title>{title}</title><link>{link}</link>"
 class Binance:
     """Scriptable fake for spot+futures endpoints."""
 
+    #: Symbols the fake futures venue lists a tradeable perpetual for. ``None`` means
+    #: "every symbol asked for", which is the old, pre-discovery world.
+    perps: set[str] | None
+
     def __init__(self, now=NOW):
         self.now_ms = int(now.timestamp() * 1000)
         self.kline_calls = 0
         self.feeds: dict[str, list[tuple[str, str]]] = {}
         self.feed_status: dict[str, int] = {}
+        self.perps = None
+        self.exchange_info_calls = 0
+        #: symbols premiumIndex/fundingRate/openInterest were actually asked about
+        self.funding_asked: list[str] = []
+        #: symbol -> status to answer with instead of 200 (e.g. a transient 500)
+        self.fut_status: dict[str, int] = {}
+        #: when set, /fapi/v1/exchangeInfo itself fails
+        self.exchange_info_status: int | None = None
+
+    def _fut_symbol(self, q: dict) -> httpx.Response | None:
+        """400 for a symbol this venue has no perpetual for — exactly what Binance does."""
+        s = q.get("symbol", "")
+        self.funding_asked.append(s)
+        if self.perps is not None and s not in self.perps:
+            return httpx.Response(400, json={"code": -1121, "msg": "Invalid symbol."})
+        forced = self.fut_status.get(s)
+        if forced:
+            return httpx.Response(forced, json={"code": -1001, "msg": "forced"})
+        return None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         p = request.url.path
         q = dict(request.url.params)
+        if p == "/fapi/v1/exchangeInfo":
+            self.exchange_info_calls += 1
+            if self.exchange_info_status:
+                return httpx.Response(self.exchange_info_status, json={"msg": "down"})
+            listed = sorted(self.perps) if self.perps is not None else []
+            return httpx.Response(200, json={"symbols": [
+                {"symbol": s, "status": "TRADING", "contractType": "PERPETUAL"}
+                for s in listed]})
         if p == "/api/v3/klines":
             self.kline_calls += 1
             start = int(q["startTime"])
@@ -48,16 +79,19 @@ class Binance:
                 "bids": [["100.0", "2.0"], ["99.8", "3.0"]],
                 "asks": [["100.2", "1.5"], ["100.4", "2.5"]]})
         if p == "/fapi/v1/premiumIndex":
-            return httpx.Response(200, json={
+            bad = self._fut_symbol(q)
+            return bad or httpx.Response(200, json={
                 "symbol": q["symbol"], "markPrice": "100.1",
                 "lastFundingRate": "0.0001", "nextFundingTime": self.now_ms + 100})
         if p == "/fapi/v1/fundingRate":
-            return httpx.Response(200, json=[
+            bad = self._fut_symbol(q)
+            return bad or httpx.Response(200, json=[
                 {"symbol": q["symbol"], "fundingTime": self.now_ms - 8 * 3600 * 1000,
                  "fundingRate": "0.0001", "markPrice": "100"}])
         if p == "/fapi/v1/openInterest":
-            return httpx.Response(200, json={"symbol": q["symbol"],
-                                             "openInterest": "1234.5"})
+            bad = self._fut_symbol(q)
+            return bad or httpx.Response(200, json={"symbol": q["symbol"],
+                                                    "openInterest": "1234.5"})
         url = str(request.url)
         if url in self.feeds:
             status = self.feed_status.get(url, 200)
@@ -190,6 +224,273 @@ def test_phase_isolation(ing, monkeypatch):
     assert statuses["books"] == "ok"  # later phases still ran
 
 
+# ------------------------------------------------- 2026-09-24: PEPE killed the data chain
+#
+# PEPE/USDT has no PERPETUAL contract, so fapi/v1/premiumIndex?symbol=PEPEUSDT answers 400.
+# Ingest asked anyway, the funding phase raised on the 16th of 31 pairs, and `run()` returned
+# non-zero because *any* failed phase failed the job. That killed the ingest cron: candles
+# froze at 06:00, freshness froze with them, healthcheck latched `data_stale` with
+# `expires_at: null`, and the gate refused 655 consecutive entries over 14 hours.
+#
+# Three separate defects, one per test group below: a missing perp treated as an error, a
+# non-trading phase able to fail the job, and a latch with no way back.
+
+
+class TestMissingPerpetualIsAKnownCase:
+    def test_a_pair_with_no_perp_is_recorded_not_an_error(self, ing, cfg):
+        ingest, fake, kdb, _ = ing
+        fake.perps = {sym for sym in (p.replace("/", "") for p in cfg.universe.pairs)
+                      if sym != "PEPEUSDT"}
+        assert ingest._phase("funding", ingest.refresh_funding) is True
+        row = kdb.execute("SELECT * FROM ingest_runs WHERE phase='funding'").fetchone()
+        assert "no perp: PEPE/USDT" in row["detail"]
+        # `ok`, not `degraded`: nothing failed, there is simply no contract to read. Every
+        # non-`ok` status is folded into "this phase is failing" by ops/autonomy.py, and a
+        # permanent failing badge for a permanent fact is how the real outage stayed hidden.
+        assert row["status"] == "ok"
+        # and PEPE was never asked about — the 400 is avoided, not caught
+        assert "PEPEUSDT" not in fake.funding_asked
+        # every other pair still got its funding, history and OI
+        assert kdb.execute("SELECT COUNT(*) FROM funding_current").fetchone()[0] == len(
+            cfg.universe.pairs) - 1
+        assert kdb.execute(
+            "SELECT COUNT(*) FROM funding_current WHERE symbol='PEPEUSDT'").fetchone()[0] == 0
+        assert kdb.execute(
+            "SELECT COUNT(*) FROM funding_current WHERE symbol='BTCUSDT'").fetchone()[0] == 1
+
+    def test_coverage_is_discovered_once_a_day_not_once_a_cycle(self, ing, cfg):
+        ingest, fake, _, _ = ing
+        fake.perps = {p.replace("/", "") for p in cfg.universe.pairs}
+        ingest.refresh_funding()
+        ingest.refresh_funding()
+        assert fake.exchange_info_calls == 1, "the perp map must be cached between cycles"
+
+    def test_one_transient_symbol_failure_does_not_lose_the_others(self, ing, cfg):
+        """A symbol that 500s after discovery is skipped and counted, never fatal."""
+        ingest, fake, kdb, _ = ing
+        fake.perps = {p.replace("/", "") for p in cfg.universe.pairs}
+        fake.fut_status["ETHUSDT"] = 500
+        assert ingest._phase("funding", ingest.refresh_funding) is True
+        row = kdb.execute("SELECT * FROM ingest_runs WHERE phase='funding'").fetchone()
+        assert row["status"] == "degraded" and "ETHUSDT" in row["detail"]
+        assert kdb.execute("SELECT COUNT(*) FROM funding_current").fetchone()[0] == len(
+            cfg.universe.pairs) - 1
+
+    def test_a_total_futures_outage_is_still_a_phase_failure(self, ing, cfg):
+        """Degrading is for partial loss. Every symbol failing is a real outage."""
+        ingest, fake, kdb, _ = ing
+        fake.perps = {p.replace("/", "") for p in cfg.universe.pairs}
+        for s in fake.perps:
+            fake.fut_status[s] = 500
+        assert ingest._phase("funding", ingest.refresh_funding) is False
+        row = kdb.execute("SELECT * FROM ingest_runs WHERE phase='funding'").fetchone()
+        assert row["status"] == "error"
+
+    def test_discovery_being_down_does_not_stop_funding_collection(self, ing, cfg):
+        """No map and no endpoint: try everything, report it. Never "no pair has a perp"."""
+        ingest, fake, kdb, _ = ing
+        fake.perps = {p.replace("/", "") for p in cfg.universe.pairs}
+        fake.exchange_info_status = 503
+        assert ingest._phase("funding", ingest.refresh_funding) is True
+        row = kdb.execute("SELECT * FROM ingest_runs WHERE phase='funding'").fetchone()
+        assert "perp map unavailable" in row["detail"]
+        assert row["status"] == "degraded"     # this one IS a fault: we could not find out
+        assert kdb.execute("SELECT COUNT(*) FROM funding_current").fetchone()[0] == len(
+            cfg.universe.pairs)
+
+    def test_the_rate_budget_guard_is_never_forgiven_as_a_symbol_failure(self, ing, cfg,
+                                                                        monkeypatch):
+        """Per-symbol tolerance must not swallow the IP weight breaker.
+
+        Skipping a symbol that 400s is right. "Skipping" a rate-limit breach and then asking
+        for the next thirty symbols anyway is how a soft guard turns into a ban — so the guard
+        is its own exception type and aborts the phase.
+        """
+        from runs.ingest import RateBudgetExceeded
+
+        ingest, fake, kdb, _ = ing
+        fake.perps = {p.replace("/", "") for p in cfg.universe.pairs}
+        calls = []
+        real = ingest._get
+
+        def guarded(url, params):
+            calls.append(url)
+            if len(calls) > 4:
+                raise RateBudgetExceeded("rate budget guard: used-weight-1m=5000")
+            return real(url, params)
+
+        monkeypatch.setattr(ingest, "_get", guarded)
+        assert ingest._phase("funding", ingest.refresh_funding) is False
+        row = kdb.execute("SELECT * FROM ingest_runs WHERE phase='funding'").fetchone()
+        assert row["status"] == "error" and "rate budget guard" in row["detail"]
+        assert len(calls) == 5, "the phase kept asking after the weight guard tripped"
+
+    def test_a_weight_breach_during_discovery_stops_on_the_spot(self, ing, cfg,
+                                                                monkeypatch):
+        """It must abort at the breach, not be relabelled "discovery unavailable".
+
+        Without the re-raise the breach becomes ``perp map unavailable``, which reports every
+        pair as covered — so the phase goes on to make another request before a downstream
+        guard stops it. One extra request is small; the contract is not, because
+        ``perp_symbols`` is shared and a caller with no per-symbol guard would walk the whole
+        book. Hence the exact call count.
+        """
+        from runs.ingest import RateBudgetExceeded
+
+        ingest, fake, kdb, _ = ing
+        calls = []
+
+        def guarded(url, params):
+            calls.append(url)
+            raise RateBudgetExceeded("rate budget guard: used-weight-1m=5000")
+
+        monkeypatch.setattr(ingest, "_get", guarded)
+        assert ingest._phase("funding", ingest.refresh_funding) is False
+        row = kdb.execute("SELECT * FROM ingest_runs WHERE phase='funding'").fetchone()
+        assert "rate budget guard" in row["detail"]
+        assert calls == [f"{FUT}/fapi/v1/exchangeInfo"], \
+            "the phase made another request after the weight guard tripped"
+
+    def test_a_known_gap_and_a_real_fault_are_told_apart(self, ing, cfg):
+        """Both facts reach the row, but only the fault sets the status.
+
+        ``ops/autonomy.py`` reads any non-``ok`` status as "this phase is failing". If a
+        permanent no-perp gap set that, the ops panel would show ingest as permanently broken
+        and everyone would learn to ignore it — which is precisely how a real 14-hour outage
+        went unnoticed. So the gap is reported, and the fault is what raises the flag.
+        """
+        ingest, fake, kdb, _ = ing
+        fake.perps = {sym for sym in (p.replace("/", "") for p in cfg.universe.pairs)
+                      if sym != "PEPEUSDT"}
+        fake.fut_status["ETHUSDT"] = 500
+        ingest._phase("funding", ingest.refresh_funding)
+        row = kdb.execute("SELECT * FROM ingest_runs WHERE phase='funding'").fetchone()
+        assert row["status"] == "degraded"
+        assert "no perp: PEPE/USDT" in row["detail"] and "ETHUSDT" in row["detail"]
+
+
+class TestOnlyTradingPhasesFailTheJob:
+    def test_a_funding_outage_does_not_stop_the_ingest_job(self, ing, cfg, monkeypatch):
+        """The exact 2026-09-24 failure: funding dies, candles are fine, job must succeed."""
+        ingest, fake, kdb, _ = ing
+        monkeypatch.setattr(ingest, "refresh_funding",
+                            lambda: (_ for _ in ()).throw(RuntimeError("400 PEPEUSDT")))
+        assert ingest.run() == 0, "a funding outage must not fail the job"
+        statuses = {r["phase"]: r["status"] for r in kdb.execute("SELECT * FROM ingest_runs")}
+        assert statuses["funding"] == "error"     # recorded, visible, not hidden
+        assert statuses["candles"] == "ok"
+        # the thing that actually mattered: candles were written
+        assert kdb.execute("SELECT COUNT(*) FROM candles").fetchone()[0] > 0
+
+    @pytest.mark.parametrize("phase", ["news", "classify", "corroborate", "claimcheck",
+                                       "macro"])
+    def test_no_non_trading_phase_can_fail_the_job(self, ing, phase, monkeypatch):
+        ingest, *_ = ing
+        attr = {"news": "pull_news", "classify": "classify_news",
+                "corroborate": "corroborate", "claimcheck": "claimcheck",
+                "macro": "update_macro_blackout"}[phase]
+        monkeypatch.setattr(ingest, attr,
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+        assert ingest.run() == 0
+
+    @pytest.mark.parametrize("phase,attr", [("candles", "refresh_candles"),
+                                            ("books", "snapshot_books")])
+    def test_a_trading_phase_failing_still_fails_the_job(self, ing, phase, attr,
+                                                         monkeypatch):
+        """The half of the guarantee that must not be weakened: no prices, non-zero exit."""
+        ingest, *_ = ing
+        monkeypatch.setattr(ingest, attr,
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+        assert ingest.run() == 1
+        assert phase in TRADING_PHASES
+
+    def test_funding_freshness_is_advisory_not_blocking(self, ing, cfg):
+        """A funding stamp must not be able to stop an entry."""
+        from ops.lib import freshness as freshlib
+
+        ingest, fake, _, root = ing
+        fake.perps = {p.replace("/", "") for p in cfg.universe.pairs}
+        ingest._phase("funding", ingest.refresh_funding)
+        data = freshlib.read(root / freshlib.FRESHNESS_REL)
+        assert freshlib.SOURCE_FUNDING in data[freshlib.ADVISORY_KEY]
+        assert freshlib.SOURCE_FUNDING not in data["sources"]
+
+
+class TestIngestRecoversTheStalenessFlag:
+    """The flag could only ever be cleared by healthcheck, and healthcheck had stopped.
+
+    Ingest is the process that *restores* freshness, so it re-evaluates the latch too: two
+    independent ways back instead of one single point of failure.
+    """
+
+    def _latch(self, root, cfg, *, set_by="healthcheck", now=NOW):
+        flagslib.set_flag(root / cfg.paths.flags_file, "data_stale",
+                          severity="block_entries", reason="data age 999 min",
+                          set_by=set_by, expires_at=None, now=now)
+        assert flagslib.entries_blocked(root / cfg.paths.flags_file, "BTC/USDT",
+                                       now=now)[0]
+
+    def test_ingest_clears_the_latch_once_prices_are_fresh(self, ing, cfg):
+        ingest, _, _, root = ing
+        self._latch(root, cfg)
+        assert ingest.run() == 0
+        blocked, why = flagslib.entries_blocked(root / cfg.paths.flags_file, "BTC/USDT",
+                                                now=NOW)
+        assert not blocked, f"the gate is still blocked on {why!r} with fresh candles"
+
+    def test_the_latch_stands_while_prices_really_are_stale(self, ing, cfg):
+        """Fail-closed is the point. Only recovery was broken, not the block."""
+        ingest, _, kdb, root = ing
+        ingest.run()                       # write fresh candles
+        self._latch(root, cfg)
+        ingest.now = NOW + timedelta(hours=9)   # ...then let them go stale
+        note = ingest.reconcile_staleness_flag()
+        assert note.status == "degraded" and note.detail.startswith("data_stale stands")
+        assert flagslib.entries_blocked(root / cfg.paths.flags_file, "BTC/USDT",
+                                       now=ingest.now)[0]
+
+    def test_ingest_never_clears_a_flag_a_human_set(self, ing, cfg):
+        ingest, _, _, root = ing
+        self._latch(root, cfg, set_by="human")
+        ingest.run()
+        assert flagslib.entries_blocked(root / cfg.paths.flags_file, "BTC/USDT",
+                                       now=NOW)[0]
+
+    def test_ingest_never_sets_the_flag_itself(self, ing, cfg):
+        """Setting (and alerting) stays healthcheck's job; ingest only ever lifts."""
+        ingest, _, _, root = ing
+        flags_path = root / cfg.paths.flags_file
+        ingest.now = NOW + timedelta(days=3)     # nothing fresh anywhere
+        ingest.reconcile_staleness_flag()
+        try:
+            assert "data_stale" not in flagslib.active_flags(flags_path, ingest.now)
+        except flagslib.FlagsError:
+            pass  # no flags file at all is equally fine: nothing was set
+
+    def test_a_stale_news_feed_does_not_keep_the_gate_shut(self, ing, cfg):
+        """News in the staleness clock was the crisis audit's finding. Pin it end to end."""
+        from ops.lib import freshness as freshlib
+
+        ingest, _, kdb, root = ing
+        ingest.run()
+        # a news item from a fortnight ago is the newest one there is
+        kdb.execute("INSERT INTO news_items(url_hash, source, source_class, title, url,"
+                    " fetched_at, classified_by) VALUES ('old','X','secondary','t',"
+                    " 'https://x/old', ?, 'rule')",
+                    ((NOW - timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ"),))
+        kdb.commit()
+        ingest.write_freshness()
+        self._latch(root, cfg)
+        note = ingest.reconcile_staleness_flag()
+        assert note.status == "ok" and "cleared" in note.detail
+        blocked, why = flagslib.entries_blocked(root / cfg.paths.flags_file, "BTC/USDT",
+                                                now=NOW)
+        assert not blocked, f"a two-week-old news item is still blocking entries ({why!r})"
+        # ...and it is reported rather than ignored
+        assert freshlib.SOURCE_NEWS in freshlib.degraded(
+            30.0, path=root / freshlib.FRESHNESS_REL, now=NOW)
+
+
 # ---------------------------------------------------------------- classifier
 
 from ops.config import REPO_ROOT  # noqa: E402
@@ -216,6 +517,65 @@ def _seed_item(kdb, title, h):
     kdb.commit()
 
 
+class TestKeywordRulesMatchWordsNotSubstrings:
+    """The rule labels were 51% correct on 88 real headlines, and one keyword did it.
+
+    ``lawsuit: [sec, …]`` was matched as a SUBSTRING of a lowercased title, so "seconds",
+    "secretary", "Security" and "securities" all became a `lawsuit` event. 41 of the rule's
+    43 errors were that. It matters beyond tidiness for two reasons: `lawsuit` is one of the
+    `news_event` fast-path classes, and `tasks.classify.on_all_failed: rule` makes these
+    labels the FLOOR the classify task degrades to — so every silent classify failure handed
+    the gate a label that was wrong more often than right.
+    """
+
+    @staticmethod
+    def _event(ingest, title):
+        from runs.ingest import Ingest
+        return next((ev for ev, kws in ingest.event_keywords.items()
+                     if Ingest._kw_hit(title.lower(), kws)), None)
+
+    @pytest.mark.parametrize("title", [
+        "Report arrives within seconds of the close",
+        "Treasury secretary comments on digital assets",
+        "Exchange adds Security features to custody",
+        "Firm files for securities registration",
+    ])
+    def test_sec_inside_another_word_is_not_a_lawsuit(self, classify_env, title):
+        ingest, _, _ = classify_env
+        assert self._event(ingest, title) != "lawsuit", title
+
+    @pytest.mark.parametrize("title,expected", [
+        ("SEC charges exchange over unregistered offering", "lawsuit"),
+        ("SEC. filing names three tokens", "lawsuit"),
+        # Stems must survive their inflections — this is why a bare \b…\b was not the fix.
+        ("Major exchange hacked for $40M", "hack"),
+        ("Hacking group drains a bridge", "hack"),
+        ("Token delisted from two venues", "delist"),
+        ("Stablecoin depeg spreads to lending markets", "depeg"),
+        ("Withdrawals halted after a node outage", "outage"),
+        ("Fed signals a rate cut in December", "macro"),      # multi-word keyword
+    ])
+    def test_a_real_keyword_still_matches(self, classify_env, title, expected):
+        ingest, _, _ = classify_env
+        assert self._event(ingest, title) == expected, title
+
+    def test_settlement_no_longer_matches_settle_and_that_is_a_real_trade_off(
+            self, classify_env):
+        """Recorded as a decision, not hidden as a pass.
+
+        ``settle`` + "ment" is not an inflection, so "reaches settlement with the regulator"
+        — a genuine lawsuit signal — stops matching, while "instant settlement rails" — a
+        payments headline that was a false positive — correctly stops matching too. Substring
+        matching caught both. Recovering the first without the second means adding
+        ``settlement`` to ``config/earn.yaml: news.event_keywords.lawsuit``, which is a
+        blessed tier-2 config change and an operator's call, not this function's.
+        """
+        ingest, _, _ = classify_env
+        assert self._event(ingest, "Firm reaches settlement with regulator") is None
+        assert self._event(ingest, "Instant settlement rails go live") is None
+        assert self._event(ingest, "Firm settles with regulator") == "lawsuit"
+
+
 def test_classifier_labels_and_corroborate_preserves(classify_env):
     ingest, kdb, _ = classify_env
     _seed_item(kdb, "Bitcoin exchange hacked", "kw1")           # keyword-labelable
@@ -239,7 +599,9 @@ def test_classifier_labels_and_corroborate_preserves(classify_env):
     # `low`, not `high`: putting one label from a fixed set on a headline does not get
     # better with more thinking, and an invalid label is discarded and re-derived from the
     # keyword rules anyway (config/models.yaml: tasks.classify.why).
-    assert kw["effort"] == "low" and kw["max_turns"] == 1
+    # 2 turns, not 1: one to decide the label and one for the SDK to emit the structured
+    # answer. A cap of 1 does not make it stricter, it makes every cloud call fail.
+    assert kw["effort"] == "low" and kw["max_turns"] == 2
     r = kdb.execute("SELECT * FROM news_items WHERE url_hash='ml1'").fetchone()
     assert r["event_class"] == "outage" and r["classified_by"] == "model"
     assert json.loads(r["assets"]) == ["ETH"]

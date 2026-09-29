@@ -516,7 +516,19 @@ Rules other packages depend on:
   `assert_no_exchange_url_override` refuse one;
 * `riskgate.json` carries `risk`, `universe`, `proposal`, `execution`, `sleeve_b`, plus
   `trading` (timeframe, resolved `startup_candles`, `plan_bounds`, per-sleeve merged
-  mechanics) and `bounds`, stamped with `source_sha256` of `earn.yaml`;
+  mechanics) and `bounds`, stamped with `source_sha256` of `earn.yaml` and with `profile`,
+  the name of the active overlay (`""` for the shipped configuration) — `source_sha256`
+  cannot answer that, because a profile does not change `earn.yaml`;
+* a **profile** is a named overlay over `earn.yaml`, selected by `profiles.active` and read
+  from `profiles.dir`. It is deep-merged at load time and the result is re-validated by the
+  whole schema and every cross-check, so it can never say something `earn.yaml` could not.
+  `ops.config.PROFILE_ALLOWED_PREFIXES` is an allowlist — `trading`, `execution`,
+  `sleeve_a`, `sleeve_b`, `sleeves.<s>.strategy` — and everything else is refused by name;
+  `assert_profile_preserves_protection` then re-derives both configurations and refuses the
+  profile unless `risk`, `bounds`, `universe`, `modes`, `autonomy` and `exchange` are
+  identical and no per-trade stop got looser. `assert_profile_not_live` refuses to render a
+  runtime for real money while any profile is active: TEST and DEMO only. A profile reaches
+  the bots only through the blessed generated files, so preflight sees it;
 * no exchange key or secret is ever written into any generated file — the compose override
   carries env references only, and the NAMES are chosen from the sleeve's venue:
   `${BINANCE_KEY_<S>}` / `${BINANCE_SECRET_<S>}` for live, `${BINANCE_DEMO_KEY}` /
@@ -1032,11 +1044,18 @@ GET    /api/config/{file_id}/history
 POST   /api/config/{file_id}/preview
 POST   /api/config/{file_id}/revert
 GET    /api/control
+GET    /api/control/acting
 POST   /api/control/flatten
+GET    /api/control/liveness
 PUT    /api/control/level
 POST   /api/control/pause
-POST   /api/control/resume
+GET    /api/control/schedule
+POST   /api/control/schedule
+GET    /api/control/spend
+POST   /api/control/start
 POST   /api/control/stop
+GET    /api/control/supervisor
+POST   /api/control/units
 GET    /api/health
 GET    /api/invariants
 GET    /api/invariants/strip

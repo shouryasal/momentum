@@ -341,6 +341,16 @@ describe('Home', () => {
    * Every string below is in the fixture and every one of them used to be printed on Home.
    * If a technical block comes back, this fails and says which.
    */
+  /**
+   * The brief grew by exactly one block, and this is the record of why.
+   *
+   * "i will not do things from ui, hide other things for now" was the rule, and it still is
+   * for everything below. Then the owner asked "is there a button on ui that start the
+   * autonomous running?" — and there was not, because nothing on this screen could start,
+   * pause or even truthfully report the scheduled loop. That is one control, not the return
+   * of the dashboard: the block below is still forbidden every technical thing it used to
+   * carry, and the count is five rather than four-becomes-anything.
+   */
   it('fails if Home regains a technical block', async () => {
     render();
     await waitFor(() => expect(screen.getByTestId('overview-page')).toBeInTheDocument());
@@ -366,16 +376,17 @@ describe('Home', () => {
       expect(pattern.test(text), `Home is showing ${what} again: ${text.slice(0, 600)}`).toBe(false);
     }
 
-    // And the screen is exactly four blocks — the heading, the two totals, the two tables
-    // — with no fifth panel smuggled in beside them.
+    // And the screen is exactly five blocks — the heading, the one control, the two
+    // totals, the two tables — with no sixth panel smuggled in beside them.
     expect(screen.getByTestId('page-intro')).toBeInTheDocument();
+    expect(screen.getByTestId('control-card')).toBeInTheDocument();
     expect(screen.getByTestId('money-cards')).toBeInTheDocument();
     expect(screen.getByTestId('holdings-card')).toBeInTheDocument();
     expect(screen.getByTestId('transactions-card')).toBeInTheDocument();
     expect(
       front.children.length,
       `Home grew a block: ${[...front.children].map((el) => el.getAttribute('data-testid')).join(', ')}`,
-    ).toBe(4);
+    ).toBe(5);
   });
 
   it('says so in one plain sentence when nothing has traded, never an empty table', async () => {

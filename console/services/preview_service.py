@@ -310,7 +310,15 @@ def run_preview(cfg: Any, *, jdb: sqlite3.Connection | None = None,
     # be retried in a loop at full model price.
     _write_state({"started_utc": _iso(ts), "status": "running"}, base)
 
-    run_id = f"preview-{ts.strftime('%Y%m%dT%H%M%SZ')}"
+    # The run id has to be the real format — `schemas.proposal` requires ISO-8601 with an
+    # offset and would reject anything else, which would make the preview fail on its own
+    # label rather than on the decision. So it is a genuine Gulf-time run id, and
+    # `preview_id` is what marks the result as a preview everywhere it travels.
+    from runs.common import gulf_now
+
+    gulf = gulf_now(ts)
+    run_id = gulf.strftime("%Y-%m-%dT%H:%M+04:00")
+    preview_id = f"preview-{ts.strftime('%Y%m%dT%H%M%SZ')}"
     models = models_cfg or router.load_models_cfg()
     try:
         hard = router.compute_hardcase_flags(cfg, jdb, root=repo, now=ts)
@@ -339,6 +347,7 @@ def run_preview(cfg: Any, *, jdb: sqlite3.Connection | None = None,
     served = getattr(meta, "served_model", None)
     out: dict[str, Any] = {
         "preview": True,
+        "preview_id": preview_id,
         "run_id": run_id,
         "started_utc": _iso(ts),
         "finished_utc": _iso(datetime.now(UTC)),

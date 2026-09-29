@@ -206,6 +206,65 @@ def test_the_trial_counter_only_grows(tmp_path, monkeypatch):
     assert raw["n_trials"] == 2
 
 
+def test_a_claim_is_scored_against_the_selection_count_when_it_states_one():
+    """`n_trials` alone is ambiguous now, so a claim that names its selection count is
+    scored on that. Over-correcting an honest claim is a failure like any other."""
+    audit = load_script("audit_stats")
+    base = {"effective_n": 3020, "purged": True, "embargo_bars": 199,
+            "sharpe": 1.30, "baseline_sharpe": 0.405, "years": 6.67}
+    # 471 measurements of which 106 could have produced a change: the honest N is 106.
+    assert audit.check_claim({**base, "n_trials": 471}) != []
+    assert audit.check_claim({**base, "n_trials": 471, "n_selection_trials": 2}) == []
+
+
+def test_a_screening_trial_is_kept_for_ever_but_stays_out_of_the_hurdle(tmp_path,
+                                                                       monkeypatch):
+    """The skill and `runs/discovery.py` share this file, so they have to agree on it.
+
+    A measurement made by a pass that cannot propose is not part of the maximum the hurdle
+    deflates. It is recorded anyway — the audit trail never forgets a search — but N is the
+    trials that could actually have produced a change. `method.md` §3a is the reasoning.
+    """
+    audit = load_script("audit_stats")
+    monkeypatch.setenv("EARN_STATE_ROOT", str(tmp_path))
+    for i in range(9):
+        audit.trial_counter(add=f"nightly screen {i}", selection=False)
+    state = audit.trial_counter()
+    assert state["n_trials"] == 9, "nothing is forgotten"
+    assert state["n_selection_trials"] == 0
+    assert audit.hurdle_trials(state) == 0, (
+        "nine screens must not raise the bar for the one pass that may propose")
+    audit.trial_counter(add="the weekly pass, which may propose")
+    assert audit.hurdle_trials() == 1
+    assert audit.trial_counter()["n_trials"] == 10
+
+
+def test_the_hurdle_report_quotes_the_family_and_shows_the_gap(tmp_path, monkeypatch):
+    audit = load_script("audit_stats")
+    monkeypatch.setenv("EARN_STATE_ROOT", str(tmp_path))
+    audit.trial_counter(add="screen", selection=False)
+    audit.trial_counter(add="real trial")
+    state = audit.trial_counter()
+    out = audit.hurdle_report(0.83, audit.hurdle_trials(state), 9.1, state)
+    assert out["n_trials"] == 1, "N is the open selection family"
+    assert out["n_measurements_all_time"] == 2, "and the all-time total is never hidden"
+    assert out["deflated_hurdle"] > 0.83
+    assert "could actually have produced a change" in out["note"]
+
+
+def test_a_counter_written_before_the_split_is_read_conservatively(tmp_path, monkeypatch):
+    """The live file has `n_trials` and no selection count. Reading it as "all of them
+    counted" can only leave the hurdle where it was or raise it — never lower it."""
+    audit = load_script("audit_stats")
+    monkeypatch.setenv("EARN_STATE_ROOT", str(tmp_path))
+    path = tmp_path / "knowledge" / "state" / "trial_counter.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"n_trials": 11, "history": []}), encoding="utf-8")
+    state = audit.trial_counter()
+    assert state["n_selection_trials"] == 11
+    assert audit.hurdle_trials(state) == 11
+
+
 # --------------------------------------------------------------------------- decay
 
 

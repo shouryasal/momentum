@@ -1146,7 +1146,19 @@ def run_preflight(
     items: list[Check] = []
     for check_id, title, blocking in CHECK_ORDER:
         if not _applies(check_id, request):
-            items.append(Check(check_id, title, blocking, SKIP, "not applicable to this transition"))
+            # ``blocking=False``, not the table's value. An item this transition does not
+            # run has no verdict to block on, and carrying ``blocking=True`` beside "not
+            # applicable to this transition" was a contradiction the operator had to
+            # resolve by eye: the Mode page printed a red BLOCKING badge next to
+            # ``track_record`` on every demo arming, which is exactly the item demo is
+            # defined not to need. This is a *labelling* fix and nothing more — a skipped
+            # item never counted toward ``blocking_failures`` (that reads ``status ==
+            # FAIL``), so no gate changes, and LIVE skips nothing: ``_applies`` returns
+            # True for every item on a live target, so every live item keeps the blocking
+            # flag the table gives it.
+            items.append(
+                Check(check_id, title, False, SKIP, "not applicable to this transition")
+            )
             continue
         try:
             items.append(_CHECKS[check_id](cfg, request, d))

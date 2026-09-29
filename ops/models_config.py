@@ -205,7 +205,13 @@ class TaskCfg(_Model):
                    group="tasks", ge=0)
     effort: str | None = F(None, desc="Reasoning effort; the code floor 'high' still clamps.",
                            group="tasks")
-    max_turns: int | None = F(None, desc="Turn cap for one call.", group="tasks", ge=1)
+    # ge=2, not ge=1: every call here asks for structured output, and the SDK spends one
+    # turn answering and one emitting the JSON. A cap of 1 is therefore not "strict", it is
+    # guaranteed failure — `Reached maximum number of turns (1)`, charged for in full. Four
+    # tasks shipped with 1 and every cloud attempt at them failed, silently, for weeks.
+    max_turns: int | None = F(None, desc="Turn cap for one call; 2 is the floor because a "
+                                         "structured answer costs a turn to write and a "
+                                         "turn to emit.", group="tasks", ge=2)
     max_usd_per_run: float | None = F(None, desc="Spend cap for one call.", group="tasks",
                                       unit="usdt", ge=0)
     monthly_budget_usd: float | None = F(None, desc="Monthly spend cap for this task.",

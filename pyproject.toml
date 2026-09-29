@@ -51,6 +51,7 @@ packages = [
     "console.routers",
     "console.services",
     "evals",
+    "ml",
     "ops",
     "ops.lib",
     "runs",

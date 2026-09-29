@@ -363,7 +363,10 @@ def resolve(task: str, flags: HardCaseFlags | None = None,
         escalation_reasons=reasons,
         fallback=t.get("fallback"), retry=int(t.get("retry", 0)),
         max_usd=float(t.get("max_usd_per_run") or 0.0),
-        max_turns=int(t.get("max_turns") or 1),
+        # 2, not 1, when a task declares no cap: one turn cannot carry a structured answer
+        # (the SDK spends one writing it and one emitting it), so a default of 1 handed every
+        # such task a call that could only fail. `ops.models_config` enforces the same floor.
+        max_turns=int(t.get("max_turns") or 2),
         effort=clamp_effort(t.get("effort"), task),
     )
 

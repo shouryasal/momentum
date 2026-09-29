@@ -148,6 +148,24 @@ class TestNewFive:
         assert out and out[0].direction == "down"
         assert out[0].detail["pct"] == pytest.approx(25.0, abs=0.5)
 
+    def test_it_only_cites_high_30d_where_the_pack_has_it(self, ctx):
+        """A cited key the evidence pack cannot show is worse than no citation.
+
+        This detector fires off ``dip_from_high_pct``, a CHEAP-tier key, so it runs on every
+        watchlist name — but ``high_30d`` is rich tier only. Measured 2026-09-25: 146 of 788
+        keys offered in the screener's CANDIDATES block were absent from FEATURES, every one
+        of them this key. Host verification then drops the model's citation of it, so our own
+        bug was being counted as the local model's hallucination rate.
+        """
+        make, _, _, kdb, _ = ctx
+        seed_candles(kdb, tf="1d", n=25, start=200.0, step=0.0)
+        seed_candle(kdb, "BTC/USDT", "1d", open_=200.0, close=150.0, high=200.0)
+        c = detectorslib.dip_from_high(make())[0]
+        pack = make()
+        for key in c.feature_keys:
+            assert pack.fget(c.pair, key.rsplit(".", 1)[-1]) is not None, \
+                f"cited {key}, which the pack cannot show"
+
     def test_ma_cross_is_off_by_default_and_fires_when_enabled(self, ctx):
         make, cfg, _, kdb, _ = ctx
         seed_candles(kdb, tf="1d", n=260, start=100.0, step=0.5)

@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from console.services import llm_service
 from ops import db
 from ops.config import load_config
+from ops.lib import claude_auth
 from runs.llm import health as health_mod
 from runs.llm.stub import StubProvider, scripted
 from runs.llm.types import ProviderCaps
@@ -74,6 +75,44 @@ def test_provider_cards_cover_every_provider_key(auth_client: TestClient, journa
     assert body["auth_mode"] in ("subscription", "api_key", "auto")
     assert set(body["month"]) == {"month", "total_usd", "by_provider"}
     assert set(body["rate_limit"]) == {"status", "utilization", "resets_at"}
+
+
+def test_the_token_counts_as_present_even_though_the_console_cannot_see_it(
+        auth_client: TestClient, app, env: Path, journal: Path,  # noqa: ANN001
+        monkeypatch: pytest.MonkeyPatch):
+    """A configured token must read as present, and it is never in the console's own env.
+
+    This is the bug the owner reported as "it says claude not connected": credentials are
+    handed to model jobs by ``ops/envwrap.sh`` and the console is in no allowlist, so
+    checking ``os.environ`` answered "no credential" on a system where every job
+    authenticated fine — and where the Secrets page, which reads ``.env``, said "signed
+    in" on the same screen refresh.
+    """
+    monkeypatch.delenv(claude_auth.OAUTH_VAR, raising=False)
+    env_file = env / ".env"
+    env_file.write_text(f"{claude_auth.OAUTH_VAR}=sk-ant-oat01-present1234\n")
+    app.state.env_file = env_file
+
+    cards = {c["key"]: c for c in auth_client.get("/api/llm/providers").json()["providers"]}
+    assert cards["claude:subscription"]["credential_present"] is True
+    assert cards["claude:api_key"]["credential_present"] is False   # absent from that .env
+
+
+def test_a_reachable_local_model_is_reported_with_no_cache_to_read(
+        auth_client: TestClient, ollama_client, journal: Path, knowledge: Path):  # noqa: ANN001
+    """An empty cache must mean "ask", not "not detected".
+
+    The detected-URL cache lives for ten minutes and only a model job ever refills it, so
+    ten quiet minutes were enough for this page to report a local model that was up and
+    answering as absent — the same mistake as judging Claude's credential by the console's
+    own environment.
+    """
+    with db.opened(knowledge) as conn:                       # nothing has probed yet
+        conn.execute("DELETE FROM ops_state WHERE key LIKE 'ollama_%'")
+        conn.commit()
+    cards = {c["key"]: c for c in auth_client.get("/api/llm/providers").json()["providers"]}
+    assert cards["ollama"]["credential_present"] is True, "a running local model read as absent"
+    assert cards["ollama"]["base_url"] == OLLAMA
 
 
 def test_only_the_active_credential_is_enabled(auth_client: TestClient, journal: Path):

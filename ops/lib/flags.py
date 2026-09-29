@@ -98,14 +98,29 @@ class _Locked:
 
 def _audit(conn: sqlite3.Connection | None, name: str, active: bool, flag: dict[str, Any],
            now: datetime) -> None:
+    """Append one row for this set/clear event.
+
+    A clear row used to stamp ``set_utc`` with the *clear* time and name the original setter
+    as ``source`` with nothing about who lifted it — so the one table that should answer "how
+    long was trading blocked, and who ended it" could answer neither. It matters: on
+    2026-09-24 a ``data_stale`` latch blocked entries for 14 hours and reconstructing that
+    span meant pairing rows by hand. A clear row now carries the flag's ORIGINAL ``set_at``
+    against the clear time, so the row itself is the outage window, and ``detail`` names the
+    process that lifted it. ``source`` stays the setter, which is what the column means.
+    """
     if conn is None:
         return
+    detail = flag.get("reason")
+    if not active:
+        by = flag.get("cleared_by")
+        detail = f"{detail or ''} (cleared by {by})".strip() if by else detail
+    set_utc = _iso(now) if active else (flag.get("set_at") or _iso(now))
     conn.execute(
         "INSERT INTO flags(name, active, set_utc, cleared_utc, expires_utc, source, severity, scope, detail)"
         " VALUES (?,?,?,?,?,?,?,?,?)",
-        (name, int(active), _iso(now), None if active else _iso(now), flag.get("expires_at"),
+        (name, int(active), set_utc, None if active else _iso(now), flag.get("expires_at"),
          flag.get("set_by", "?"), flag.get("severity", "info"), flag.get("scope", "ALL"),
-         flag.get("reason")),
+         detail),
     )
     conn.commit()
 

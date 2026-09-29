@@ -95,7 +95,7 @@ class TestTheEffortFloorStillMeansSomething:
         assert "shadow_decide" not in router.INPUT_TASKS
         added = tweak(mc, tasks={"shadow_decide": {
             "chain": ["sonnet"], "tools": "none", "min_tier": 1, "effort": "low",
-            "why": "a task nobody has classified yet", "max_turns": 1}})
+            "why": "a task nobody has classified yet", "max_turns": 2}})
         p = claude(responses=[scripted(OK)])
         chain_mod.run_task("shadow_decide", "p", run_ctx=ctx("shadow_decide"),
                            models_cfg=added, jdb=jdb, kdb=kdb,

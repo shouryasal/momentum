@@ -257,23 +257,17 @@ def test_crontab_matches_earn_yaml_schedules(cfg):
     text = (REPO_ROOT / "ops" / "crontab").read_text()
     lines = [line for line in text.splitlines()
              if line and not line.startswith("#") and "=" not in line.split()[0]]
-    jobs = {
-        "runs.ingest": "ingest", "runs.tca_job": "tca_job", "runs.nav_job": "nav_job",
-        "ops.healthcheck": "healthcheck", "runs.research_run": "research_run",
-        "runs.review_run": "review_run", "ops/backup.sh": "backup",
-        "refresh_backtest_data.sh": "backtest_data",
-        "runs.maintenance": "maintenance",
-        "runs.daily_review": "daily_review",
-        "runs.signals": "scanner",
-        "runs.nav_tick": "nav_tick",
-        "runs.reconcile": "reconcile",
-    }
+    # Each line names its own job, because every one of them now runs through the single
+    # autonomy gate: `... envwrap.sh <wrap> -- python -m ops.autonomy run <job> -- <cmd>`.
+    # Matching on the module name used to be ambiguous (two discovery passes run the same
+    # module, two research slots run the same line) — the gate marker never is.
     seen: dict[str, list[tuple[str, str]]] = {}
     for line in lines:
         cron = " ".join(line.split()[:5])
         assert croniter.is_valid(cron), line
-        for needle, job in jobs.items():
-            if needle in line:
+        assert f"-m {gen.GATE_MODULE} run " in line, f"ungated cron line: {line}"
+        for job in gen.JOBS:
+            if f"-m {gen.GATE_MODULE} run {job} --" in line:
                 seen.setdefault(job, []).append((cron, line))
     for job, sched in cfg.ops.schedules.items():
         assert job in seen, f"{job} missing from crontab"

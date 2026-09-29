@@ -3,6 +3,8 @@ hardening P1 owns: the freshness sidecar, the single research-slot source, .env.
 the tracked runtime directories, the shell scripts' interpreter and the Windows scripts.
 """
 
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -170,6 +172,137 @@ class TestFreshnessSidecar:
         freshness.record(freshness.SOURCE_NEWS, path=path)
         assert not list(tmp_path.glob(".freshness-*.tmp"))
         assert freshness.read(path)["version"] == freshness.VERSION
+
+
+class TestPerSourceStaleness:
+    """A dead news feed must not be able to switch trading off.
+
+    ``news`` used to be stamped into ``sources`` alongside candles and the order book, and
+    ``data_age_minutes`` took the max over all of them — so a quiet RSS wire raised
+    ``data_stale`` and the gate refused every entry while prices were arriving perfectly.
+    The split puts price feeds in ``sources`` (they block) and everything else in
+    ``advisory`` (it degrades). These tests pin both halves, and the fail-closed behaviour
+    that must survive the change.
+    """
+
+    NOW = datetime(2026, 9, 22, 8, 0, tzinfo=UTC)
+
+    def _sidecar(self, tmp_path, **ages_minutes):
+        from ops.lib import freshness
+
+        path = tmp_path / "freshness.json"
+        freshness.record_many(
+            {name: self.NOW - timedelta(minutes=mins)
+             for name, mins in ages_minutes.items()}, now=self.NOW, path=path)
+        return path
+
+    def test_a_stale_news_feed_does_not_block_entries(self, tmp_path):
+        """The 2026-09-24 shape: prices fine, news hours old. Must not block."""
+        from ops.lib import freshness
+        from strategies.riskgate import data_age_minutes
+
+        path = self._sidecar(tmp_path, book_snapshots=2, candles_1h=61, news=14 * 60)
+        assert freshness.data_age_minutes(path, self.NOW) == pytest.approx(2.0)
+        # and the gate's own independent stdlib reader must agree, because it is the one
+        # that actually decides. It enumerates `sources`, so advisory feeds are invisible
+        # to it by construction.
+        assert data_age_minutes(path, self.NOW) == pytest.approx(2.0)
+
+    def test_a_stale_price_feed_still_blocks(self, tmp_path):
+        """The behaviour that must NOT be weakened by any of this."""
+        from ops.lib import freshness
+        from strategies.riskgate import data_age_minutes
+
+        path = self._sidecar(tmp_path, book_snapshots=240, candles_1h=300, news=1)
+        assert freshness.data_age_minutes(path, self.NOW) == pytest.approx(240.0)
+        assert data_age_minutes(path, self.NOW) == pytest.approx(240.0)
+
+    def test_advisory_only_is_fail_closed(self, tmp_path):
+        """No price feed at all is ``inf``, never "nothing stale"."""
+        import math
+
+        from ops.lib import freshness
+        from strategies.riskgate import data_age_minutes
+
+        path = self._sidecar(tmp_path, news=1, funding=1)
+        assert freshness.data_age_minutes(path, self.NOW) == math.inf
+        assert data_age_minutes(path, self.NOW) == math.inf
+
+    def test_a_pre_split_file_is_migrated_on_the_next_write(self, tmp_path):
+        """The live file had news inside ``sources``; the next write has to move it.
+
+        Until it moves, the gate's reader still counts news as a price feed — so this
+        migration is what actually unblocks a system a quiet wire was holding down.
+        """
+        from ops.lib import freshness
+
+        path = tmp_path / "freshness.json"
+        path.write_text(json.dumps({
+            "version": 1, "updated_at": "2026-09-22T07:00:00Z",
+            "sources": {"book_snapshots": {"latest_utc": "2026-09-22T07:55:00Z"},
+                        "candles_1h": {"latest_utc": "2026-09-22T07:00:00Z"},
+                        "news": {"latest_utc": "2026-09-08T07:00:00Z"}}}))
+        freshness.record_many({freshness.SOURCE_BOOKS: self.NOW}, now=self.NOW, path=path)
+        data = freshness.read(path)
+        assert "news" not in data["sources"]
+        assert data[freshness.ADVISORY_KEY]["news"]["latest_utc"] == "2026-09-08T07:00:00Z"
+        assert freshness.data_age_minutes(path, self.NOW) == pytest.approx(0.0)
+
+    def test_degraded_reports_advisory_feeds_only(self, tmp_path):
+        from ops.lib import freshness
+
+        path = self._sidecar(tmp_path, book_snapshots=999, candles_1h=999,
+                             news=120, funding=5)
+        stale = freshness.degraded(30.0, path=path, now=self.NOW)
+        assert set(stale) == {"news"}          # funding is fresh; books are not advisory
+        assert stale["news"] == pytest.approx(120.0)
+
+    def test_every_age_is_still_visible_for_display(self, tmp_path):
+        """The console health page shows news and funding ages; the split must not hide them."""
+        from ops.lib import freshness
+
+        path = self._sidecar(tmp_path, book_snapshots=2, candles_1h=61, news=9, funding=4)
+        assert set(freshness.ages(path=path, now=self.NOW)) == {
+            "book_snapshots", "candles_1h", "news", "funding"}
+        assert set(freshness.blocking_ages(path=path, now=self.NOW)) == {
+            "book_snapshots", "candles_1h"}
+        assert set(freshness.advisory_ages(path=path, now=self.NOW)) == {"news", "funding"}
+
+    def test_the_audit_row_says_how_long_a_block_lasted_and_who_lifted_it(self, tmp_path):
+        """One row per event; a clear row spans the outage and names the clearer.
+
+        A ``data_stale`` latch blocked every entry for 14 hours on 2026-09-24 and the audit
+        table could say neither how long nor who ended it — the clear row stamped ``set_utc``
+        with the clear time and credited the original setter.
+        """
+        from ops import db
+        from ops.config import load_config
+        from ops.lib import flags
+
+        _, knowledge = db.init_all(load_config(), root=tmp_path)
+        conn = db.connect(knowledge)
+        path = tmp_path / "flags.json"
+        set_at = self.NOW - timedelta(hours=14)
+        flags.set_flag(path, "data_stale", severity="block_entries", reason="data age 999 min",
+                       set_by="healthcheck", now=set_at, audit_conn=conn)
+        flags.clear_flag(path, "data_stale", by="ingest", now=self.NOW, audit_conn=conn)
+        row = dict(conn.execute("SELECT * FROM flags WHERE active=0 ORDER BY id DESC"
+                                " LIMIT 1").fetchone())
+        conn.close()
+        assert row["set_utc"] == set_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert row["cleared_utc"] == self.NOW.strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert "cleared by ingest" in row["detail"]
+        assert row["source"] == "healthcheck"      # who SET it; the column's meaning
+
+    def test_blocking_is_an_explicit_allowlist(self):
+        from ops.lib import freshness
+
+        assert freshness.is_blocking("book_snapshots")
+        assert freshness.is_blocking(freshness.candles_source("4h"))
+        assert not freshness.is_blocking(freshness.SOURCE_NEWS)
+        assert not freshness.is_blocking(freshness.SOURCE_FUNDING)
+        # a feed nobody has classified cannot quietly acquire the power to stop trading
+        assert not freshness.is_blocking("some_new_sentiment_feed")
 
 
 class TestResearchSlotsAreOneSource:

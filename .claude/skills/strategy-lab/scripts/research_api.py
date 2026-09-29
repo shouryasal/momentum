@@ -149,8 +149,10 @@ def cmd_hypothesis(args: argparse.Namespace) -> int:
         return 0
     if args.sub == "list":
         rows = ledger.listing()
-        text = "\n".join(f"{r['verdict']:<13}{r['id']}  {r['statement']}" for r in rows) \
-            or "no hypotheses recorded yet"
+        text = "\n".join(
+            f"{'change-eligible' if r['may_become_a_change'] else r['state']:<16}"
+            f"{str(r['prediction_verdict'] or '-'):<14}{r['id']}  {r['statement']}"
+            for r in rows) or "no hypotheses recorded yet"
         _emit({"hypotheses": rows}, text, args.json)
         return 0
     if args.sub == "grade":
@@ -159,7 +161,11 @@ def cmd_hypothesis(args: argparse.Namespace) -> int:
         grade = ledger.grade(args.id, _headline(baseline), _headline(measured),
                              evidence=_evidence(baseline, measured), note=args.note)
         _emit(grade.as_dict(), grade.describe(), args.json)
-        return 0 if grade.verdict in ("supported", "mixed") else 1
+        # The exit code reports the PREDICTION verdict only. This entry point hands the
+        # ledger no validation, so `may_become_a_change` is false by construction and a
+        # zero here never means "this may become a change" — that decision needs the
+        # edge-audit statistics, which is what runs/discovery.py supplies.
+        return 0 if grade.prediction_verdict in ("supported", "mixed") else 1
     raise SystemExit(f"unknown hypothesis subcommand {args.sub!r}")
 
 

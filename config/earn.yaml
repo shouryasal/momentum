@@ -531,6 +531,31 @@ review:
 
 models_config: config/models.yaml
 
+# A PROFILE is a named overlay over this file, applied at load time and then re-validated
+# by the whole schema and every cross-check — so a profile can never say something this
+# file could not. `active: null` is the shipped system and is what every test asserts.
+# Selecting one is this key and nothing else; switching back is this key and nothing else.
+# A profile may only set trading.*, execution.*, sleeve_a.*, sleeve_b.* and
+# sleeves.<s>.strategy (ops.config.PROFILE_ALLOWED_PREFIXES, deny by default). It can
+# NEVER touch risk, bounds, universe, modes, autonomy or exchange — and
+# ops.config.assert_profile_preserves_protection re-derives both configs and refuses the
+# profile unless those four sections are identical and no per-trade stop got looser.
+# Shipped overlays: config/profiles/fast-test.yaml — the 10-hour plumbing test.
+profiles:
+  # Selecting a profile HERE breaks ~108 tests, because much of the suite reads
+  # `load_config()` where it means "the shipped configuration" and then asserts shipped
+  # numbers (SleeveA/SleeveB, 4h, stoploss 0.10, roi_table {"0": 10.0}, startup candles
+  # from the 4h bound), and five console fixtures build a temp repo from a hardcoded
+  # CONFIG_FILES list that does not include config/profiles/ — so load_config(root=tmp)
+  # raises FileNotFoundError on the overlay. Two more (tests/test_modes/test_modes.py
+  # TestHappyPath) fail CORRECTLY, because assert_profile_not_live refuses to render a
+  # live runtime while any profile is active. Until those are made profile-aware, the
+  # 10-hour plumbing run selects fast-test in the RUNTIME deployment (~/earn-run) only,
+  # where it is blessed and where the bots read it. Flipping it back there is this same
+  # key plus `python -m ops.gen_freqtrade_config` and a re-bless.
+  active: null
+  dir: config/profiles
+
 paths:
   knowledge_db: knowledge/earn.db
   journal_db: journal/journal.db

@@ -1,0 +1,279 @@
+{
+  "spearman_vs_time": [
+    {
+      "feature": "age_days",
+      "spearman_vs_time": 0.4152,
+      "n": 29401
+    },
+    {
+      "feature": "drawdown_from_ath",
+      "spearman_vs_time": -0.3738,
+      "n": 29401
+    },
+    {
+      "feature": "funding_ann",
+      "spearman_vs_time": -0.364,
+      "n": 24078
+    },
+    {
+      "feature": "mom_365",
+      "spearman_vs_time": -0.358,
+      "n": 24225
+    },
+    {
+      "feature": "vol_120",
+      "spearman_vs_time": -0.355,
+      "n": 29401
+    },
+    {
+      "feature": "vol_60",
+      "spearman_vs_time": -0.2925,
+      "n": 29401
+    },
+    {
+      "feature": "adv_90_xs",
+      "spearman_vs_time": 0.2585,
+      "n": 29401
+    },
+    {
+      "feature": "har_rv_m",
+      "spearman_vs_time": -0.2462,
+      "n": 29401
+    },
+    {
+      "feature": "amihud_30_xs",
+      "spearman_vs_time": -0.2362,
+      "n": 29401
+    },
+    {
+      "feature": "vol_20",
+      "spearman_vs_time": -0.235,
+      "n": 29401
+    },
+    {
+      "feature": "har_rv_w",
+      "spearman_vs_time": -0.1732,
+      "n": 29401
+    },
+    {
+      "feature": "drawdown_from_ath_xs",
+      "spearman_vs_time": 0.1629,
+      "n": 29401
+    },
+    {
+      "feature": "above_ma_200",
+      "spearman_vs_time": -0.1494,
+      "n": 29401
+    },
+    {
+      "feature": "vol_60_xs",
+      "spearman_vs_time": 0.1476,
+      "n": 29401
+    },
+    {
+      "feature": "vol_20_xs",
+      "spearman_vs_time": 0.1393,
+      "n": 29401
+    },
+    {
+      "feature": "mom_90",
+      "spearman_vs_time": -0.1393,
+      "n": 29401
+    },
+    {
+      "feature": "vol_120_xs",
+      "spearman_vs_time": 0.1376,
+      "n": 29391
+    },
+    {
+      "feature": "vol_trend_30_180",
+      "spearman_vs_time": -0.135,
+      "n": 29401
+    },
+    {
+      "feature": "har_rv_d",
+      "spearman_vs_time": -0.1304,
+      "n": 29294
+    },
+    {
+      "feature": "dist_from_high_365",
+      "spearman_vs_time": -0.0964,
+      "n": 29380
+    },
+    {
+      "feature": "adv_90",
+      "spearman_vs_time": -0.094,
+      "n": 29401
+    },
+    {
+      "feature": "log_adv_90",
+      "spearman_vs_time": -0.094,
+      "n": 29401
+    },
+    {
+      "feature": "above_ma_50",
+      "spearman_vs_time": -0.088,
+      "n": 29401
+    },
+    {
+      "feature": "dist_from_high_90_xs",
+      "spearman_vs_time": -0.0696,
+      "n": 29401
+    },
+    {
+      "feature": "mom_30",
+      "spearman_vs_time": -0.0691,
+      "n": 29401
+    },
+    {
+      "feature": "mom_365_xs",
+      "spearman_vs_time": 0.059,
+      "n": 24183
+    },
+    {
+      "feature": "mom_7",
+      "spearman_vs_time": -0.0585,
+      "n": 29401
+    },
+    {
+      "feature": "funding_ann_xs",
+      "spearman_vs_time": -0.0395,
+      "n": 24054
+    },
+    {
+      "feature": "logret_1",
+      "spearman_vs_time": 0.0354,
+      "n": 29401
+    },
+    {
+      "feature": "dist_from_high_90",
+      "spearman_vs_time": 0.0344,
+      "n": 29401
+    },
+    {
+      "feature": "mom_7_xs",
+      "spearman_vs_time": -0.0273,
+      "n": 29401
+    },
+    {
+      "feature": "amihud_30",
+      "spearman_vs_time": 0.0254,
+      "n": 29401
+    },
+    {
+      "feature": "mom_30_xs",
+      "spearman_vs_time": -0.0222,
+      "n": 29401
+    },
+    {
+      "feature": "mom_90_xs",
+      "spearman_vs_time": -0.0144,
+      "n": 29401
+    },
+    {
+      "feature": "vol_ratio_20_60",
+      "spearman_vs_time": 0.0129,
+      "n": 29401
+    },
+    {
+      "feature": "dist_from_high_365_xs",
+      "spearman_vs_time": -0.0039,
+      "n": 29351
+    },
+    {
+      "feature": "vol_trend_30_180_xs",
+      "spearman_vs_time": -0.0009,
+      "n": 29372
+    }
+  ],
+  "adversarial_time": {
+    "auc": 0.9993,
+    "auc_xs_only": 0.9499,
+    "auc_without_age_days": 0.9991,
+    "top": [
+      [
+        "dist_from_high_365_xs",
+        572
+      ],
+      [
+        "dist_from_high_365",
+        523
+      ],
+      [
+        "drawdown_from_ath_xs",
+        509
+      ],
+      [
+        "mom_365",
+        477
+      ],
+      [
+        "drawdown_from_ath",
+        467
+      ],
+      [
+        "age_days",
+        382
+      ],
+      [
+        "vol_120",
+        357
+      ],
+      [
+        "vol_120_xs",
+        283
+      ],
+      [
+        "mom_365_xs",
+        249
+      ],
+      [
+        "funding_ann",
+        249
+      ]
+    ],
+    "top_xs": [
+      [
+        "drawdown_from_ath_xs",
+        973
+      ],
+      [
+        "dist_from_high_365_xs",
+        733
+      ],
+      [
+        "mom_365_xs",
+        684
+      ],
+      [
+        "adv_90_xs",
+        624
+      ],
+      [
+        "funding_ann_xs",
+        531
+      ],
+      [
+        "amihud_30_xs",
+        473
+      ],
+      [
+        "vol_120_xs",
+        414
+      ],
+      [
+        "dist_from_high_90_xs",
+        305
+      ],
+      [
+        "vol_trend_30_180_xs",
+        277
+      ],
+      [
+        "mom_90_xs",
+        274
+      ]
+    ],
+    "note": "AUC near 1.0 means the features encode the date, so a model trained on the past is extrapolating rather than interpolating. Read auc_xs_only as the drift a cross-sectionally ranked model actually faces; the all-feature AUC is inflated by universe turnover (a coin's own volume and age identify the coin, and half the segments lived in one half of the sample)."
+  }
+}

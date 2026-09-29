@@ -272,13 +272,17 @@ PROTECTED_PREFIXES: tuple[str, ...] = (
     "runtime",
     "exchange",
     "paths",
+    # Selecting a profile overlay re-renders both bots' mechanics from a different file.
+    "profiles",
 )
 PROTECTED_EXACT: tuple[str, ...] = ("sleeves.a.strategy", "sleeves.b.strategy")
 
 #: Paths that may not move while any sleeve is live — changing what Earn may trade, or the
 #: live ceilings, under an open position is exactly the accident the console exists to stop.
+#: ``profiles`` is here for the same reason: switching the profile switches the strategy
+#: class and the timeframe out from under an open book.
 LIVE_LOCKED_PREFIXES: tuple[str, ...] = ("universe", "modes.live", "sleeves.a.strategy",
-                                         "sleeves.b.strategy")
+                                         "sleeves.b.strategy", "profiles")
 
 
 def confirm_phrase_for(file_id: str) -> str:
