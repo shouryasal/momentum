@@ -16,6 +16,20 @@ Earn against buy-and-hold.
 
 The freqtrade responses and the clock are injected, so the arithmetic is unit-tested
 against hand-written payloads.
+
+**What this ledger is, and what it is not.** ``profit_closed_coin`` is the bot's ``/profit``,
+and a bot only knows the database it is running on. When the bots were restarted onto the
+fast-test profile at 2026-09-23 23:37Z with fresh databases
+(``ft_userdata/<s>/runs/test-<s>-000.sqlite``), realised went from −42.21 / −27.56 to 0.00
+and the 23:45Z tick wrote 10,000.00 for both sleeves: the first evening's −69.77 stayed
+behind in ``tradesv3.sqlite`` and vanished from every screen that read ``nav_points``.
+Nothing here could have carried it — no ``sleeve_runs`` row was opened for either run (the
+restart bypassed ``ops.modes``), ``run_id`` is NULL on every point, and ``seed`` is a
+constant. So ``nav_points`` is, by construction, **the bot's own ledger of its current
+run** — the number the gate and ``risk_resume`` size against — and not the cumulative pot.
+The cumulative pot is ``console.services.pot_service``: seed + every closed trade in every
+run database + the open book, read from the databases themselves. The console's Home and
+Trading pages show that, with this ledger beside it and the gap named.
 """
 
 from __future__ import annotations

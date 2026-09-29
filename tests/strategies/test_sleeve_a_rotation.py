@@ -100,6 +100,13 @@ def _wide_sleeve_a(monkeypatch, tmp_path, *, regimes=None, vols=None, snapshot=N
     def mutate(raw):
         raw["universe"]["snapshot"] = snap
         raw["universe"]["pairs"] = [f"{a}/{QUOTE}" for a in sorted(snap["tiers"])]
+        # The rotation is proven on a FOUR-seat, 10% sleeve (the fixture's five scored
+        # satellites need more than two seats to show hysteresis and a decisive rotation).
+        # The shipped sleeve is 2 seats / 5% since 2026-09-29 (dip-strategy.md §8.1 item
+        # 2, pinned in tests/test_foundation/test_config_load.py); the selection code reads
+        # both numbers from the gate config, so it is the same rotation at either size.
+        raw["risk"]["max_satellite_positions"] = 4
+        raw["risk"]["max_satellite_gross"] = 0.10
 
     s = _make(monkeypatch, tmp_path, "a", mutate=mutate)
     reg = dict(regimes or {a: True for a in snap["tiers"]})

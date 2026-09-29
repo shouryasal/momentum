@@ -1,0 +1,170 @@
+{
+  "audit_problems": [],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "refuted",
+  "closed_utc": "2026-09-29T14:26:24Z",
+  "costs_bps": 15.0,
+  "falsifier": "Refuted if the CAGR gain over 2019-01-01..2026-09-24 is below 2.0 percentage points, or the max drawdown is more than 2.0 percentage points deeper than the plain ensemble's, or the gain is positive in fewer than 2 of the 3 regimes",
+  "horizon": "1d",
+  "id": "2026-09-29-ta-third-asset",
+  "n_params": 2,
+  "opened_utc": "2026-09-29T14:17:50Z",
+  "outcome": "refuted",
+  "regimes": [
+    "2019-22",
+    "2023-24",
+    "2025-26"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": 0.809,
+      "btc_buy_and_hold_cagr": 49.7,
+      "btc_buy_and_hold_mdd": -76.63,
+      "note": "strategy_baseline is the plain BTC/ETH 15-member trend ensemble, OOS window 2019-01-01..2026-09-24, 15 bps/side",
+      "strategy_baseline": 1.189,
+      "strategy_baseline_cagr": 49.33,
+      "strategy_baseline_mdd": -45.62
+    },
+    "both_directions": {
+      "avoided": "BNB leg: drawdown -45.52% vs -45.62% (+0.10pp); satellites: -45.07% (+0.55pp)",
+      "gave_up": "BNB leg: CAGR +12.18pp but positive in 1 of 3 regimes (2019-22 only: 95.46 vs 67.33); satellites at 10%: CAGR -0.76pp, positive in 1 of 3; the 10% of core they displace was worth +4.74pp"
+    },
+    "costs_bps": 15.0,
+    "edge_audit": {
+      "deflated_hurdle": 2.426,
+      "effective_n": 577.9,
+      "embargo_bars": 30,
+      "n_selection_trials": 7910,
+      "note": "effective_n is BTC 1d triple-barrier (10-bar) from edge-audit labels; hurdle = BTC hold OOS Sharpe + expected_max_sharpe(N, 7.73)",
+      "purged": true,
+      "years": 7.73
+    },
+    "falsifier_triggered": true,
+    "falsifier_value": {
+      "bnb_cagr_gain_pp": 12.18,
+      "bnb_mdd_diff_pp": 0.1,
+      "bnb_positive_regimes": 1,
+      "sat4_cagr_gain_pp": -0.76,
+      "sat4_mdd_diff_pp": 0.55,
+      "sat4_positive_regimes": 1
+    },
+    "headline": 1.443,
+    "headline_is_in_sample": false,
+    "hindsight_note": "BNB was chosen as 'the third-largest survivor', which is selection on the outcome: its whole gain is the 2021 exchange-token rally, one event",
+    "n_params": 2,
+    "out_of_sample": {
+      "bnb_third": {
+        "cagr": 61.51,
+        "fee_yr": 1.47,
+        "gross": 0.506,
+        "mdd": -45.52,
+        "months_below_m10": 7,
+        "n": 2824,
+        "sharpe": 1.443,
+        "sharpe_meanstd": 1.338,
+        "total": 3981.55,
+        "turnover_yr": 9.79,
+        "vol": 42.63
+      },
+      "core_090_alone": {
+        "cagr": 44.59,
+        "fee_yr": 1.22,
+        "gross": 0.451,
+        "mdd": -41.75,
+        "months_below_m10": 6,
+        "n": 2824,
+        "sharpe": 1.194,
+        "sharpe_meanstd": 1.175,
+        "total": 1633.47,
+        "turnover_yr": 8.13,
+        "vol": 37.35
+      },
+      "method": "nothing fitted; K and the 10% cap were preset from wide-universe.md; whole 2019-2026 window reported as OOS",
+      "sat_top2": {
+        "cagr": 46.59,
+        "fee_yr": 1.42,
+        "gross": 0.486,
+        "mdd": -44.72,
+        "months_below_m10": 7,
+        "n": 2824,
+        "sharpe": 1.153,
+        "sharpe_meanstd": 1.15,
+        "total": 1828.23,
+        "turnover_yr": 9.46,
+        "vol": 40.42
+      },
+      "sat_top4_gross10": {
+        "cagr": 48.57,
+        "fee_yr": 1.4,
+        "gross": 0.486,
+        "mdd": -45.07,
+        "months_below_m10": 7,
+        "n": 2824,
+        "sharpe": 1.198,
+        "sharpe_meanstd": 1.18,
+        "total": 2038.96,
+        "turnover_yr": 9.34,
+        "vol": 40.54
+      },
+      "sat_top8": {
+        "cagr": 47.37,
+        "fee_yr": 1.39,
+        "gross": 0.484,
+        "mdd": -44.79,
+        "months_below_m10": 7,
+        "n": 2824,
+        "sharpe": 1.17,
+        "sharpe_meanstd": 1.161,
+        "total": 1909.38,
+        "turnover_yr": 9.28,
+        "vol": 40.49
+      }
+    },
+    "regimes": {
+      "bnb:2019-22": {
+        "cagr": 95.46,
+        "mdd": -45.5,
+        "n": 1461,
+        "sharpe": 1.845
+      },
+      "bnb:2023-24": {
+        "cagr": 52.59,
+        "mdd": -26.42,
+        "n": 731,
+        "sharpe": 1.555
+      },
+      "bnb:2025-26": {
+        "cagr": 10.96,
+        "mdd": -26.83,
+        "n": 632,
+        "sharpe": 0.447
+      },
+      "sat4:2019-22": {
+        "cagr": 66.2,
+        "mdd": -45.07,
+        "n": 1461,
+        "sharpe": 1.39
+      },
+      "sat4:2023-24": {
+        "cagr": 53.8,
+        "mdd": -28.6,
+        "n": 731,
+        "sharpe": 1.496
+      },
+      "sat4:2025-26": {
+        "cagr": 10.14,
+        "mdd": -25.61,
+        "n": 632,
+        "sharpe": 0.414
+      }
+    }
+  },
+  "seal": "c525bffc94263b4fec1333b03cc45931a88ed6d3c8a60af1004fb1b86e914a5a",
+  "seal_ok": true,
+  "statement": "Adding a third leg to the BTC/ETH trend ensemble book - either BNB with its own 15-member ensemble at 1/3 of the book, or a satellite basket of the top-K names by trailing 90-day quote volume (>=5M USDT ADV, >=180d listed, own ensemble, 30 bps/side) capped at 10% of NAV and held only while the BTC ensemble weight exceeds 0.5 - predicts a higher CAGR than the BTC/ETH ensemble at a 1d horizon with no deeper max drawdown",
+  "status": "closed",
+  "surface": "local-candles (survivorship-free panel_1d.parquet, 747 tickers, dead coins in)"
+}

@@ -95,18 +95,23 @@ export interface ModeView {
 }
 
 /**
- * `off` | `not_scheduled` | `schedule_drifted` | `never_ran` | `blocked` | `late` |
- * `failing` | `alive`.
+ * `off` | `not_scheduled` | `schedule_drifted` | `resumed` | `never_ran` | `blocked` |
+ * `late` | `failing` | `alive`.
  *
  * `not_scheduled` is switched on with nothing installed to run it. `blocked` is the one
  * added after 2026-09-24: installed, on schedule, every job green, and the risk gate
  * refusing every entry for fourteen hours behind a flag that could never expire. `alive`
- * was technically true the whole time. Neither of them may ever render as a tick.
+* was technically true the whole time. Neither of them may ever render as a tick.
+ *
+ * `resumed` is the 2026-09-25 sequel: the host was asleep (lid closed, then hibernated)
+ * and has just woken. The headline is the plain sentence about the sleep and the catch-up,
+ * and it is a heads-up, not a failure — the loop was never broken.
  */
 export type Verdict =
   | 'off'
   | 'not_scheduled'
   | 'schedule_drifted'
+  | 'resumed'
   | 'never_ran'
   | 'blocked'
   | 'late'

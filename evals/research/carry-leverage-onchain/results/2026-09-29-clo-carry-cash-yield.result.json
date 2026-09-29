@@ -1,0 +1,230 @@
+{
+  "costs_bps": 15.0,
+  "futures_costs_bps": 5.0,
+  "headline": 0.124,
+  "headline_is_in_sample": false,
+  "headline_note": "pp/yr of CAGR the carry would add to the book in the most recent regime; a quantification, not a strategy \u2014 the book cannot short a perp",
+  "baselines": {
+    "btc_buy_and_hold": 0.7399068359388563,
+    "strategy_baseline": 1.219629845378026
+  },
+  "out_of_sample": {
+    "note": "no fitted parameter; every regime is out of sample of the construction, which was fixed at pre-registration",
+    "per_regime_net_pp_per_yr": {
+      "2020-22": 0.163,
+      "2023-24": -0.132,
+      "2025-26": 0.124
+    }
+  },
+  "regimes": {
+    "2020-22": {
+      "n": 1096,
+      "net_contrib_pp_per_yr": 0.163,
+      "gross_contrib_pp_per_yr": 1.042,
+      "cost_pp_per_yr": 0.879
+    },
+    "2023-24": {
+      "n": 731,
+      "net_contrib_pp_per_yr": -0.132,
+      "gross_contrib_pp_per_yr": 0.897,
+      "cost_pp_per_yr": 1.029
+    },
+    "2025-26": {
+      "n": 630,
+      "net_contrib_pp_per_yr": 0.124,
+      "gross_contrib_pp_per_yr": 1.024,
+      "cost_pp_per_yr": 0.9
+    }
+  },
+  "n_params": 1,
+  "edge_audit": {
+    "effective_n": 523.9,
+    "deflated_hurdle": null,
+    "note": "no Sharpe is claimed; the hurdle does not apply to a yield estimate"
+  },
+  "both_directions": {
+    "earned": "gross funding on the carried notional (legs table)",
+    "gave_up": "the resize cost of following the ensemble's idle share (cost_pp_per_yr) and every negative-funding print"
+  },
+  "legs": {
+    "BTC": {
+      "2020-22": {
+        "prints": 3288,
+        "years": 3.003,
+        "gross_funding_ann_pct": 17.32,
+        "share_prints_negative": 0.1457,
+        "worst_cum_funding_ptt_pct": -1.519,
+        "basis_pnl_ann_pct": -0.29
+      },
+      "2023-24": {
+        "prints": 2193,
+        "years": 2.003,
+        "gross_funding_ann_pct": 9.9,
+        "share_prints_negative": 0.0926,
+        "worst_cum_funding_ptt_pct": -0.089,
+        "basis_pnl_ann_pct": -0.04
+      },
+      "2025-26": {
+        "prints": 1890,
+        "years": 1.726,
+        "gross_funding_ann_pct": 4.21,
+        "share_prints_negative": 0.1852,
+        "worst_cum_funding_ptt_pct": -0.412,
+        "basis_pnl_ann_pct": 0.0
+      },
+      "2020": {
+        "prints": 1098,
+        "years": 1.003,
+        "gross_funding_ann_pct": 17.19,
+        "share_prints_negative": 0.143,
+        "worst_cum_funding_ptt_pct": -1.519,
+        "basis_pnl_ann_pct": -0.83
+      },
+      "2021": {
+        "prints": 1095,
+        "years": 1.0,
+        "gross_funding_ann_pct": 30.61,
+        "share_prints_negative": 0.0731,
+        "worst_cum_funding_ptt_pct": -0.444,
+        "basis_pnl_ann_pct": 0.02
+      },
+      "2022": {
+        "prints": 1095,
+        "years": 1.0,
+        "gross_funding_ann_pct": 4.16,
+        "share_prints_negative": 0.221,
+        "worst_cum_funding_ptt_pct": -0.395,
+        "basis_pnl_ann_pct": -0.06
+      },
+      "2023": {
+        "prints": 1095,
+        "years": 1.0,
+        "gross_funding_ann_pct": 7.87,
+        "share_prints_negative": 0.1014,
+        "worst_cum_funding_ptt_pct": -0.027,
+        "basis_pnl_ann_pct": -0.15
+      },
+      "2024": {
+        "prints": 1098,
+        "years": 1.003,
+        "gross_funding_ann_pct": 11.92,
+        "share_prints_negative": 0.0838,
+        "worst_cum_funding_ptt_pct": -0.089,
+        "basis_pnl_ann_pct": 0.06
+      },
+      "2025": {
+        "prints": 1095,
+        "years": 1.0,
+        "gross_funding_ann_pct": 5.13,
+        "share_prints_negative": 0.1288,
+        "worst_cum_funding_ptt_pct": -0.062,
+        "basis_pnl_ann_pct": -0.0
+      },
+      "2026": {
+        "prints": 797,
+        "years": 0.728,
+        "gross_funding_ann_pct": 2.94,
+        "share_prints_negative": 0.2622,
+        "worst_cum_funding_ptt_pct": -0.412,
+        "basis_pnl_ann_pct": 0.01
+      }
+    },
+    "ETH": {
+      "2020-22": {
+        "prints": 3288,
+        "years": 3.003,
+        "gross_funding_ann_pct": 21.92,
+        "share_prints_negative": 0.1363,
+        "worst_cum_funding_ptt_pct": -1.792,
+        "basis_pnl_ann_pct": -0.51
+      },
+      "2023-24": {
+        "prints": 2193,
+        "years": 2.003,
+        "gross_funding_ann_pct": 10.61,
+        "share_prints_negative": 0.0666,
+        "worst_cum_funding_ptt_pct": -0.075,
+        "basis_pnl_ann_pct": -0.06
+      },
+      "2025-26": {
+        "prints": 1890,
+        "years": 1.726,
+        "gross_funding_ann_pct": 3.62,
+        "share_prints_negative": 0.2243,
+        "worst_cum_funding_ptt_pct": -0.597,
+        "basis_pnl_ann_pct": -0.05
+      },
+      "2020": {
+        "prints": 1098,
+        "years": 1.003,
+        "gross_funding_ann_pct": 27.41,
+        "share_prints_negative": 0.0264,
+        "worst_cum_funding_ptt_pct": -0.31,
+        "basis_pnl_ann_pct": -1.21
+      },
+      "2021": {
+        "prints": 1095,
+        "years": 1.0,
+        "gross_funding_ann_pct": 37.54,
+        "share_prints_negative": 0.0411,
+        "worst_cum_funding_ptt_pct": -0.356,
+        "basis_pnl_ann_pct": -0.25
+      },
+      "2022": {
+        "prints": 1095,
+        "years": 1.0,
+        "gross_funding_ann_pct": 0.79,
+        "share_prints_negative": 0.3416,
+        "worst_cum_funding_ptt_pct": -1.792,
+        "basis_pnl_ann_pct": -0.08
+      },
+      "2023": {
+        "prints": 1095,
+        "years": 1.0,
+        "gross_funding_ann_pct": 8.26,
+        "share_prints_negative": 0.0913,
+        "worst_cum_funding_ptt_pct": -0.075,
+        "basis_pnl_ann_pct": -0.16
+      },
+      "2024": {
+        "prints": 1098,
+        "years": 1.003,
+        "gross_funding_ann_pct": 12.96,
+        "share_prints_negative": 0.0419,
+        "worst_cum_funding_ptt_pct": -0.042,
+        "basis_pnl_ann_pct": 0.04
+      },
+      "2025": {
+        "prints": 1095,
+        "years": 1.0,
+        "gross_funding_ann_pct": 4.93,
+        "share_prints_negative": 0.1616,
+        "worst_cum_funding_ptt_pct": -0.068,
+        "basis_pnl_ann_pct": -0.05
+      },
+      "2026": {
+        "prints": 797,
+        "years": 0.728,
+        "gross_funding_ann_pct": 1.83,
+        "share_prints_negative": 0.3099,
+        "worst_cum_funding_ptt_pct": -0.597,
+        "basis_pnl_ann_pct": -0.05
+      }
+    }
+  },
+  "pure_carry_fund_btc_fully_collateralised_ann_pct": {
+    "2020-22": 8.66,
+    "2023-24": 4.95,
+    "2025-26": 2.1
+  },
+  "falsifier_triggered": true,
+  "falsifier_value": {
+    "net_contrib_2023_24": -0.132,
+    "net_contrib_2025_26": 0.124,
+    "worst_leg_ptt_pct": {
+      "BTC": -0.089,
+      "ETH": -0.075
+    },
+    "triggered": true
+  }
+}

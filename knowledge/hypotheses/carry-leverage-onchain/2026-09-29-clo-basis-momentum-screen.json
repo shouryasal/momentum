@@ -1,0 +1,109 @@
+{
+  "audit_problems": [],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "refuted",
+  "closed_utc": "2026-09-29T14:22:40Z",
+  "costs_bps": 15.0,
+  "falsifier": "The Newey-West(7) t-statistic of forward 7d spot return on the 5-day basis change is below 2.0 in absolute value in either half (2019-09..2023-03, 2023-03..2026-09) for BTC, OR the sign of the coefficient differs between the halves, OR a costed (15 bps per side) top-vs-bottom tercile long-only overlay does not beat holding BTC on Sharpe",
+  "horizon": "7d",
+  "id": "2026-09-29-clo-basis-momentum-screen",
+  "n_params": 1,
+  "opened_utc": "2026-09-29T14:14:50Z",
+  "outcome": "refuted",
+  "regimes": [
+    "2019-22",
+    "2023-24",
+    "2025-26"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": 0.7332989441079182,
+      "strategy_baseline": 1.1952750600202302
+    },
+    "both_directions": {
+      "gave_up": "the other 69% of days, plus 124x/yr turnover",
+      "held": "BTC on top-tercile basis-momentum days (31% of days)"
+    },
+    "costs_bps": 15.0,
+    "edge_audit": {
+      "deflated_hurdle": null,
+      "effective_n": 523.9,
+      "note": "screen; t-statistics are the test, no Sharpe is claimed"
+    },
+    "falsifier_triggered": true,
+    "falsifier_value": {
+      "hold_sharpe": 0.7332989441079182,
+      "overlay_sharpe": -0.7608866454003357,
+      "sign_agrees": 1.0,
+      "t_h1": -0.096,
+      "t_h2": -0.961,
+      "triggered": true
+    },
+    "headline": -0.7608866454003357,
+    "headline_is_in_sample": false,
+    "headline_note": "the rolling-tercile overlay uses only trailing data; nothing was fitted",
+    "n_params": 1,
+    "out_of_sample": {
+      "halves": {
+        "H1_2019-09..2023-03": {
+          "beta_d5_per_bp": -2.73e-05,
+          "mean_basis_bps": -0.163,
+          "n": 1265,
+          "n_effective": 180,
+          "r2": 1e-05,
+          "sd_basis_bps": 8.191,
+          "t_basis_level": -0.979,
+          "t_d5": -0.096
+        },
+        "H2_2023-03..2026-09": {
+          "beta_d5_per_bp": -0.0008689,
+          "mean_basis_bps": -2.993,
+          "n": 1295,
+          "n_effective": 185,
+          "r2": 0.00108,
+          "sd_basis_bps": 3.679,
+          "t_basis_level": 0.902,
+          "t_d5": -0.961
+        },
+        "full": {
+          "beta_d5_per_bp": -8.35e-05,
+          "mean_basis_bps": -1.594,
+          "n": 2560,
+          "n_effective": 365,
+          "r2": 5e-05,
+          "sd_basis_bps": 6.48,
+          "t_basis_level": -0.622,
+          "t_d5": -0.306
+        }
+      }
+    },
+    "regimes": {
+      "2020-22": {
+        "cagr": -41.71801494503471,
+        "mdd": -81.2668816024483,
+        "n": 845,
+        "sharpe": -1.1088517075778217
+      },
+      "2023-24": {
+        "cagr": -11.2691563702223,
+        "mdd": -36.997160864686194,
+        "n": 731,
+        "sharpe": -0.4026186504486993
+      },
+      "2025-26": {
+        "cagr": -8.703948853874211,
+        "mdd": -38.6577916777992,
+        "n": 630,
+        "sharpe": -0.34724475702269525
+      }
+    }
+  },
+  "seal": "89a3484d7135f6779a12e9c91ddc7413efbb89ae46df8a5bec6a4fc7e56afc1e",
+  "seal_ok": true,
+  "statement": "SCREEN (cannot become a change): a 5-day change in the perp-spot basis (basis momentum, Boons-Prado 2019 transplanted to a single perp) predicts the forward 7-day spot return on BTC and ETH",
+  "status": "closed",
+  "surface": "perp 1d klines cache (cache/derivatives/perp-*-1d.feather, 2019-09-08+) and local 1d spot candles"
+}

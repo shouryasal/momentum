@@ -96,7 +96,7 @@ def test_attribution_is_the_model_the_host_chose(cfg, root, world, local):
     run_once(cfg, root=root, now=NOW)
     row = events(cfg, root)[0]
     assert row["model_alias"] == "local_small"
-    assert row["model_id"] == "llama3.1:8b"
+    assert row["model_id"] == "granite4.2:3b"     # config/models.yaml: local_small (2026-09-29)
     assert row["provider"] == "ollama"
     assert row["served_model_reported"] == "claude-haiku-housekeeping"
 

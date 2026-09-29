@@ -1,0 +1,207 @@
+{
+  "family": {
+    "closed_by": null,
+    "n_selection_trials": 28,
+    "opened_utc": "2026-09-29T14:26:10Z"
+  },
+  "history": [
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:10Z",
+      "what": "trend-and-allocation: H1 vol-target t20 cap1"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:10Z",
+      "what": "trend-and-allocation: H1 vol-target t20 cap2"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:11Z",
+      "what": "trend-and-allocation: H1 vol-target t30 cap1"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:11Z",
+      "what": "trend-and-allocation: H1 vol-target t30 cap2"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:12Z",
+      "what": "trend-and-allocation: H1 vol-target t40 cap1"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:12Z",
+      "what": "trend-and-allocation: H1 vol-target t40 cap2"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:13Z",
+      "what": "trend-and-allocation: H1 vol-target t50 cap1"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:13Z",
+      "what": "trend-and-allocation: H1 vol-target t50 cap2"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:13Z",
+      "what": "trend-and-allocation: H1 vol-target t60 cap1"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:14Z",
+      "what": "trend-and-allocation: H1 vol-target t60 cap2"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:14Z",
+      "what": "trend-and-allocation: H1 vol-target t80 cap1"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:15Z",
+      "what": "trend-and-allocation: H1 vol-target t80 cap2"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:15Z",
+      "what": "trend-and-allocation: H2 BNB third leg"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:16Z",
+      "what": "trend-and-allocation: H2 satellites top2 gross10"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:16Z",
+      "what": "trend-and-allocation: H2 satellites top4 gross10"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:17Z",
+      "what": "trend-and-allocation: H2 satellites top8 gross10"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:17Z",
+      "what": "trend-and-allocation: H3 sharpe-weight L90 linear"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:17Z",
+      "what": "trend-and-allocation: H3 sharpe-weight L90 top5"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:18Z",
+      "what": "trend-and-allocation: H3 sharpe-weight L180 linear"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:18Z",
+      "what": "trend-and-allocation: H3 sharpe-weight L180 top5"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:19Z",
+      "what": "trend-and-allocation: H3 sharpe-weight L365 linear"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:19Z",
+      "what": "trend-and-allocation: H3 sharpe-weight L365 top5"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:20Z",
+      "what": "trend-and-allocation: H4 cash yield 1.5%"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:20Z",
+      "what": "trend-and-allocation: H4 cash yield 2%"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:20Z",
+      "what": "trend-and-allocation: H4 cash yield 4%"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:21Z",
+      "what": "trend-and-allocation: H5 reentry J10"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:21Z",
+      "what": "trend-and-allocation: H5 reentry J20"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:26:22Z",
+      "what": "trend-and-allocation: H5 reentry J40"
+    }
+  ],
+  "n_selection_trials": 28,
+  "n_trials": 28
+}

@@ -67,6 +67,7 @@ from ops.gen_ops_files import GATE_MODULE  # noqa: F401 - re-exported, see below
 from ops.lib import autonomy_state as astate
 from ops.lib import kill as killlib
 from ops.lib import paths
+from ops.lib import suspend as suspendlib
 
 #: ``GATE_MODULE`` above is re-exported, not redefined: the string that names this module
 #: is owned by the renderer that writes it into every cron line, so the gate and the
@@ -995,6 +996,19 @@ NO_ENTRY_MIN = 120
 #: further back than the counting window on purpose.
 STREAK_SCAN = 5000
 
+#: After a detected host resume, :func:`liveness` answers ``resumed`` — with the plain
+#: sentence about the sleep — for this long, and the watchdog treats a stale-data block
+#: inside the first minutes as the catch-up it is rather than a wedge. Measured on
+#: 2026-09-29: the bots were fully back at T+7m06s and ingest lifted ``data_stale`` at
+#: T+8m41s, so half an hour is comfortably more than a healthy resume needs and short enough
+#: that a resume that does *not* recover is called blocked before the hour is out. In code,
+#: not ``earn.yaml``, because that file is owned by another change today.
+RESUME_SETTLE_MIN = 30
+#: How long the "Host was asleep from … to …" line stays in the liveness payload after the
+#: resume, so an operator opening the console the next morning still sees why the charts
+#: have a hole in them.
+HOST_WORDS_SHOW_H = 48
+
 #: Refusal slug (or its ``check`` half) -> the same fact in words an owner reads. The gate
 #: writes ``blackout:data_stale``; nobody should have to know that to learn that the data
 #: went stale. Unmapped slugs fall back to :func:`refusal_words`, which never invents a
@@ -1267,6 +1281,8 @@ def ingest_phases(conn: Any, *, now: datetime | None = None) -> list[dict[str, A
     """
     when = now or datetime.now(UTC)
     try:
+        # SQLite guarantees that bare columns beside MAX() come from the row holding the
+        # maximum, so ``detail`` here is the newest row's detail for that (phase, status).
         rows = conn.execute(
             "SELECT phase, status, MAX(started_at) AS at, detail FROM ingest_runs"
             " GROUP BY phase, status").fetchall()
@@ -1275,21 +1291,31 @@ def ingest_phases(conn: Any, *, now: datetime | None = None) -> list[dict[str, A
     folded: dict[str, dict[str, Any]] = {}
     for row in rows:
         entry = folded.setdefault(row["phase"], {
-            "phase": row["phase"], "last_ok": None, "last_fail": None, "last_error": None})
+            "phase": row["phase"], "last_ok": None, "last_fail": None, "last_error": None,
+            "transient": False})
         if row["status"] == "ok":
             entry["last_ok"] = row["at"]
-        else:
+        elif entry["last_fail"] is None or (row["at"] or "") > entry["last_fail"]:
+            # Newest non-ok row wins, whatever its status: the old fold let a stale
+            # ``error`` row from last week overwrite this morning's ``degraded`` one
+            # depending on which the cursor returned last.
             entry["last_fail"] = row["at"]
             entry["last_error"] = (row["detail"] or "")[:300] or None
+            # A failure the host produced while its network was still coming back after a
+            # sleep. Recorded, visible, and not a reason for the panel to go red.
+            entry["transient"] = (row["detail"] or "").startswith(
+                suspendlib.RESUME_TRANSIENT_PREFIX)
     out: list[dict[str, Any]] = []
     for phase in sorted(folded):
         entry = folded[phase]
         ok_at = _parse_iso(entry["last_ok"])
         entry["minutes_since_ok"] = (
             None if ok_at is None else round((when - ok_at).total_seconds() / 60.0, 1))
-        entry["failing"] = bool(
+        newer_fail = bool(
             entry["last_fail"] and (not entry["last_ok"]
                                     or entry["last_fail"] > entry["last_ok"]))
+        entry["transient"] = bool(newer_fail and entry["transient"])
+        entry["failing"] = newer_fail and not entry["transient"]
         out.append(entry)
     return out
 
@@ -1376,8 +1402,14 @@ def acting(
             kowned = kconn is not None
         except Exception:  # noqa: BLE001
             kconn = None
+    last_sleep: suspendlib.Window | None = None
     try:
         phases = ingest_phases(kconn, now=when) if kconn is not None else []
+        if kconn is not None:
+            try:
+                last_sleep = suspendlib.latest(kconn)
+            except Exception:  # noqa: BLE001
+                last_sleep = None
     finally:
         if kowned and kconn is not None:
             try:
@@ -1418,6 +1450,19 @@ def acting(
     dry = (spell_refused > 0
            and (minutes_since is None or minutes_since >= NO_ENTRY_MIN)
            and is_wedge(spell_reason))
+    # Refusals the gate made BEFORE the host last resumed are not evidence about now. On
+    # 2026-09-29 the newest entry decisions were the ``staleness`` refusals made during a
+    # few seconds-long standby wakes on 09-26; nothing had asked the gate since the lid
+    # opened, and this verdict went on saying TRADING IS BLOCKED for a quarter of an hour
+    # after the data was fresh and the flag was down. A streak or a dry spell only counts
+    # when its newest refusal is younger than the resume; an active blocking flag still
+    # counts regardless, because a flag is a fact about now.
+    newest_refusal = rows[0]["ts_utc"] if rows and not rows[0]["allowed"] else None
+    pre_resume = bool(last_sleep is not None and newest_refusal is not None
+                      and newest_refusal < _iso(last_sleep.to_utc))
+    if pre_resume:
+        long_streak = False
+        dry = False
 
     blocked_since: str | None = None
     blocked_minutes: float | None = None
@@ -1689,6 +1734,16 @@ def liveness(
     else:
         act_error = None
     supervisor = supervisor_status(runner=runner)
+    host = host_view(conf, root=state_root, now=when, kdb=kdb, tz=tz,
+                     freshness_path=freshness_path)
+    sleeps = host.get("_windows") or []
+    host.pop("_windows", None)
+
+    # Silence is measured in AWAKE time. "No job has completed in 26h" was the verdict on
+    # 2026-09-29 after a 64-hour host sleep, and it sent the operator to fix a loop that
+    # was fine. The hours the host spent asleep are not hours the loop failed to run.
+    awake_silent_min = (None if newest is None
+                        else suspendlib.awake_minutes(sleeps, newest, when))
 
     if not any_on:
         verdict, headline = "off", (
@@ -1701,11 +1756,17 @@ def liveness(
         verdict, headline = "schedule_drifted", (
             "The installed crontab differs from the one this config renders — some jobs "
             "may be running on old settings, or not at all.")
+    elif host.get("settling"):
+        # The host just woke up. For the first half hour the honest headline is the sleep
+        # itself, in plain words, ahead of `never_ran` (the loop is not broken, the host
+        # was off) and ahead of `blocked` (stale data is the expected state until ingest
+        # catches up; the words say whether it has).
+        verdict, headline = "resumed", str(host["words"])
     elif newest is None:
         verdict, headline = "never_ran", (
             "The schedule is installed but no job has ever completed. The loop has not "
             "started.")
-    elif (when - newest) > timedelta(hours=stale_hours):
+    elif awake_silent_min is not None and awake_silent_min > stale_hours * 60:
         verdict, headline = "never_ran", (
             f"No job has completed in {stale_hours}h. The loop is not running.")
     elif act is not None and act.blocked:
@@ -1748,7 +1809,84 @@ def liveness(
         #: Whether anything will restart the console when it dies. It died on the night this
         #: was written, and nothing did.
         "supervisor": supervisor,
+        #: The host's own state: was it asleep, when, and has the data caught up since. The
+        #: sentence in ``words`` is what Home shows; ``settling`` is true for the first
+        #: :data:`RESUME_SETTLE_MIN` minutes after a resume.
+        "host": host,
+        "awake_silent_minutes": (None if awake_silent_min is None
+                                 else round(awake_silent_min, 1)),
     }
+
+
+def host_view(cfg: EarnConfig, *, root: Path | None = None, now: datetime | None = None,
+              kdb: Any = None, tz: tzinfo | None = None,
+              freshness_path: Path | None = None) -> dict[str, Any]:
+    """Was the host asleep, and what has happened since it woke.
+
+    Reads the watchdog's suspend record (``ops_state``) and the knowledge DB's own account
+    of the catch-up, and renders the one sentence a person needs::
+
+        Host was asleep from 2026-09-25 16:15 to 2026-09-29 08:50 (Dubai); data caught up
+        at 09:00; trading possible again since 09:00
+
+    Never raises; a host with no record answers ``{"asleep_recently": False, ...}``. The
+    private ``_windows`` entry carries the parsed windows to :func:`liveness` and is
+    stripped before the payload leaves.
+    """
+    conf = cfg
+    when = now or datetime.now(UTC)
+    zone = tz or display_tz(conf)
+    label = suspendlib.zone_label(getattr(getattr(conf, "meta", None), "display_timezone",
+                                          None))
+    out: dict[str, Any] = {
+        "asleep_recently": False, "settling": False, "words": None, "from": None,
+        "to": None, "gap_minutes": None, "resumed_minutes_ago": None,
+        "caught_up_at": None, "trading_since": None, "_windows": [],
+    }
+    kconn, owned = kdb, False
+    try:
+        if kconn is None:
+            kconn = _open_knowledge(conf, root)
+            owned = kconn is not None
+        if kconn is None:
+            return out
+        sleeps = suspendlib.windows(kconn)
+        out["_windows"] = sleeps
+        last = sleeps[-1] if sleeps else None
+        if last is None or last.to_utc > when:
+            return out
+        ago = (when - last.to_utc).total_seconds() / 60.0
+        if ago > HOST_WORDS_SHOW_H * 60:
+            return out
+        caught = suspendlib.catch_up(kconn, last)
+        from ops.lib import freshness as freshlib
+
+        fpath = (freshness_path if freshness_path is not None
+                 else freshlib.freshness_path(root or paths.state_root()))
+        age = freshlib.data_age_minutes(fpath, when)
+        out.update({
+            "asleep_recently": True,
+            "settling": ago <= RESUME_SETTLE_MIN,
+            "from": _iso(last.from_utc), "to": _iso(last.to_utc),
+            "gap_minutes": last.gap_minutes,
+            "resumed_minutes_ago": round(ago, 1),
+            "caught_up_at": _iso(caught["caught_up_at"]) if caught["caught_up_at"] else None,
+            "trading_since": _iso(caught["trading_since"]) if caught["trading_since"] else None,
+            "words": suspendlib.words(last, tz=zone, tz_label=label,
+                                      caught_up_at=caught["caught_up_at"],
+                                      trading_since=caught["trading_since"],
+                                      data_age_min=age),
+        })
+        return out
+    except Exception as e:  # noqa: BLE001 - a sentence must never break the picture
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+    finally:
+        if owned and kconn is not None:
+            try:
+                kconn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # --------------------------------------------------------------------------- transitions

@@ -63,6 +63,28 @@ def write_freshness(path: Path, *, now: datetime = NOW, book_age_min: float = 5.
     return path
 
 
+@pytest.fixture(autouse=True)
+def open_trend_gate(request, monkeypatch):
+    """Every strategy test that is not ABOUT the trend ensemble runs with its gate OPEN.
+
+    ``EarnBaseStrategy._trend_weight`` fails closed on a missing ``knowledge/state/trend.json``
+    (docs/design/dip-strategy.md §10.2 item 6), and no test in this directory writes one —
+    so without this fixture every core entry in the suite would size to zero for a reason
+    unrelated to what the test is about, the same way ``_make`` in ``test_sleeves`` pins
+    ``_regime_up`` to True. A module that sets ``REAL_TREND_GATE = True`` (``test_trend_gate``)
+    opts out and exercises the real reader.
+    """
+    if getattr(request.module, "REAL_TREND_GATE", False):
+        return
+    try:
+        from strategies import trend_state as ts
+        from strategies.earn_base import EarnBaseStrategy
+    except ImportError:  # freqtrade not installed: nothing here can build a strategy anyway
+        return
+    monkeypatch.setattr(EarnBaseStrategy, "_trend_weight",
+                        lambda self, pair, now: ts.TrendWeight(1.0, "test_gate_open"))
+
+
 @pytest.fixture
 def gate_cfg(tmp_path) -> GateConfig:
     return GateConfig.load(write_riskgate(tmp_path), sleeve="a")

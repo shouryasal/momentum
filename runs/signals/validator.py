@@ -36,6 +36,7 @@ from schemas.signals import SignalInvalid, Validation, validate_validation, vali
 
 __all__ = [
     "ValidationOutcome",
+    "citable_keys",
     "evidence_pack",
     "expire_stale",
     "pack_path",
@@ -143,6 +144,42 @@ def _positions(jdb: sqlite3.Connection | None) -> list[dict[str, Any]]:
              "positions": _loads(r["positions_json"], None)} for r in rows]
 
 
+def citable_keys(pack: dict[str, Any], features: Features) -> set[str]:
+    """Every key a validator answer may cite: the feature keys, plus every dotted path
+    that exists in the evidence pack it was shown.
+
+    The rule is "never produce a number that is not in the pack", and the pack is more
+    than the FEATURES block: it carries ``market_state``, ``active_flags``, ``limits``,
+    ``positions`` and the ``signal`` itself, and the prompt tells the model the whole pack
+    is "the complete, authoritative picture". Checking citations against
+    :meth:`Features.keys` alone treated a verbatim citation of
+    ``market_state.data_fresh`` as an invention: measured on the runtime journal
+    2026-09-29, **11 of 15** validations ever run (about $5.30 of Sonnet) were discarded
+    host-side for citing exactly such paths, so no ``thesis`` or ``invalidation`` was ever
+    stored and the holdings watcher had nothing to watch against. A path that is NOT in
+    the pack is still refused — that is the invention this check exists to catch.
+
+    Lists are addressable by index (``news.0.title``); the number of keys is bounded by
+    the pack, which Python built.
+    """
+    keys: set[str] = set(features.keys())
+
+    def walk(node: Any, prefix: str) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                path = f"{prefix}.{k}" if prefix else str(k)
+                keys.add(path)
+                walk(v, path)
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                path = f"{prefix}.{i}" if prefix else str(i)
+                keys.add(path)
+                walk(v, path)
+
+    walk(pack, "")
+    return keys
+
+
 # --------------------------------------------------------------------------- prompt
 
 
@@ -164,8 +201,19 @@ def _day_prefix(now: datetime) -> str:
 
 
 def _validations_today(jdb: sqlite3.Connection, now: datetime) -> int:
-    row = jdb.execute("SELECT COUNT(*) AS n FROM signal_validations WHERE ts_utc LIKE ?",
-                      (_day_prefix(now) + "%",)).fetchone()
+    """Validations that actually produced a verdict today — failures do not count.
+
+    ``_insert_validation`` writes a row for every attempt, including host rejections
+    (verdict ``uncertain``, confidence 0, ``error`` set). Counting those against
+    ``max_per_day`` meant money already spent on a failure ALSO bought the right to stop
+    the validations that could have succeeded: with every answer being discarded for a
+    citation-check bug, six errors filled the daily cap and validation stopped for the
+    day, leaving no trace on the signals, which then expired unvalidated.
+    """
+    row = jdb.execute(
+        "SELECT COUNT(*) AS n FROM signal_validations"
+        " WHERE ts_utc LIKE ? AND (error IS NULL OR error = '')",
+        (_day_prefix(now) + "%",)).fetchone()
     return int(row["n"]) if row else 0
 
 
@@ -175,9 +223,14 @@ def _asset_cooldown_blocked(jdb: sqlite3.Connection, cfg: EarnConfig, pair: str 
     if not minutes or pair is None:
         return False
     since = utc_iso(now - timedelta(minutes=minutes))
+    # `error IS NULL` for the same reason as the daily cap: the cooldown exists to stop us
+    # asking the same question about the same asset twice in an hour, and a host rejection
+    # never asked it. Counting failures let a citation-check bug silence an asset for two
+    # hours at a time on top of exhausting the daily budget.
     row = jdb.execute(
         "SELECT 1 FROM signal_validations v JOIN signals s ON s.signal_id = v.signal_id"
-        " WHERE s.pair = ? AND v.ts_utc >= ? LIMIT 1", (pair, since)).fetchone()
+        " WHERE s.pair = ? AND v.ts_utc >= ? AND (v.error IS NULL OR v.error = '')"
+        " LIMIT 1", (pair, since)).fetchone()
     return row is not None
 
 
@@ -267,7 +320,8 @@ def validate_signal(cfg: EarnConfig, jdb: sqlite3.Connection, kdb: sqlite3.Conne
         except SignalInvalid as e:
             error = f"schema: {e}"
     if parsed is not None:
-        unknown = [k for k in parsed.cited_feature_keys if k not in features.keys()]
+        known = citable_keys(pack, features)
+        unknown = [k for k in parsed.cited_feature_keys if k not in known]
         if unknown:
             parsed = None
             error = f"unknown feature_key: {sorted(unknown)[:3]}"

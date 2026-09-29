@@ -43,6 +43,7 @@ import json
 import re
 import sqlite3
 import sys
+import time
 from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -58,6 +59,7 @@ from ops.config import REPO_ROOT, EarnConfig, load_config
 from ops.lib import flags as flagslib
 from ops.lib import freshness as freshlib
 from ops.lib import locks
+from ops.lib import suspend as suspendlib
 
 SPOT = "https://api.binance.com"
 FUT = "https://fapi.binance.com"
@@ -82,6 +84,42 @@ TRADING_PHASES = ("candles", "books")
 STATUS_OK = "ok"
 STATUS_DEGRADED = "degraded"
 STATUS_ERROR = "error"
+
+#: Headlines the keyword rules could not label, sent to the classifier per run. Measured on
+#: 2026-09-25/29 (docs/design/local-model-choice.md): the local model is 79% exact with 1%
+#: false positives at five, and blows its 120 s deadline at twenty-five; the cloud fallback
+#: at twenty-five costs 2-3x per call for the same headlines. The rest of the queue waits
+#: for the next 15-minute tick. In code, not earn.yaml: it is a serving constraint, not a
+#: trading limit, and the config file is owned by another change today.
+CLASSIFY_BATCH = 5
+
+#: Network grace. WSL2's resolver (``/etc/resolv.conf`` → the 10.255.255.254 proxy) comes
+#: back a minute or more after Windows can resolve names, and the first ingest after a resume
+#: on 2026-09-29 failed its candles phase on ``[Errno -3] Temporary failure in name
+#: resolution`` at T+2m13s and its books phase on a read timeout right after — both gone by
+#: the next cron slot. A request that fails on the *transport* (no route, no DNS, connect or
+#: read timeout) is retried :data:`NET_RETRIES` times with these sleeps between attempts
+#: (three tries over ~30 s). HTTP status errors are never retried here: a 400 is an answer.
+#:
+#: The sleeps are drawn from one budget per run (:data:`NET_RETRY_BUDGET_S`): once the first
+#: request has waited the full 30 s and still cannot reach the venue, the network is down and
+#: every later request in the same run fails fast instead of adding thirty seconds apiece to
+#: a 600 s deadline. These live in code rather than ``earn.yaml`` because the config file is
+#: owned by another change today; they are operational constants, not trading limits.
+NET_RETRIES = 3
+NET_BACKOFF_S: tuple[float, ...] = (10.0, 20.0)
+NET_RETRY_BUDGET_S = 30.0
+#: Transport-level failures worth a retry. ``httpx.HTTPStatusError`` is deliberately absent.
+NET_TRANSIENT = (httpx.TimeoutException, httpx.NetworkError)
+
+#: A phase error inside this many minutes after a detected host resume is recorded as
+#: ``degraded`` with a ``resume_transient:`` detail instead of ``error``: the ops panel must
+#: not go red for the DNS hiccup that follows every lid-open. Labels only — the freshness
+#: sidecar is re-stamped from the DB exactly as before, so stale data still blocks entries.
+RESUME_TRANSIENT_MIN = 10
+#: Without a watchdog record, a run whose previous ``ingest_runs`` row is older than this is
+#: itself the first run after a long silence, and gets the same grace once.
+OWN_GAP_TRANSIENT_MIN = 60
 
 
 class RateBudgetExceeded(RuntimeError):
@@ -150,7 +188,7 @@ class Ingest:
     def __init__(self, cfg: EarnConfig, kdb: sqlite3.Connection,
                  http: httpx.Client | None = None, now: datetime | None = None,
                  root: Path | None = None, stage_runner=None,
-                 jdb: sqlite3.Connection | None = None):
+                 jdb: sqlite3.Connection | None = None, sleep=None):
         self.cfg = cfg
         self.kdb = kdb
         self.http = http or httpx.Client(timeout=10)
@@ -161,6 +199,12 @@ class Ingest:
         #: because most phases never touch a model; :meth:`_journal` opens the live
         #: journal for the duration of the classify call when one was not handed in.
         self.jdb = jdb
+        #: Injected so a test can prove the backoff without waiting thirty seconds.
+        self.sleep = sleep or time.sleep
+        #: Seconds of retry sleep this run has spent — see :data:`NET_RETRY_BUDGET_S`.
+        self.net_slept_s = 0.0
+        self.net_retries = 0
+        self._resume_transient: bool | None = None
 
     # ------------------------------------------------------------------ vocabularies
 
@@ -210,12 +254,59 @@ class Ingest:
     # ------------------------------------------------------------------ helpers
 
     def _get(self, url: str, params: dict) -> httpx.Response:
-        r = self.http.get(url, params=params)
-        r.raise_for_status()
-        used = r.headers.get("x-mbx-used-weight-1m")
-        if used and int(used) > 3000:  # ~50% of the 6000/min IP budget
-            raise RateBudgetExceeded(f"rate budget guard: used-weight-1m={used}")
-        return r
+        attempt = 0
+        while True:
+            try:
+                r = self.http.get(url, params=params)
+            except NET_TRANSIENT as e:
+                attempt += 1
+                wait = NET_BACKOFF_S[attempt - 1] if attempt - 1 < len(NET_BACKOFF_S) else None
+                budget_left = NET_RETRY_BUDGET_S - self.net_slept_s
+                if attempt >= NET_RETRIES or wait is None or wait > budget_left + 1e-9:
+                    raise
+                print(f"ingest: {type(e).__name__} on {url.rsplit('/', 1)[-1]} ({e}); "
+                      f"retry {attempt}/{NET_RETRIES - 1} in {wait:.0f}s", file=sys.stderr)
+                self.sleep(wait)
+                self.net_slept_s += wait
+                self.net_retries += 1
+                continue
+            r.raise_for_status()
+            used = r.headers.get("x-mbx-used-weight-1m")
+            if used and int(used) > 3000:  # ~50% of the 6000/min IP budget
+                raise RateBudgetExceeded(f"rate budget guard: used-weight-1m={used}")
+            return r
+
+    # ------------------------------------------------------------------ resume grace
+
+    def resume_transient(self) -> bool:
+        """Is this run inside the grace after a host resume? Decided once per run.
+
+        Two sources, either is enough: the watchdog's suspend record (``ops_state``, written
+        by the tick that detected the gap — usually seconds before it spawns this very run),
+        or this job's own history when the newest ``ingest_runs`` row is older than
+        :data:`OWN_GAP_TRANSIENT_MIN`, which makes this the first cycle after a long silence
+        whatever caused it. Only the first cycle gets that second grace: once a row exists
+        from a few minutes ago, a failure is a failure.
+        """
+        if self._resume_transient is not None:
+            return self._resume_transient
+        verdict = False
+        try:
+            window = suspendlib.resumed_within(suspendlib.windows(self.kdb), self.now,
+                                               RESUME_TRANSIENT_MIN)
+            verdict = window is not None
+            if not verdict:
+                row = self.kdb.execute(
+                    "SELECT MAX(started_at) AS m FROM ingest_runs WHERE job='ingest'"
+                    " AND started_at < ?", (now_iso(self.now),)).fetchone()
+                last = row["m"] if row else None
+                if last:
+                    last_dt = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+                    verdict = (self.now - last_dt) > timedelta(minutes=OWN_GAP_TRANSIENT_MIN)
+        except Exception:  # noqa: BLE001 - a label must never break a phase
+            verdict = False
+        self._resume_transient = verdict
+        return verdict
 
     def _record(self, phase: str, status: str, detail: str = "") -> None:
         self.kdb.execute(
@@ -225,6 +316,40 @@ class Ingest:
              now_iso(datetime.now(UTC)), status, detail[:500]),
         )
         self.kdb.commit()
+
+    def refresh_trend(self) -> PhaseNote | None:
+        """Write ``knowledge/state/trend.json`` — the BTC/ETH trend-ensemble weights.
+
+        This is the recurring writer the strategies' entry gate depends on
+        (``strategies/trend_state.py`` reads the file with the stdlib in-container). It was
+        built on 2026-09-29 with no caller, which the integration reviewer caught: deployed
+        alone, the gate fails closed on ``trend_state_missing`` and every core entry on both
+        sleeves stops. Here it runs every ingest cycle, after the candle phase, on the
+        feather-history ∪ knowledge-DB union ``runs.features.trend.daily_closes`` builds —
+        idempotent, and a rerun on the same bars rewrites the same weights.
+
+        A core asset whose weight is ``None`` (warm-up, or a missing day inside the last 250
+        bars) is reported as ``degraded`` with the asset and its status named, because that
+        is exactly the state in which the strategies will refuse its entries and an operator
+        has to be able to see why from the ops panel.
+        """
+        from runs.features import trend
+
+        path = trend.write_state(self.cfg, self.kdb, self.root, now=self.now)
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:  # the file was just written; this is a real fault
+            return PhaseNote(STATUS_DEGRADED, f"trend.json unreadable after write: {e}")
+        assets = payload.get("assets") or {}
+        broken = [f"{a}:{(v or {}).get('status', 'missing')}" for a, v in assets.items()
+                  if (v or {}).get("weight") is None]
+        if not assets:
+            return PhaseNote(STATUS_DEGRADED, "trend.json carries no assets")
+        if broken:
+            return PhaseNote(STATUS_DEGRADED, "no weight for " + ", ".join(sorted(broken)))
+        weights = ", ".join(f"{a}={float(v['weight']):.2f}" for a, v in sorted(assets.items()))
+        closed = max((str(v.get("asof_close_utc") or "") for v in assets.values()), default="")
+        return PhaseNote(STATUS_OK, f"weights {weights} on the bar closed {closed or '?'}")
 
     def _phase(self, name: str, fn) -> bool:
         """Run one phase in isolation. Returns False only on an outright failure.
@@ -249,9 +374,20 @@ class Ingest:
                 self._record(name, STATUS_OK)
             ok = True
         except Exception as e:  # noqa: BLE001 — phases are isolated by design
-            self._record(name, STATUS_ERROR, str(e))
-            print(f"ingest phase {name} failed: {e}", file=sys.stderr)
-            ok = False
+            if self.resume_transient():
+                # The host just woke up and the network is still coming back. Say what
+                # happened, label it for what it is, and leave the panel its colour. The
+                # freshness re-stamp below is unchanged, so stale data still blocks entries.
+                self._record(name, STATUS_DEGRADED,
+                             f"{suspendlib.RESUME_TRANSIENT_PREFIX}: {e}")
+                print(f"ingest phase {name} {suspendlib.RESUME_TRANSIENT_PREFIX} "
+                      f"(host resumed <{RESUME_TRANSIENT_MIN} min ago): {e}",
+                      file=sys.stderr)
+                ok = True
+            else:
+                self._record(name, STATUS_ERROR, str(e))
+                print(f"ingest phase {name} failed: {e}", file=sys.stderr)
+                ok = False
         self.write_freshness()
         return ok
 
@@ -604,7 +740,12 @@ class Ingest:
             pending.append({"url_hash": r["url_hash"], "title": r["title"]})
         if not pending:
             return
-        pending = pending[:25]
+        # 5, not 25: docs/design/local-model-choice.md measured the local classifier at batch 5
+        # (granite4.2:3b 79% exact, 1% false positives) and found batch 25 both slower than its
+        # 120 s deadline on the local model and worse on labels; the cloud fallback at batch 25
+        # cost 2-3x per call for the same headlines. A run classifies the oldest five and the
+        # rest wait for the next 15-minute tick, which is how the queue was already designed.
+        pending = pending[:CLASSIFY_BATCH]
         ok, text, error = self._classify_call(
             self.classify_prompt(pending), classify_schema(sorted(events), sorted(assets_kw)))
         if not ok or not text:
@@ -809,6 +950,11 @@ class Ingest:
         """
         failed: list[str] = []
         for name, fn in (("candles", self.refresh_candles),
+                         # Right after candles: the ensemble reads the daily bars this tick
+                         # just wrote. Not a TRADING_PHASE — a failure here degrades (the
+                         # strategies fail CLOSED on a stale trend.json, so a dead writer
+                         # stops core ENTRIES, never exits) and must not stop the feeds.
+                         ("trend", self.refresh_trend),
                          ("books", self.snapshot_books),
                          ("funding", self.refresh_funding),
                          ("news", self.pull_news),
@@ -862,9 +1008,16 @@ class Ingest:
 
 def main() -> int:
     cfg = load_config()
-    with locks.acquire("ingest"):
-        with db.connect(REPO_ROOT / cfg.paths.knowledge_db) as kdb:
-            return Ingest(cfg, kdb).run()
+    try:
+        with locks.acquire("ingest"):
+            with db.connect(REPO_ROOT / cfg.paths.knowledge_db) as kdb:
+                return Ingest(cfg, kdb).run()
+    except locks.LockBusy as e:
+        # One dated line naming the holder, not a bare traceback: the two undated
+        # ``LockBusy`` tracebacks at the end of logs/ingest.log cost the 2026-09-25
+        # post-mortem an hour of inference about who had held the lock and for how long.
+        print(f"ingest {now_iso(datetime.now(UTC))}: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

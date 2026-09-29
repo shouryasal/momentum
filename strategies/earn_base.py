@@ -27,6 +27,7 @@ from freqtrade.strategy import IStrategy
 try:
     from strategies import _journal
     from strategies import mechanics as mx
+    from strategies import trend_state as ts
     from strategies.riskgate import (
         GateConfig,
         MemoryStateStore,
@@ -37,6 +38,7 @@ try:
 except ImportError:  # in-container flat layout
     import _journal
     import mechanics as mx
+    import trend_state as ts
     from riskgate import (
         GateConfig,
         MemoryStateStore,
@@ -45,7 +47,12 @@ except ImportError:  # in-container flat layout
         SqliteStateStore,
     )
 
-STRATEGY_VERSION = "earn-2"
+STRATEGY_VERSION = "earn-3"
+
+#: The tier the trend ensemble gates: ``universe.core`` assets carry this tier in
+#: ``riskgate.json`` (and, absent a snapshot, every capped asset does — see
+#: ``riskgate.UniverseView``). Satellites are never touched by the ensemble.
+_CORE_TIER = "core"
 
 # Confirm-stage rejects for sizing limits mean cap_stake was bypassed upstream — that is
 # a breach worth an alert; operational refusals are routine rejects.
@@ -230,6 +237,11 @@ class EarnBaseStrategy(IStrategy):
         #: "this bot is trading" from "this bot is idle" without a DB read.
         self._trade_events: int = 0
         self._audit_alert_at: datetime | None = None
+        #: ``knowledge/state/trend.json`` parsed once per mtime; see :meth:`_trend_weight`.
+        self._trend_cache: ts.TrendState | None = None
+        #: Last trend-gate reason journalled per pair, so the journal gets one row per
+        #: state change rather than one per candle.
+        self._trend_gate_last: dict[str, str] = {}
 
     # ---------------------------------------------------------------- protections
 
@@ -327,6 +339,7 @@ class EarnBaseStrategy(IStrategy):
             start = float(self.wallets.get_starting_balance())
             positions = dict(empty)
             entries: dict[str, int] = {}
+            pending: dict[str, float] = {}
             cost = 0.0
             reserved = 0.0
             realized = 0.0
@@ -337,7 +350,13 @@ class EarnBaseStrategy(IStrategy):
                 cost += float(trade.stake_amount or 0.0)
                 realized += float(getattr(trade, "realized_profit", 0.0) or 0.0)
                 entries[pair] = entries.get(pair, 0) + self._entries_used(trade)
-                reserved += self._reserved_for(trade, price)
+                resting = self._reserved_for(trade, price)
+                reserved += resting
+                # Per pair as well as in total: `positions` cannot see a resting entry order
+                # (a brand-new trade has amount=0), so a sizing rule that reads only
+                # `positions` re-buys a target it has already placed. See
+                # `PortfolioState.committed`.
+                pending[pair] = pending.get(pair, 0.0) + resting
             closed = float(Trade.get_total_closed_profit() or 0.0)
             ledger_cash = start + closed + realized - cost
             nav = ledger_cash + reserved + sum(positions.values())
@@ -356,6 +375,7 @@ class EarnBaseStrategy(IStrategy):
         return PortfolioState(
             nav=nav, free_usdt=max(free, 0.0), positions=positions, now=now, valid=True,
             ledger_cash=ledger_cash, reserved_usdt=reserved, entries_used=entries,
+            pending=pending,
         )
 
     @staticmethod
@@ -519,6 +539,106 @@ class EarnBaseStrategy(IStrategy):
         """When the newest usable proposal was produced (overrides the re-entry cooldown)."""
         return None
 
+    # ---------------------------------------------------------------- trend ensemble
+
+    def _is_core(self, pair: str) -> bool:
+        """Is ``pair`` one of the ``universe.core`` assets the trend ensemble gates?"""
+        asset = pair.split("/")[0]
+        return self.gate_cfg.universe.tiers.get(asset, "") == _CORE_TIER
+
+    def _trend_max_age_h(self) -> float:
+        """``trading.trend_ensemble.max_age_hours`` when the config carries it, else the
+        module default (one missed daily bar plus slack)."""
+        try:
+            raw = (self.mech.get("trend_ensemble") or {}).get("max_age_hours")
+            return float(raw) if raw is not None else ts.DEFAULT_MAX_AGE_HOURS
+        except (TypeError, ValueError):
+            return ts.DEFAULT_MAX_AGE_HOURS
+
+    def _trend_state(self) -> ts.TrendState:
+        """The parsed ``knowledge/state/trend.json``, re-read only when its mtime moves."""
+        path = ts.state_path(self.gate_cfg.knowledge_db)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        cached = self._trend_cache
+        if cached is None or cached.mtime != mtime or not cached.ok:
+            cached = ts.load(path)
+            self._trend_cache = cached
+        return cached
+
+    def _trend_weight(self, pair: str, now: datetime) -> ts.TrendWeight:
+        """The ensemble's exposure weight for ``pair`` at ``now`` — the ENTRY GATE and the
+        POSITION SCALE for core positions (``docs/design/dip-strategy.md`` §8.1 item 1).
+
+        * a satellite is never gated: weight 1.0, reason ``not_core``;
+        * a core asset gets the weight in ``trend.json`` when the file is present, parses,
+          carries the asset with ``status: ok`` and its bar is fresh — otherwise 0.0 with
+          the reason named (``trend_state.py`` lists them). Fail closed: a missing or stale
+          signal is not a flat signal, and it is not a full one either.
+
+        Applied in exactly two places, both on the BUY side: :meth:`custom_stake_amount`
+        (a new entry) and :meth:`_gated_add` (every add). It never touches an exit — the
+        stop, the ladder, ROI and the exit signal keep the whole exit path — and it never
+        touches the risk gate, which still validates every scaled stake.
+        """
+        if not self._is_core(pair):
+            return ts.TrendWeight(1.0, "not_core")
+        return ts.weight_for(self._trend_state(), pair.split("/")[0], _aware(now),
+                             self._trend_max_age_h())
+
+    def _trend_scaled(self, pair: str, stake: float, ps: PortfolioState, *,
+                      where: str, intent: str, tag: str) -> float:
+        """``stake`` scaled by the ensemble weight for a core pair; 0.0 when the gate is shut.
+
+        The scale is applied to the HEADROOM — ``weight × target × NAV − position`` — when
+        the sleeve has a target for the pair, so repeated adds stop at the scaled target
+        rather than each being scaled and still summing to the full one; a sleeve without a
+        target (or a stake already inside the headroom) gets the plain multiple.
+        """
+        tw = self._trend_weight(pair, ps.now)
+        self._journal_trend_gate(pair, tw, ps, where=where, intent=intent, stake=stake)
+        if not tw.tradeable:
+            instrument("trend_gate", pair, ps.now, f"{tw.reason}:{tag}", stake)
+            return 0.0
+        if tw.weight >= 1.0:
+            return stake
+        target_w = self._target_weight(pair)
+        if target_w > 0:
+            headroom = tw.weight * target_w * ps.nav - ps.committed(pair)
+            scaled = max(min(stake, headroom), 0.0)
+        else:
+            scaled = stake * tw.weight
+        instrument("trend_scale", pair, ps.now, f"w={tw.weight:.3f}:{tag}", scaled)
+        return scaled
+
+    def _journal_trend_gate(self, pair: str, tw: ts.TrendWeight, ps: PortfolioState, *,
+                            where: str, intent: str, stake: float) -> None:
+        """One journal row per pair per CHANGE of trend-gate state — never per candle.
+
+        A shut gate is a sizing refusal, not a risk-gate breach (the risk gate never saw
+        an order), so the row carries the ordinary ``reject`` severity and a reason that
+        names plumbing (``trend_state_*``) or the market (``weight_zero``), so the Gate
+        page and a healthcheck can tell them apart (§10.2 item 6).
+        """
+        key = f"{tw.reason}:{tw.weight:.3f}"
+        if self._trend_gate_last.get(pair) == key:
+            return
+        self._trend_gate_last[pair] = key
+        if not self._journal_on:
+            return
+        try:
+            _journal.record_gate_decision(
+                self.gate_cfg.sleeve, pair, where, intent, tw.tradeable,
+                f"trend_gate:{tw.reason}", side="buy",
+                checks={"trend_gate": tw.tradeable}, proposed_stake=stake, nav=ps.nav,
+                strategy_version=STRATEGY_VERSION, run_id=self.gate_cfg.run_id or None,
+                action="allow" if tw.weight >= 1.0 else ("clamp" if tw.tradeable else "reject"),
+            )
+        except Exception:  # noqa: BLE001 — journaling never vetoes or approves an order
+            pass
+
     # ---------------------------------------------------------------- gate helpers
 
     def _gated_add(self, pair: str, stake: float, ps: PortfolioState, *, trade=None,
@@ -541,6 +661,13 @@ class EarnBaseStrategy(IStrategy):
         """
         if stake <= 0:
             instrument("add_out", pair, ps.now, f"zero_stake:{tag}", 0.0)
+            return None
+        # The trend ensemble scales every add on a core pair before the gate sizes it,
+        # and shuts the add entirely at weight zero (or on a missing/stale signal).
+        stake = self._trend_scaled(pair, stake, ps, where="adjust_trade_position",
+                                   intent="adjust", tag=tag)
+        if stake <= 0:
+            instrument("add_out", pair, ps.now, f"trend_gate:{tag}", 0.0)
             return None
         sized = self.gate.cap_stake(pair, stake, ps)
         capped = self._clamp_to_exchange(pair, sized)
@@ -785,6 +912,14 @@ class EarnBaseStrategy(IStrategy):
         if desired <= 0:
             instrument("sized_out", pair, current_time,
                        f"desired_zero:{entry_tag or ''}", 0.0)
+            return 0.0
+        # The trend ensemble is the ENTRY GATE and POSITION SCALE for a core pair: no
+        # entry at weight zero (or without a fresh signal), the stake scaled otherwise.
+        desired = self._trend_scaled(pair, desired, ps, where="custom_stake_amount",
+                                     intent="entry", tag=entry_tag or "")
+        if desired <= 0:
+            instrument("sized_out", pair, current_time,
+                       f"trend_gate:{entry_tag or ''}", 0.0)
             return 0.0
         if max_stake:
             desired = min(desired, max_stake)
@@ -1056,7 +1191,7 @@ class EarnBaseStrategy(IStrategy):
         target_w = self._target_weight(pair)
         if target_w <= 0:
             return 0.0
-        headroom = target_w * ps.nav - ps.positions.get(pair, 0.0)
+        headroom = target_w * ps.nav - ps.committed(pair)
         return max(min(stake, headroom), 0.0)
 
     def _target_weight(self, pair: str) -> float:

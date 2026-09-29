@@ -208,6 +208,10 @@ CREATE TABLE IF NOT EXISTS source_reliability (
 --   reconcile_cursor            last reconciliation the healthcheck reported
 --   install_utc                 floor for missed-run detection (set by ops/setup.sh)
 --   rate_limit_status / rate_limit_utilization / rate_limit_resets_at
+--   healthcheck_last_tick_utc   when the watchdog last started a tick (ops.lib.suspend)
+--   host_suspend_windows        JSON list of host-sleep windows the watchdog detected, newest
+--                               last; fire times inside one are SUSPENDED, never missed
+--   trading_blocked_since       set while ops.healthcheck.check_trading_blocked is firing
 
 CREATE INDEX IF NOT EXISTS idx_ops_runs_status ON ops_runs(status, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_trigger_events_ts ON trigger_events(ts_utc);

@@ -45,6 +45,15 @@ __all__ = [
 
 # Patterns are ordered: the first match wins, most specific first.
 _TEXT_RULES: tuple[tuple[re.Pattern[str], FailureClass], ...] = (
+    # OUR OWN CAPS FIRST, and matched on the CLI's actual wording. `budget_exhausted` is
+    # deliberately outside PROVIDER_FAILURES — "it is our spending cap, not the provider's
+    # state" — but the SDK reports the cap as a plain error result reading "Reached maximum
+    # budget ($0.05)" / "Reached maximum number of turns (2)", which matched none of these
+    # rules and fell through to `error`. That IS a provider failure, so three cheap-task
+    # misconfigurations opened the credential-wide breaker for fifteen minutes and took
+    # `validate` and `decide` down with them (measured 2026-09-24/25: scan at a $0.05 cap).
+    # A cap we set is never evidence about Anthropic.
+    (re.compile(r"reached maximum (budget|number of turns)", re.I), "budget_exhausted"),
     (re.compile(r"error_max_budget_usd|max_budget_usd exceeded", re.I), "budget_exhausted"),
     (re.compile(r"credit balance|insufficient (credit|quota)|quota exhausted", re.I),
      "quota_exhausted"),

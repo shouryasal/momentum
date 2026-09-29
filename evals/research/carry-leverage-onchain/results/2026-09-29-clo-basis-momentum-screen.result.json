@@ -1,0 +1,83 @@
+{
+  "costs_bps": 15.0,
+  "headline": -0.7608866454003357,
+  "headline_is_in_sample": false,
+  "headline_note": "the rolling-tercile overlay uses only trailing data; nothing was fitted",
+  "baselines": {
+    "btc_buy_and_hold": 0.7332989441079182,
+    "strategy_baseline": 1.1952750600202302
+  },
+  "out_of_sample": {
+    "halves": {
+      "H1_2019-09..2023-03": {
+        "n": 1265,
+        "n_effective": 180,
+        "beta_d5_per_bp": -2.73e-05,
+        "t_d5": -0.096,
+        "r2": 1e-05,
+        "t_basis_level": -0.979,
+        "mean_basis_bps": -0.163,
+        "sd_basis_bps": 8.191
+      },
+      "H2_2023-03..2026-09": {
+        "n": 1295,
+        "n_effective": 185,
+        "beta_d5_per_bp": -0.0008689,
+        "t_d5": -0.961,
+        "r2": 0.00108,
+        "t_basis_level": 0.902,
+        "mean_basis_bps": -2.993,
+        "sd_basis_bps": 3.679
+      },
+      "full": {
+        "n": 2560,
+        "n_effective": 365,
+        "beta_d5_per_bp": -8.35e-05,
+        "t_d5": -0.306,
+        "r2": 5e-05,
+        "t_basis_level": -0.622,
+        "mean_basis_bps": -1.594,
+        "sd_basis_bps": 6.48
+      }
+    }
+  },
+  "regimes": {
+    "2020-22": {
+      "n": 845,
+      "sharpe": -1.1088517075778217,
+      "cagr": -41.71801494503471,
+      "mdd": -81.2668816024483
+    },
+    "2023-24": {
+      "n": 731,
+      "sharpe": -0.4026186504486993,
+      "cagr": -11.2691563702223,
+      "mdd": -36.997160864686194
+    },
+    "2025-26": {
+      "n": 630,
+      "sharpe": -0.34724475702269525,
+      "cagr": -8.703948853874211,
+      "mdd": -38.6577916777992
+    }
+  },
+  "n_params": 1,
+  "edge_audit": {
+    "effective_n": 523.9,
+    "deflated_hurdle": null,
+    "note": "screen; t-statistics are the test, no Sharpe is claimed"
+  },
+  "both_directions": {
+    "held": "BTC on top-tercile basis-momentum days (31% of days)",
+    "gave_up": "the other 69% of days, plus 124x/yr turnover"
+  },
+  "falsifier_triggered": true,
+  "falsifier_value": {
+    "t_h1": -0.096,
+    "t_h2": -0.961,
+    "sign_agrees": 1.0,
+    "overlay_sharpe": -0.7608866454003357,
+    "hold_sharpe": 0.7332989441079182,
+    "triggered": true
+  }
+}

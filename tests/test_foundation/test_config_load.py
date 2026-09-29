@@ -50,6 +50,7 @@ def test_spec_section9_defaults(cfg):
     assert r.max_gross_exposure == 0.80
     assert r.usdt_floor == 0.20
     assert r.daily_loss_stop == 0.03
+    assert r.daily_loss_response == "hold"    # crisis-policy.md §0: hold +30.53%, halve +13.05%, flatten -5.23%
     assert r.daily_stop_lock_hours == 24
     assert r.monthly_loss_stop == 0.10
     assert r.max_trades_per_day == 4
@@ -61,8 +62,9 @@ def test_spec_section9_defaults(cfg):
     # The wide-universe controls (§2.3). A twenty-alt book measured ~2 independent bets,
     # so width is bounded here rather than discovered on the demo account.
     assert r.max_open_positions == 8
-    assert r.max_satellite_positions == 4
-    assert r.max_satellite_gross == 0.10
+    # Satellites at the floor (dip-strategy.md §8.1 item 2): was 4 / 0.10 until 2026-09-29.
+    assert r.max_satellite_positions == 2
+    assert r.max_satellite_gross == 0.05
     assert r.max_beta_to_btc == 1.30
     assert r.max_avg_pairwise_corr == 0.70
     assert r.min_position_pct_nav == 0.02

@@ -187,6 +187,9 @@ def _source_sha(config_path: Path) -> str:
 #: bot that picked its own universe could never be backtested (wide-universe.md §5.3).
 UNIVERSE_DIR = REPO_ROOT / "knowledge" / "universe"
 
+#: The one tier growth-audit.md §1.5's exclusion filter applies to (see satellite_exclusions).
+SATELLITE_TIER = "satellite"
+
 
 def latest_snapshot(root: Path | None = None) -> dict[str, Any] | None:
     """The newest ``knowledge/universe/<date>.json``, or ``None`` before the first refresh.
@@ -255,7 +258,54 @@ def _ordered_snapshot_pairs(snap: dict[str, Any]) -> list[tuple[str, dict[str, A
     return sorted((snap.get("pairs") or {}).items(), key=key)
 
 
-def gate_universe_block(snap: dict[str, Any]) -> dict[str, Any]:
+def satellite_exclusions(snap: dict[str, Any] | None, cfg: EarnConfig) -> dict[str, str]:
+    """growth-audit.md §1.5's exclusion filter, applied to the snapshot's SATELLITE tier.
+
+    ``universe.satellite_eligibility`` carries the three measured thresholds — 60d realised
+    vol ceiling (``max_ann_vol``), listing-age floor (``min_listing_age_days``) and the
+    median 90d quote-volume floor. MEMBERSHIP (``universe.tiers.satellite``, what the weekly
+    resolver puts in the tier) is deliberately untouched, so the committed snapshot stays
+    the artefact it was resolved as; ELIGIBILITY is enforced HERE, when the snapshot is
+    rendered into the gate's config, so a satellite that fails it is rendered
+    ``exit_only``: the gate refuses every entry for it and a held position is wound down
+    through the normal path rather than orphaned (wide-universe.md §1.5).
+
+    Returns ``{base_asset: reason}`` for every satellite the filter removes. Core and
+    major names are never touched — the filter is a satellite-eligibility rule, and the
+    audit measured it as one. A leg whose metric the snapshot does not carry is not
+    evaluated: the resolver's ``Metrics.to_dict`` always writes all three, so an absent key
+    is a fixture or a legacy shape, not a measurement of anything; a metric that is present
+    and fails excludes. Legacy flat-shape snapshots carry no metrics and are left alone.
+    """
+    if not snap or not isinstance(snap.get("pairs"), dict):
+        return {}
+    rule = cfg.universe.satellite_eligibility
+    out: dict[str, str] = {}
+    for pair, entry in sorted(snap["pairs"].items()):
+        if not isinstance(entry, dict) or str(entry.get("tier")) != SATELLITE_TIER:
+            continue
+        base = str(entry.get("base") or str(pair).split("/")[0])
+        m = entry.get("metrics") or {}
+        reasons: list[str] = []
+        vol, age, adv = (m.get("ann_vol_short"), m.get("listing_age_days"),
+                         m.get("median_quote_volume"))
+        if rule.max_ann_vol is not None and vol is not None:
+            if float(vol) > rule.max_ann_vol + 1e-12:
+                reasons.append(f"vol60:{float(vol):.2f}>{rule.max_ann_vol:.2f}")
+        if rule.min_listing_age_days and age is not None:
+            if int(age) < rule.min_listing_age_days:
+                reasons.append(f"age:{int(age)}d<{rule.min_listing_age_days}d")
+        if rule.min_median_quote_volume_usdt and adv is not None:
+            if float(adv) < rule.min_median_quote_volume_usdt:
+                reasons.append(
+                    f"adv:{float(adv) / 1e6:.1f}M<{rule.min_median_quote_volume_usdt / 1e6:.0f}M")
+        if reasons:
+            out[base] = ",".join(reasons)
+    return out
+
+
+def gate_universe_block(snap: dict[str, Any],
+                        exclusions: dict[str, str] | None = None) -> dict[str, Any]:
     """The slice of a resolver snapshot the deterministic gate actually enforces.
 
     The full snapshot carries 107 pairs of metrics, funnel counts and provenance; the gate
@@ -272,8 +322,13 @@ def gate_universe_block(snap: dict[str, Any]) -> dict[str, Any]:
     ``LOT_SIZE`` step, which is the form the gate can check against an order notional
     without knowing the live price. It is re-derived every refresh, so a name whose price
     has moved an order of magnitude gets a fresh floor within the week.
+
+    ``exclusions`` (from :func:`satellite_exclusions`) are added to ``exit_only`` and
+    recorded under ``excluded`` with their reasons, so the rendered file says WHY a name
+    the snapshot calls tradeable is not enterable.
     """
     pairs = snap.get("pairs")
+    excluded = dict(exclusions or {})
     if not isinstance(pairs, dict):
         # Legacy flat shape ({asset: tier} + exit_only list), used by fixtures.
         return {
@@ -307,7 +362,8 @@ def gate_universe_block(snap: dict[str, Any]) -> dict[str, Any]:
         if step > 0 and price > 0:
             spec["step_notional"] = round(step * price, 8)
         filters[base] = spec
-    return {
+    exit_only |= set(excluded)
+    block = {
         "date": str(snap.get("date") or ""),
         "sha256": str(snap.get("sha256") or ""),
         "tiers": tiers,
@@ -316,6 +372,9 @@ def gate_universe_block(snap: dict[str, Any]) -> dict[str, Any]:
         "exit_only": sorted(exit_only),
         "filters": filters,
     }
+    if excluded:
+        block["excluded"] = dict(sorted(excluded.items()))
+    return block
 
 
 def default_run_id(sleeve: str) -> str:
@@ -408,7 +467,7 @@ def build_riskgate_json(cfg: EarnConfig, config_path: Path = DEFAULT_CONFIG,
     universe = cfg.universe.model_dump()
     universe["pairs"] = snapshot_whitelist(snap, cfg)
     if snap:
-        universe["snapshot"] = gate_universe_block(snap)
+        universe["snapshot"] = gate_universe_block(snap, satellite_exclusions(snap, cfg))
     return {
         "generated_from": "config/earn.yaml",
         "source_sha256": _source_sha(config_path),

@@ -221,6 +221,22 @@ class TestPinningOneModelForOnePass:
 # --------------------------------------------------------------------------- context
 
 
+class TestTheLocalAliasIsTheMeasuredModel:
+    def test_local_small_is_granite_and_its_window_matches_num_ctx(self, mc: ModelsConfig):
+        """`granite4.2:3b`, decided 2026-09-29 (docs/design/local-tier-2026-09-29.md): on
+        the lean scan prompt it was schema-valid 40/40, cited zero invented keys or hashes
+        over ~200 items and answered in 12 s p50; llama3.1:8b was a third on the CPU and
+        5-7x slower. The window invariant the file states — `capabilities.local_small.max_ctx`
+        equals `providers.ollama.options.num_ctx` — is pinned here too: raise one without
+        the other and the router either skips work the model could do or hands it work it
+        cannot."""
+        local = mc.models["local_small"]
+        assert local.provider == "ollama" and local.id == "granite4.2:3b"
+        max_ctx = mc.caps_for("local_small").max_ctx
+        assert max_ctx == 8192
+        assert mc.providers["ollama"].options.get("num_ctx") == max_ctx
+
+
 class TestAModelIsSkippedNeverStarved:
     def test_the_estimate_is_pessimistic_on_purpose(self):
         # ~3.5 chars/token: over-estimating skips a model that might have fitted, which is

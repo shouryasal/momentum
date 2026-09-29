@@ -143,6 +143,46 @@ def with_trades(monkeypatch, strategy, trades, closed_profit=0.0):
 # --------------------------------------------------------------------------- NAV
 
 class TestLedgerNav:
+    def test_a_resting_buy_is_committed_even_though_it_is_not_yet_a_position(
+            self, strategy, monkeypatch):
+        """The 2026-09-23 double buy, as arithmetic.
+
+        Freqtrade 2026.8 creates the trade with ``amount=0`` and calls
+        ``adjust_trade_position`` while the entry order is still open, so ``positions[pair]``
+        reads 0 for a target that is already fully placed. Every "how much more do I want?"
+        rule computed ``target × NAV − position`` and placed the order a second time: Sleeve B
+        bought BTC and ETH twice inside 68 ms, ended at 75% of NAV against a 25% target and
+        paid the round trip twice (−27.56 USDT, 15.01 of it fees). The risk gate could not
+        catch it — ``weight_cap`` and ``gross_cap`` read the same view.
+
+        ``committed()`` is that view corrected; NAV arithmetic is untouched, because the
+        resting cash is still counted exactly once through ``reserved_usdt``.
+        """
+        order = FakeOrder(safe_amount=0.05, safe_filled=0.0, safe_price=PRICE)   # 2500 USDT
+        trade = FakeTrade(amount=0.0, stake_amount=2500.0, orders=[order],
+                          nr_of_successful_entries=0)
+        with_trades(monkeypatch, strategy, [trade])
+        strategy.wallets = FakeWallets(start=10_000.0, free=7_500.0)
+
+        ps = strategy._portfolio_state(NOW)
+        assert ps.positions["BTC/USDT"] == pytest.approx(0.0)   # nothing has filled
+        assert ps.pending["BTC/USDT"] == pytest.approx(2_500.0)  # ...but it is spoken for
+        assert ps.committed("BTC/USDT") == pytest.approx(2_500.0)
+        # NAV is still counted once: ledger_cash + reserved + positions.
+        assert ps.nav == pytest.approx(10_000.0)
+        assert ps.reserved_usdt == pytest.approx(2_500.0)
+        # ...so a 25% target has NO headroom left and cannot be bought a second time.
+        assert 0.25 * ps.nav - ps.committed("BTC/USDT") == pytest.approx(0.0)
+
+    def test_committed_equals_position_when_nothing_is_resting(self, strategy, monkeypatch):
+        filled = FakeOrder(safe_amount=0.05, safe_filled=0.05, status="closed")
+        trade = FakeTrade(amount=0.05, stake_amount=2500.0, orders=[filled])
+        with_trades(monkeypatch, strategy, [trade])
+        strategy.wallets = FakeWallets(start=10_000.0, free=7_500.0)
+        ps = strategy._portfolio_state(NOW)
+        assert ps.pending.get("BTC/USDT", 0.0) == pytest.approx(0.0)
+        assert ps.committed("BTC/USDT") == pytest.approx(ps.positions["BTC/USDT"])
+
     def test_resting_buy_leaves_nav_unchanged_and_fires_no_stop(self, strategy, monkeypatch):
         """A resting buy worth 35% of NAV must not move NAV (the verified HIGH)."""
         order = FakeOrder(safe_amount=0.07, safe_filled=0.0, safe_price=PRICE)  # 3500 USDT

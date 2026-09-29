@@ -1,0 +1,111 @@
+{
+  "costs_bps": 12.5,
+  "costs_note": "12.5 bps/side for the BNB variant (7.5 fee + 5 slippage) against the 15 bps/side baseline; fee schedule verified 2026-09-29 at binance.com/en/fee/schedule",
+  "headline": 1.0860371141100456,
+  "headline_is_in_sample": false,
+  "headline_note": "nothing is fitted: the discount is a verified fee-schedule fact applied to the ensemble's measured turnover; the full-window Sharpe is reported as the headline and the 2025-26 slice (post-dating every design decision in the repo) as the out-of-sample block",
+  "baselines": {
+    "btc_buy_and_hold": 0.577408049969936,
+    "strategy_baseline": 1.0783287770120098
+  },
+  "out_of_sample": {
+    "window": "2025-01-01..2026-09-24",
+    "sharpe": 0.46539931499271153,
+    "cagr": 11.256446416079458,
+    "mdd": -25.833135936500963,
+    "strategy_baseline_sharpe": 0.4551483515824671,
+    "btc_buy_and_hold_sharpe": -0.1386001978162117
+  },
+  "regimes": {
+    "2019-22": {
+      "n": 1461,
+      "sharpe_bnb": 1.3797236129548964,
+      "sharpe_baseline": 1.3725504249536264,
+      "cagr_bnb": 67.6864747977624,
+      "cagr_baseline": 67.3346441437339,
+      "mdd_bnb": -45.50137737227917,
+      "mdd_baseline": -45.621696559577664,
+      "fee_drag_bnb": 1.0513632215377595,
+      "fee_drag_baseline": 1.2616358658453113,
+      "float_q05_loss_pct_nav": 0.022447149676182786,
+      "bnb_beta_to_btc": 0.9451391783387908
+    },
+    "2023-24": {
+      "n": 731,
+      "sharpe_bnb": 1.4812539096499981,
+      "sharpe_baseline": 1.4704030631227962,
+      "cagr_bnb": 54.10190585230128,
+      "cagr_baseline": 53.704457319445,
+      "mdd_bnb": -28.189610817084766,
+      "mdd_baseline": -28.33903839885036,
+      "fee_drag_bnb": 1.29406064751482,
+      "fee_drag_baseline": 1.552872777017784,
+      "float_q05_loss_pct_nav": 0.01153526613666581,
+      "bnb_beta_to_btc": 0.6691248210624197
+    },
+    "2025-26": {
+      "n": 632,
+      "sharpe_bnb": 0.46539931499271153,
+      "sharpe_baseline": 0.4551483515824671,
+      "cagr_bnb": 11.256446416079458,
+      "cagr_baseline": 11.00770566318847,
+      "mdd_bnb": -25.833135936500963,
+      "mdd_baseline": -25.978138750091073,
+      "fee_drag_bnb": 1.1213739451476792,
+      "fee_drag_baseline": 1.345648734177215,
+      "float_q05_loss_pct_nav": 0.017401017556588915,
+      "bnb_beta_to_btc": 0.8101298258032877
+    }
+  },
+  "n_params": 1,
+  "edge_audit": {
+    "effective_n": 523.9,
+    "effective_n_note": "BTC/USDT 1d triple-barrier labels, 3,273 rows -> 523.9 independent",
+    "deflated_hurdle": 2.0692,
+    "hurdle_note": "baseline 0.58 + expected_max_sharpe(N=7,791, 9.1y); at the live open family (N=29) the hurdle is 1.5706",
+    "n_trials_added": 1
+  },
+  "both_directions": {
+    "avoided": "0.215% of NAV per year of fees on the ensemble (fee line 0.862%/yr at 8.62x one-way turnover); 1.71%/yr on the fast profile (fee line 6.85%/yr)",
+    "gave_up": "a one-month fee float in BNB of 0.072% of NAV (fast profile 0.571%), daily beta to BTC 0.92, 30-day 5th-percentile loss on the float 0.022% of NAV (worst regime); plus an operational dependency: the toggle must be on and the float must never run dry or the discount silently lapses to the original fee"
+  },
+  "falsifier_triggered": false,
+  "falsifier_value": {
+    "saving_pct_nav_per_year": 0.21545900982160754,
+    "threshold": 0.1,
+    "worst_regime_float_q05_loss_pct_nav": 0.022447149676182786,
+    "break_even_30d_loss_on_a_one_month_float": 3.0
+  },
+  "paper_fills": [
+    {
+      "db": "/home/shourya/earn-run/ft_userdata/a/runs/test-a-000.sqlite",
+      "closed_trades": 6,
+      "fees_usdt": 4.59438438,
+      "net_usdt": 29.3427114,
+      "gross_usdt": 33.93709578,
+      "fee_share_of_gross": 0.13537942108492348,
+      "fee_rate_recorded": [
+        0.001
+      ],
+      "fee_currency": [
+        "USDT"
+      ],
+      "saving_at_25pct_usdt": 1.148596095
+    },
+    {
+      "db": "/home/shourya/earn-run/ft_userdata/b/runs/test-b-000.sqlite",
+      "closed_trades": 6,
+      "fees_usdt": 4.947777991,
+      "net_usdt": 28.3823987,
+      "gross_usdt": 33.330176691,
+      "fee_share_of_gross": 0.1484473975901852,
+      "fee_rate_recorded": [
+        0.001
+      ],
+      "fee_currency": [
+        "USDT"
+      ],
+      "saving_at_25pct_usdt": 1.23694449775
+    }
+  ]
+}

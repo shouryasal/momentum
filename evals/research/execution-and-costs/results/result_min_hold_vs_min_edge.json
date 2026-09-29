@@ -1,0 +1,216 @@
+{
+  "costs_bps": 15.0,
+  "headline": -2.2381594225656367,
+  "headline_is_in_sample": false,
+  "headline_note": "k, lambda and c are fixed from analogue-timing.md (measured on the daily 40-day satellite panel), so their application to the 1h fast profile is out-of-sample by construction; the k sweep {3,5,10} is the plateau report. Headline = Sharpe (CAGR/vol) of the R3-as-written gate on the calibration window 2024-01-01..2026-09-23",
+  "baselines": {
+    "btc_buy_and_hold": 0.5867658888937763,
+    "strategy_baseline": -3.042221371378775
+  },
+  "out_of_sample": {
+    "window": "2024-01-01..2026-09-23 (31 pairs; the freqtrade-calibrated window)",
+    "minhold_trend_k5": {
+      "net_pct": -29.645987425308597,
+      "cagr_pct": -12.0903431859802,
+      "mdd_pct": -30.582927014608828,
+      "sharpe": -2.2381594225656367,
+      "trades": 2232,
+      "mean_hold_h": 13.967293906810037,
+      "fees_pct_start_per_year": 10.5078721643493,
+      "bps_per_holding_day": 53.225576665304885
+    },
+    "minhold_all_k5": {
+      "net_pct": 47.96338465015002,
+      "cagr_pct": 15.439842827029238,
+      "mdd_pct": -62.276144668891334,
+      "sharpe": 0.3268166885549777,
+      "trades": 2173,
+      "mean_hold_h": 129.51173492867002,
+      "fees_pct_start_per_year": 14.542547031536444,
+      "bps_per_holding_day": 5.808817255831297
+    },
+    "ungated": {
+      "net_pct": -26.55506714414321,
+      "cagr_pct": -10.694215618846725,
+      "mdd_pct": -26.928256942314512,
+      "sharpe": -3.042221371378775,
+      "trades": 2215,
+      "mean_hold_h": 5.560722347629797,
+      "fees_pct_start_per_year": 10.524876590689876,
+      "bps_per_holding_day": 130.17537462642645
+    }
+  },
+  "calibration_vs_freqtrade_L3R3": {
+    "replay": {
+      "trades": 2215,
+      "net_pct": -26.55506714414321,
+      "mdd_pct": -26.928256942314512,
+      "fees_yr": 10.524876590689876,
+      "mean_hold_h": 5.560722347629797,
+      "exit_mix": {
+        "exit_signal": 683,
+        "roi": 1026,
+        "stop_loss": 69,
+        "trailing_stop_loss": 437
+      }
+    },
+    "freqtrade_doc": {
+      "trades": 2199,
+      "net_pct": -26.45,
+      "mdd_pct": 26.75,
+      "fees_yr": 10.28,
+      "mean_hold_h": 7.2,
+      "exit_mix": {
+        "roi": 905,
+        "trailing_stop_loss": 397,
+        "stop_loss": 60,
+        "exit_signal": 837
+      }
+    },
+    "source": "docs/design/risk-and-ladder-2026-09-29.md \u00a72.3"
+  },
+  "regimes": {
+    "2019-22": {
+      "n": 3204,
+      "days": 1461,
+      "base_net": -46.57000754746999,
+      "base_mdd": -46.65729330741849,
+      "base_fees_yr": 9.32183816385918,
+      "base_bps_day": 144.96164898717288,
+      "minhold_trend_net": -45.56131223386745,
+      "minhold_trend_mdd": -45.828245920414346,
+      "minhold_trend_fees_yr": 9.538751576869753,
+      "minhold_trend_bps_day": 59.53811658415121,
+      "minhold_all_net": 98.24355122308826,
+      "minhold_all_mdd": -70.495124249034,
+      "minhold_all_fees_yr": 26.723146535240883,
+      "minhold_all_bps_day": 6.7507326192900825,
+      "btc_hold_cagr": 44.4725961439328,
+      "btc_hold_mdd": -76.62925431645935
+    },
+    "2023-24": {
+      "n": 1611,
+      "days": 731,
+      "base_net": -21.74606267596946,
+      "base_mdd": -21.663658816387212,
+      "base_fees_yr": 10.513505677514708,
+      "base_bps_day": 124.81898662087154,
+      "minhold_trend_net": -19.42137143318422,
+      "minhold_trend_mdd": -21.0036020725888,
+      "minhold_trend_fees_yr": 10.690379753246871,
+      "minhold_trend_bps_day": 45.009777283204485,
+      "minhold_all_net": 234.02570496401108,
+      "minhold_all_mdd": -41.54622876991473,
+      "minhold_all_fees_yr": 18.860305136896724,
+      "minhold_all_bps_day": 5.217269172051802,
+      "btc_hold_cagr": 137.30626037323796,
+      "btc_hold_mdd": -26.151375053867753
+    },
+    "2025-26": {
+      "n": 1409,
+      "days": 631,
+      "base_net": -19.149391930285674,
+      "base_mdd": -20.23089827411283,
+      "base_fees_yr": 10.973615454099196,
+      "base_bps_day": 127.35968333855719,
+      "minhold_trend_net": -24.32368331991531,
+      "minhold_trend_mdd": -26.05165974975344,
+      "minhold_trend_fees_yr": 10.635478094330383,
+      "minhold_trend_bps_day": 47.430565442521576,
+      "minhold_all_net": -25.056518423372097,
+      "minhold_all_mdd": -59.075969501725446,
+      "minhold_all_fees_yr": 7.750446877002175,
+      "minhold_all_bps_day": 5.7004947398868735,
+      "btc_hold_cagr": -5.242696015148651,
+      "btc_hold_mdd": -52.97176591351065
+    }
+  },
+  "n_params": 1,
+  "k_sweep": {
+    "none": {
+      "net_pct": -26.55506714414321,
+      "mdd_pct": -26.928256942314512,
+      "trades": 2215,
+      "mean_hold_h": 5.560722347629797,
+      "fees_pct_start_per_year": 10.524876590689876,
+      "bps_per_holding_day": 130.17537462642645
+    },
+    "minhold_trend_k3": {
+      "net_pct": -29.92340647106412,
+      "mdd_pct": -30.856651532116796,
+      "trades": 2232,
+      "mean_hold_h": 14.018817204301076,
+      "fees_pct_start_per_year": 10.507738327708578,
+      "bps_per_holding_day": 53.102860590099105
+    },
+    "minhold_all_k3": {
+      "net_pct": 39.11694100981515,
+      "mdd_pct": -62.3936254340143,
+      "trades": 2197,
+      "mean_hold_h": 126.05917159763314,
+      "fees_pct_start_per_year": 14.400530513005627,
+      "bps_per_holding_day": 5.941286856936165
+    },
+    "minhold_trend_k5": {
+      "net_pct": -29.645987425308597,
+      "mdd_pct": -30.582927014608828,
+      "trades": 2232,
+      "mean_hold_h": 13.967293906810037,
+      "fees_pct_start_per_year": 10.5078721643493,
+      "bps_per_holding_day": 53.225576665304885
+    },
+    "minhold_all_k5": {
+      "net_pct": 47.96338465015002,
+      "mdd_pct": -62.276144668891334,
+      "trades": 2173,
+      "mean_hold_h": 129.51173492867002,
+      "fees_pct_start_per_year": 14.542547031536444,
+      "bps_per_holding_day": 5.808817255831297
+    },
+    "minhold_trend_k10": {
+      "net_pct": -29.727480258983242,
+      "mdd_pct": -30.66333456744014,
+      "trades": 2232,
+      "mean_hold_h": 13.97222222222222,
+      "fees_pct_start_per_year": 10.5050135662985,
+      "bps_per_holding_day": 53.21440548240948
+    },
+    "minhold_all_k10": {
+      "net_pct": 11.696084907996184,
+      "mdd_pct": -64.85175865015415,
+      "trades": 1879,
+      "mean_hold_h": 167.90047897817988,
+      "fees_pct_start_per_year": 11.731194246026016,
+      "bps_per_holding_day": 4.612871738858556
+    }
+  },
+  "min_edge": {
+    "floor": 0.009000000000000001,
+    "L3R3_refuses_all_entries": false,
+    "L0R0_refuses_all_entries": true,
+    "L3R3_smallest_target": 0.009,
+    "L0R0_smallest_target": 0.005
+  },
+  "edge_audit": {
+    "effective_n": 11587.8,
+    "effective_n_note": "BTC/USDT 1h triple-barrier labels, 79,610 rows -> 11,587.8 independent; the replay's 2,215 trades on the calibration window are not independent either (entries cluster into market-wide trend turns)",
+    "deflated_hurdle": 2.0692,
+    "hurdle_note": "baseline 0.58 + expected_max_sharpe(N=7,791, 9.1y); at the live open family (N=29) the hurdle is 1.5706",
+    "n_trials_added": 7
+  },
+  "both_directions": {
+    "avoided": "R3 as written (trend-loss exit blocked before H_min): cost per holding day 130 -> 53 bps; all non-stop exits blocked: 130 -> 5.8 bps, and net on the calibration window -26.6% -> 48.0%",
+    "gave_up": "fees per year of NAV are NOT reduced by either form (10.52% -> 10.51% / 14.54%) because the fee line is set by the entry-side counters (4 trades/day, 300-min spacing, 1%/month budget), not by the exit; R3 as written makes net worse (-26.6% -> -29.6%) by converting trend-loss exits into 6% stops; blocking every non-stop exit takes MaxDD from -26.9% to -62.3% and loses -25.1% in 2025-26 against the ungated -19.1%"
+  },
+  "falsifier_triggered": true,
+  "falsifier_value": {
+    "fee_cut_required": 0.3,
+    "fee_cut_minhold_trend_k5": 0.0016156413991228469,
+    "fee_cut_minhold_all_k5": -0.38173088360965,
+    "min_edge_refusal_share_under_L3R3": 0.0,
+    "min_edge_threshold": 0.1,
+    "regimes_where_minhold_trend_net_is_worse_than_ungated": [
+      "2025-26"
+    ]
+  }
+}

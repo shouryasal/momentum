@@ -1,0 +1,210 @@
+{
+  "costs_bps": 15.0,
+  "headline": 1.1775307576556855,
+  "headline_is_in_sample": false,
+  "headline_note": "walk-forward out-of-sample (expanding in-sample from 2017-08-17, 60-day embargo, yearly OOS 2019..2026, (x, theta) chosen by in-sample Sharpe)",
+  "baselines": {
+    "btc_buy_and_hold": 0.8092044875056137,
+    "strategy_baseline": 1.1886452703388353
+  },
+  "out_of_sample": {
+    "folds": 8,
+    "sharpe": 1.1775307576556855,
+    "cagr": 49.053452799188356,
+    "mdd": -46.24910159229765,
+    "strategy_baseline_cagr": 49.33079341803535,
+    "btc_buy_and_hold_cagr": 49.69710088021409,
+    "fixed_x_2_15_cagr": 49.90373305089366,
+    "picks": [
+      {
+        "oos_year": 2019,
+        "in_sample_end": "2018-11-02",
+        "x": 0.13333333333333333,
+        "theta": 1.0,
+        "is_sharpe": 0.5292515744749466,
+        "oos_cagr": 48.710094351156876,
+        "oos_base_cagr": 51.69412478760833,
+        "oos_hold_cagr": 94.31337600259235
+      },
+      {
+        "oos_year": 2020,
+        "in_sample_end": "2019-11-02",
+        "x": 0.0,
+        "theta": 1.0,
+        "is_sharpe": 0.801038930803653,
+        "oos_cagr": 174.8152625814513,
+        "oos_base_cagr": 174.8152625814513,
+        "oos_hold_cagr": 300.45827698774747
+      },
+      {
+        "oos_year": 2021,
+        "in_sample_end": "2020-11-02",
+        "x": 0.0,
+        "theta": 0.5,
+        "is_sharpe": 0.8129163249498881,
+        "oos_cagr": 143.80203257725327,
+        "oos_base_cagr": 136.54843984805925,
+        "oos_hold_cagr": 59.78952157803168
+      },
+      {
+        "oos_year": 2022,
+        "in_sample_end": "2021-11-02",
+        "x": 0.0,
+        "theta": 0.5,
+        "is_sharpe": 1.794244752750237,
+        "oos_cagr": -21.651098719527727,
+        "oos_base_cagr": -20.59549951349995,
+        "oos_hold_cagr": -64.207055726116
+      },
+      {
+        "oos_year": 2023,
+        "in_sample_end": "2022-11-02",
+        "x": 0.0,
+        "theta": 0.5,
+        "is_sharpe": 1.225817948900074,
+        "oos_cagr": 50.034135409718175,
+        "oos_base_cagr": 55.46765524942665,
+        "oos_hold_cagr": 155.60728793887236
+      },
+      {
+        "oos_year": 2024,
+        "in_sample_end": "2023-11-02",
+        "x": 0.0,
+        "theta": 1.0,
+        "is_sharpe": 1.1188518868725343,
+        "oos_cagr": 51.96599206956729,
+        "oos_base_cagr": 51.96599206956729,
+        "oos_hold_cagr": 120.82595813687931
+      },
+      {
+        "oos_year": 2025,
+        "in_sample_end": "2024-11-02",
+        "x": 0.13333333333333333,
+        "theta": 1.0,
+        "is_sharpe": 1.1453066428592988,
+        "oos_cagr": 8.785765162054693,
+        "oos_base_cagr": 7.506972170854165,
+        "oos_hold_cagr": -6.334722578438945
+      },
+      {
+        "oos_year": 2026,
+        "in_sample_end": "2025-11-02",
+        "x": 0.13333333333333333,
+        "theta": 1.0,
+        "is_sharpe": 1.149063933517996,
+        "oos_cagr": 17.96358189138163,
+        "oos_base_cagr": 15.978516713047618,
+        "oos_hold_cagr": -5.680006397312187
+      }
+    ]
+  },
+  "in_sample_full_window": {
+    "candidate_x_2_15": {
+      "cagr": 43.656768777111374,
+      "vol": 40.10068952543354,
+      "sharpe": 1.088678755746143,
+      "mdd": -47.02483554303484,
+      "gross": 0.45376829023852483,
+      "total": 2613.982794375423,
+      "days": 3326,
+      "turnover_per_year": 6.174784525957106,
+      "fee_drag_per_year": 0.9262176788935659,
+      "book": "band 0.133 theta 1.0",
+      "x": 0.13333333333333333,
+      "theta": 1.0
+    },
+    "unbanded": {
+      "cagr": 43.06536079529344,
+      "vol": 39.9371339366693,
+      "sharpe": 1.0783287770120098,
+      "mdd": -45.62169655957755,
+      "gross": 0.45012026458208054,
+      "total": 2513.854734878859,
+      "days": 3326,
+      "turnover_per_year": 8.618360392864302,
+      "fee_drag_per_year": 1.2927540589296453,
+      "book": "band 0.000 theta 1.0",
+      "x": 0.0,
+      "theta": 1.0
+    },
+    "btc_hold": {
+      "cagr": 38.614482057336794,
+      "vol": 66.87555197636635,
+      "sharpe": 0.577408049969936,
+      "mdd": -83.18705353076483,
+      "gross": 0.9996993385447985,
+      "total": 1859.7769469881414,
+      "days": 3326,
+      "turnover_per_year": 0.10974143114852676,
+      "fee_drag_per_year": 0.0,
+      "book": "BTC hold",
+      "x": null,
+      "theta": null
+    }
+  },
+  "regimes": {
+    "2019-22": {
+      "n": 1461,
+      "cand_cagr": 67.45753655684939,
+      "base_cagr": 67.3346441437339,
+      "cand_mdd": -47.02483554303487,
+      "base_mdd": -45.621696559577664,
+      "cand_sharpe": 1.3676434393668098,
+      "base_sharpe": 1.3725504249536264,
+      "cand_fee": 0.9081279945242984,
+      "base_fee": 1.2616358658453113,
+      "btc_hold_cagr": 45.34593790238499,
+      "btc_hold_mdd": -76.62925431645937
+    },
+    "2023-24": {
+      "n": 731,
+      "cand_cagr": 53.89643696048212,
+      "base_cagr": 53.704457319445,
+      "cand_mdd": -26.76870272689942,
+      "base_mdd": -28.33903839885036,
+      "cand_sharpe": 1.4751714600141992,
+      "base_sharpe": 1.4704030631227962,
+      "cand_fee": 1.2058481532147745,
+      "base_fee": 1.552872777017784,
+      "btc_hold_cagr": 137.55721679069688,
+      "btc_hold_mdd": -26.151375053867664
+    },
+    "2025-26": {
+      "n": 632,
+      "cand_cagr": 12.572618225881138,
+      "base_cagr": 11.00770566318847,
+      "cand_mdd": -25.078079658873875,
+      "base_mdd": -25.978138750091073,
+      "cand_sharpe": 0.5156117754654855,
+      "base_sharpe": 0.4551483515824671,
+      "cand_fee": 0.9125000000000001,
+      "base_fee": 1.3456487341772152,
+      "btc_hold_cagr": -6.058681967709401,
+      "btc_hold_mdd": -52.97176591351058
+    }
+  },
+  "n_params": 2,
+  "edge_audit": {
+    "effective_n": 523.9,
+    "effective_n_note": "BTC/USDT 1d triple-barrier labels, 3,273 rows -> 523.9 independent",
+    "deflated_hurdle": 2.0692,
+    "hurdle_note": "baseline 0.58 + expected_max_sharpe(N=7,791, 9.1y); at the live open family (N=29) the hurdle is 1.5706",
+    "n_trials_added": 18
+  },
+  "both_directions": {
+    "avoided": "at x=2/15, theta=1: 0.37 pp/yr of fee drag (8.62 -> 6.17 one-way turnover/yr)",
+    "gave_up": "full-window MaxDD -45.62% -> -47.02% (1.4 pp deeper); walk-forward OOS CAGR 49.33% -> 49.05% and MaxDD -45.62% -> -46.25%; every band above 2/15 and every theta below 1 loses 2-16 pp of CAGR"
+  },
+  "falsifier_triggered": true,
+  "falsifier_value": {
+    "clause_1_not_triggered": {
+      "fee_drag_saved_pp": 0.36653638003607947,
+      "cagr_delta_pp": 0.5914079818179374,
+      "mdd_delta_pp": -1.4031389834572892
+    },
+    "clause_2_triggered": {
+      "oos_candidate_cagr": 49.053452799188356,
+      "oos_unbanded_cagr": 49.33079341803535
+    }
+  }
+}

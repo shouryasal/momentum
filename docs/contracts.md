@@ -452,6 +452,27 @@ needs a weight or a gross number must mark the amounts itself (candle closes, vi
 already reconciled (`nav_usdt - cash_usdt` is the marked value of the book by
 construction). An amount that cannot be marked is reported as unknown, never as zero.
 
+**`nav_points` is the bot's ledger of its CURRENT run, not the cumulative pot.** Both
+writers ask the bot (`/profit`, `/balance`), and a bot only knows the database it is running
+on; a restart onto a fresh `ft_userdata/<s>/runs/<run_id>.sqlite` resets the series to the
+seed (2026-09-23 23:45Z: −69.77 vanished this way, and no `sleeve_runs` row marked the
+boundary because the restart bypassed `ops.modes`). The cumulative figure is
+`console.services.pot_service` — `seed + Σ closed trades in every run database (net of
+fees) + open positions marked to market` — read from the databases themselves
+(`tradesv3.sqlite` first, then `runs/*.sqlite`, all `mode=ro`). It is carried as
+`GET /api/overview` → `pot` (`total`, `sleeves[]`, `definitions`) and
+`GET /api/portfolio/{sleeve}` → `pot` (one sleeve, with its per-run table `runs[]`: run,
+start, end, realised, fees, gross, `current`). Three numbers, never one:
+`cumulative_net_usdt`, `realised_current_run_usdt` (the one that resets), `open_mark_usdt`.
+`ledger_nav_usdt` / `ledger_gap_usdt` put the old ledger beside it. The same service
+annotates fills: `fills.ft_order_id` is the bot's `orders.order_id`, so every row on
+`/api/portfolio/{sleeve}` and `/api/portfolio/{sleeve}/fills` carries `reason` (Freqtrade's
+enter tag or exit reason — `force_exit`, `target_zero`, `trailing_stop_loss`, …), `actor`
+(`human:console` when an `audit_log` `autonomy.flatten` / `kill.engage` sits within five
+minutes of a `force_exit`, `bot` otherwise, `unknown` for a `force_exit` with no audit
+row), `cause` (`flatten`, or the `targets:*` gate refusal behind a `target_zero`) and `run`
+(the database the order lives in). An unmatched fill gets `null`s, never a guess.
+
 **Additive columns** (`MIGRATIONS[3]`): `runs.provider`, `runs.chain_index`,
 `runs.switched_from`, `runs.signal_id`; `proposals.signal_id`, `proposals.approval_status`;
 `orders.mode`, `orders.run_id`; `fills.mode`, `fills.run_id`; `nav_daily.run_id`;
@@ -1133,6 +1154,7 @@ GET    /api/portfolio/{sleeve}/orders
 POST   /api/portfolio/{sleeve}/orders/{trade_id}/cancel
 GET    /api/preview
 POST   /api/preview
+GET    /api/profit-gaps
 GET    /api/prompts
 PUT    /api/prompts/active
 GET    /api/prompts/diff
@@ -1193,3 +1215,21 @@ GET    /api/testruns/summary/{sleeve}
 GET    /api/testruns/{run_id}
 POST   /api/testruns/{sleeve}/reset
 ```
+
+**`GET /api/profit-gaps`** — the profit & gap ledger (`console.contracts.ProfitGapsResponse`,
+computed by `runs.profit_gaps.compute_report`, served by
+`console.services.profit_gaps_service.ledger`). Read-only: the journal and knowledge
+databases are opened `mode=ro`, every bot database is opened `mode=ro`, and the endpoint
+writes no file (the nightly `reports/profit-gaps/<day>.md` and
+`knowledge/state/profit_gaps.json` are the daily review's). Cached five minutes per state
+root; `?refresh=true` recomputes. `windows` carries `last_24h` and `since_start` (the first
+row in any run database), each a `Ledger`: `expected` (A — the active profile's declared
+expectation and the sentence saying days of P&L cannot confirm or refute it), `realised`
+(B — window net, gross, fees, fee/gross, trades, win rate, exit-reason mix, open mark, the
+cumulative pot by import from `pot_service`, and BTC-hold / equal-weight-basket over the
+same window costed at 15 bps a side), `gaps[]` (C — ten gaps, each with `size`, `unit`,
+`severity` 0-100, `cause`, `sentence` and `lines[]` where every line has `value`, `unit`
+and the `query` that produced it) and `top_three[]` (D). A ledger that cannot be computed
+at all is `error` with `windows: {}`, never a 500; a section that cannot be computed is a
+gap row with `error` set and a note in `errors[]`. Home shows A, B and D in
+`ProfitGapsCard` and C behind its details button. Design: `docs/design/profit-gaps.md`.

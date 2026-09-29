@@ -3,8 +3,46 @@
 import { api } from '@/api';
 
 import type { RunDetail } from '../decisions/api';
-import type { PortfolioPayload } from '../portfolio/api';
+import type { PortfolioPayload, SleevePot } from '../portfolio/api';
 import type { GateDecisionsPayload } from '../risk/api';
+
+/** Both bots' pots added up — only when they are on the same kind of money. */
+export interface PotTotal {
+  seed_usdt: number;
+  cumulative_net_usdt: number;
+  gain_usdt: number;
+  gain_pct: number | null;
+  realised_all_runs_usdt: number;
+  realised_current_run_usdt: number;
+  realised_earlier_runs_usdt: number;
+  open_mark_usdt: number;
+  fees_usdt: number;
+  gross_usdt: number;
+  fully_priced: boolean;
+  unpriced: string[];
+  restarts: number;
+  runs: number;
+  ledger_nav_usdt: number | null;
+  ledger_gap_usdt: number | null;
+}
+
+/**
+ * The cumulative pot, read from the bots' own databases rather than the 15-minute ledger.
+ *
+ * The ledger (`nav.cards`) restarts from the seed whenever a bot gets a fresh database —
+ * on 2026-09-23 23:45Z that hid a 69.77 loss. `total` is `null` when the bots are on
+ * different kinds of money (`mixed`) or when the reader failed (`error`).
+ */
+export interface PotPanel {
+  basis: string;
+  mixed: boolean;
+  /** The sentence beside each of the three numbers, keyed by field name. */
+  definitions: Record<string, string>;
+  total: PotTotal | null;
+  sleeves: SleevePot[];
+  as_of_utc: string;
+  error?: string;
+}
 
 export interface NavCard {
   sleeve: string;
@@ -207,6 +245,8 @@ export interface OverviewPayload {
   };
   /** What was put in, and where that number came from. */
   seed?: SeedPanel;
+  /** What it is worth, counted across every bot restart. Preferred over `nav` on Home. */
+  pot?: PotPanel;
   /** The demo account: one quiet line when it is idle, the money source when it is live. */
   demo?: DemoPanel;
   nav?: { cards: NavCard[] };

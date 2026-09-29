@@ -264,7 +264,7 @@ class SleeveFast(EarnBaseStrategy):
             instrument("want_none", pair, ps.now, f"reentry_cooldown:{entry_tag or ''}")
             return 0.0
         target = self._target_weight(pair)
-        gap = sc.desired_stake_for_target(target, ps.nav, ps.positions.get(pair, 0.0))
+        gap = sc.desired_stake_for_target(target, ps.nav, ps.committed(pair))
         if gap <= 0:
             instrument("want_none", pair, ps.now,
                        ("target_zero" if target <= 0 else "no_gap") + f":{entry_tag or ''}")
@@ -334,7 +334,7 @@ class SleeveFast(EarnBaseStrategy):
                     "min_interval_hours", 0))):
             instrument("rebal_none", pair, current_time, "cadence")
             return None
-        gap = target_w * ps.nav - ps.positions.get(pair, 0.0)
+        gap = target_w * ps.nav - ps.committed(pair)
         if gap <= 0 or mx.within_band(gap, ps.nav, self._rebalance_band()):
             instrument("rebal_none", pair, current_time, "within_band", gap)
             return None

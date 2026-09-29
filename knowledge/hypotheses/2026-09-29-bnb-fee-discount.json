@@ -1,0 +1,139 @@
+{
+  "audit_problems": [
+    "headline 1.0860371141100456 does not clear the deflated hurdle 2.0692; beating the baseline is not the bar"
+  ],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "supported",
+  "closed_utc": "2026-09-29T14:34:27Z",
+  "costs_bps": 12.5,
+  "falsifier": "dead if the annual saving on the ensemble's measured one-way turnover is below 0.10% of NAV per year, or if the 5th-percentile 30-day loss on a one-month fee float held in BNB exceeds the annual fee saving in any of the three regimes 2019-22, 2023-24, 2025-26",
+  "horizon": "1y",
+  "id": "2026-09-29-bnb-fee-discount",
+  "n_params": 1,
+  "opened_utc": "2026-09-29T14:16:50Z",
+  "outcome": "inconclusive",
+  "regimes": [
+    "2019-22",
+    "2023-24",
+    "2025-26"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": 0.577408049969936,
+      "strategy_baseline": 1.0783287770120098
+    },
+    "both_directions": {
+      "avoided": "0.215% of NAV per year of fees on the ensemble (fee line 0.862%/yr at 8.62x one-way turnover); 1.71%/yr on the fast profile (fee line 6.85%/yr)",
+      "gave_up": "a one-month fee float in BNB of 0.072% of NAV (fast profile 0.571%), daily beta to BTC 0.92, 30-day 5th-percentile loss on the float 0.022% of NAV (worst regime); plus an operational dependency: the toggle must be on and the float must never run dry or the discount silently lapses to the original fee"
+    },
+    "costs_bps": 12.5,
+    "costs_note": "12.5 bps/side for the BNB variant (7.5 fee + 5 slippage) against the 15 bps/side baseline; fee schedule verified 2026-09-29 at binance.com/en/fee/schedule",
+    "edge_audit": {
+      "deflated_hurdle": 2.0692,
+      "effective_n": 523.9,
+      "effective_n_note": "BTC/USDT 1d triple-barrier labels, 3,273 rows -> 523.9 independent",
+      "hurdle_note": "baseline 0.58 + expected_max_sharpe(N=7,791, 9.1y); at the live open family (N=29) the hurdle is 1.5706",
+      "n_trials_added": 1
+    },
+    "falsifier_triggered": false,
+    "falsifier_value": {
+      "break_even_30d_loss_on_a_one_month_float": 3.0,
+      "saving_pct_nav_per_year": 0.21545900982160754,
+      "threshold": 0.1,
+      "worst_regime_float_q05_loss_pct_nav": 0.022447149676182786
+    },
+    "headline": 1.0860371141100456,
+    "headline_is_in_sample": false,
+    "headline_note": "nothing is fitted: the discount is a verified fee-schedule fact applied to the ensemble's measured turnover; the full-window Sharpe is reported as the headline and the 2025-26 slice (post-dating every design decision in the repo) as the out-of-sample block",
+    "n_params": 1,
+    "out_of_sample": {
+      "btc_buy_and_hold_sharpe": -0.1386001978162117,
+      "cagr": 11.256446416079458,
+      "mdd": -25.833135936500963,
+      "sharpe": 0.46539931499271153,
+      "strategy_baseline_sharpe": 0.4551483515824671,
+      "window": "2025-01-01..2026-09-24"
+    },
+    "paper_fills": [
+      {
+        "closed_trades": 6,
+        "db": "/home/shourya/earn-run/ft_userdata/a/runs/test-a-000.sqlite",
+        "fee_currency": [
+          "USDT"
+        ],
+        "fee_rate_recorded": [
+          0.001
+        ],
+        "fee_share_of_gross": 0.13537942108492348,
+        "fees_usdt": 4.59438438,
+        "gross_usdt": 33.93709578,
+        "net_usdt": 29.3427114,
+        "saving_at_25pct_usdt": 1.148596095
+      },
+      {
+        "closed_trades": 6,
+        "db": "/home/shourya/earn-run/ft_userdata/b/runs/test-b-000.sqlite",
+        "fee_currency": [
+          "USDT"
+        ],
+        "fee_rate_recorded": [
+          0.001
+        ],
+        "fee_share_of_gross": 0.1484473975901852,
+        "fees_usdt": 4.947777991,
+        "gross_usdt": 33.330176691,
+        "net_usdt": 28.3823987,
+        "saving_at_25pct_usdt": 1.23694449775
+      }
+    ],
+    "regimes": {
+      "2019-22": {
+        "bnb_beta_to_btc": 0.9451391783387908,
+        "cagr_baseline": 67.3346441437339,
+        "cagr_bnb": 67.6864747977624,
+        "fee_drag_baseline": 1.2616358658453113,
+        "fee_drag_bnb": 1.0513632215377595,
+        "float_q05_loss_pct_nav": 0.022447149676182786,
+        "mdd_baseline": -45.621696559577664,
+        "mdd_bnb": -45.50137737227917,
+        "n": 1461,
+        "sharpe_baseline": 1.3725504249536264,
+        "sharpe_bnb": 1.3797236129548964
+      },
+      "2023-24": {
+        "bnb_beta_to_btc": 0.6691248210624197,
+        "cagr_baseline": 53.704457319445,
+        "cagr_bnb": 54.10190585230128,
+        "fee_drag_baseline": 1.552872777017784,
+        "fee_drag_bnb": 1.29406064751482,
+        "float_q05_loss_pct_nav": 0.01153526613666581,
+        "mdd_baseline": -28.33903839885036,
+        "mdd_bnb": -28.189610817084766,
+        "n": 731,
+        "sharpe_baseline": 1.4704030631227962,
+        "sharpe_bnb": 1.4812539096499981
+      },
+      "2025-26": {
+        "bnb_beta_to_btc": 0.8101298258032877,
+        "cagr_baseline": 11.00770566318847,
+        "cagr_bnb": 11.256446416079458,
+        "fee_drag_baseline": 1.345648734177215,
+        "fee_drag_bnb": 1.1213739451476792,
+        "float_q05_loss_pct_nav": 0.017401017556588915,
+        "mdd_baseline": -25.978138750091073,
+        "mdd_bnb": -25.833135936500963,
+        "n": 632,
+        "sharpe_baseline": 0.4551483515824671,
+        "sharpe_bnb": 0.46539931499271153
+      }
+    }
+  },
+  "seal": "62f3908aef47ce16372c5c9c26dec1d0d5303ec4111bfe5954251ff6b6ee6ad1",
+  "seal_ok": true,
+  "statement": "Paying Binance spot fees in BNB (verified 0.075% against 0.100% at VIP0, maker and taker alike) predicts a 25% reduction of the fee line at a 1-year horizon, net of the P&L of a one-month fee float held in BNB, on the BTC/ETH trend ensemble and on the fast-profile book",
+  "status": "closed",
+  "surface": "local-candles BNB/USDT 1d + panel_1d BTC/ETH closes + run databases test-a-000/test-b-000 (fills, read-only)"
+}

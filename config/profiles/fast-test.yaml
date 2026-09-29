@@ -65,11 +65,20 @@ trading:
     # PROFIT BOOKING ON. The shipped config books none at all — roi_table {"0": 10.0} means
     # "never", and the ladder is empty — and that is the single biggest hole this test
     # closes. Two ladder rungs first, then ROI, decaying with time in trade.
+    #
+    # RUNGS VS THE COST FLOOR (docs/design/risk-and-ladder-2026-09-29.md). The round trip
+    # is 0.30% (15 bps/side). The original rungs at +0.6% / +1.2% handed 50% / 25% of the
+    # booked gain to the venue, and the ROI floor at +0.5% handed it 60%. Every rung and
+    # ROI level now clears the round trip by >= 3x (0.9%) — which is also what the gate's
+    # `min_edge` check (risk.min_edge: 3 x 0.30%) refuses an entry below, and what
+    # ops.config refuses at load time. The replay of both rung sets over the full 1h
+    # history (BTC/ETH from 2017-08, the alts from 2021-01 or listing) at stops 4/6/8%
+    # is in that document; the numbers below are the set it supports.
     take_profit:
-      roi_table: { "0": 0.020, "90": 0.010, "300": 0.005 }
+      roi_table: { "0": 0.020, "90": 0.015, "300": 0.009 }
       ladder:
-        - { at_profit_pct: 0.006, sell_fraction: 0.30 }
-        - { at_profit_pct: 0.012, sell_fraction: 0.40 }
+        - { at_profit_pct: 0.009, sell_fraction: 0.30 }
+        - { at_profit_pct: 0.015, sell_fraction: 0.40 }
     rebalance: { min_interval_hours: 1 }   # was 4: matches the 1h candle.
     fast:
       ema_fast: 6                  # tuned from 9/21: 3.07 trades/day vs 3.03, and a
@@ -131,4 +140,21 @@ sleeves:
 #   * risk.min_notional_usdt = 25 with target_pct_nav 0.05 needs NAV >= 500 to place an
 #     entry at all, and NAV >= ~1,700 for the 30% first rung to be a sendable order. Below
 #     that the rung is burned as `below_min_exit` and the position leaves via ROI instead.
+# ---------------------------------------------------------------------------------------
+# MEASURED AGAIN 2026-09-29 (docs/design/risk-and-ladder-2026-09-29.md §2), 20240101-20260923,
+# 1h, all 31 pairs, sleeve A, 10,000 USDT, --enable-protections, fee 15 bps/side, stop 0.06:
+#
+#   rungs 0.6/1.2 + ROI floor 0.5 (the old set): 2,203 trades, net -27.65%, MaxDD 28.4%,
+#       173 rungs fired, fees 10.17%/yr of start, 68x turnover/yr, mean hold 6.4h
+#   rungs 0.9/1.5 + ROI floor 0.5:               2,203 trades, net -27.45%, 30 rungs fired
+#   no ladder at all:                            2,203 trades, net -27.43%
+#   rungs 0.9/1.5 + ROI 2.0/1.5/0.9 (THIS FILE): 2,199 trades, net -26.45%, MaxDD 26.8%,
+#       48 rungs fired; roi exits 1,117 -> 905, trailing-stop exits 293 -> 397 (+2.65 -> +6.47)
+#
+# Read it plainly: the rungs are not where the money is. 741 trend-loss exits at -60.6% and
+# ~10% of NAV a year in fees are, on a 6-hour mean hold — analogue-timing.md §4.4's "the fees
+# were the loss", reproduced with the real strategy code on a longer window. The set above is
+# the best of the four on net and drawdown and the only one every level of which clears the
+# gate's risk.min_edge floor (3 x 0.30%); it does not make this profile earn, and this
+# profile was never claimed to. Run it only as long as the plumbing needs observing.
 # ---------------------------------------------------------------------------------------

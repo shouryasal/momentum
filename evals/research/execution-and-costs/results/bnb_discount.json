@@ -1,0 +1,362 @@
+{
+  "fee_schedule": {
+    "vip0_maker": 0.001,
+    "vip0_taker": 0.001,
+    "with_bnb": 0.00075,
+    "discount": 0.25,
+    "verified": "binance.com/en/fee/schedule + BNB FAQ, 2026-09-29"
+  },
+  "float_months": 1.0,
+  "ensemble": {
+    "full": [
+      {
+        "cagr": 38.614482057336794,
+        "vol": 66.87555197636635,
+        "sharpe": 0.577408049969936,
+        "mdd": -83.18705353076483,
+        "gross": 0.9996993385447985,
+        "total": 1859.7769469881414,
+        "days": 3326,
+        "turnover_per_year": 0.10974143114852676,
+        "fee_drag_per_year": 0.0,
+        "book": "btc_buy_and_hold"
+      },
+      {
+        "cagr": 43.06536079529344,
+        "vol": 39.9371339366693,
+        "sharpe": 1.0783287770120098,
+        "mdd": -45.62169655957755,
+        "gross": 0.45012026458208054,
+        "total": 2513.854734878859,
+        "days": 3326,
+        "turnover_per_year": 8.618360392864302,
+        "fee_drag_per_year": 1.2927540589296453,
+        "book": "ensemble @15 bps (strategy_baseline)"
+      },
+      {
+        "cagr": 43.37351858491565,
+        "vol": 39.937418363881726,
+        "sharpe": 1.0860371141100456,
+        "mdd": -45.50137737227916,
+        "gross": 0.45012026458208054,
+        "total": 2565.609058357207,
+        "days": 3326,
+        "turnover_per_year": 8.618360392864302,
+        "fee_drag_per_year": 1.0772950491080377,
+        "book": "ensemble @12.5 bps (fees in BNB)"
+      }
+    ],
+    "2019-22": [
+      {
+        "cagr": 45.34593790238499,
+        "vol": 72.59794397143726,
+        "sharpe": 0.6246173847599014,
+        "mdd": -76.62925431645937,
+        "gross": 1.0,
+        "total": 346.7417429582209,
+        "days": 1461,
+        "turnover_per_year": 0.0,
+        "fee_drag_per_year": 0.0,
+        "book": "btc_buy_and_hold"
+      },
+      {
+        "cagr": 67.3346441437339,
+        "vol": 49.058047645869834,
+        "sharpe": 1.3725504249536264,
+        "mdd": -45.621696559577664,
+        "gross": 0.48291124800365043,
+        "total": 685.1561230575896,
+        "days": 1461,
+        "turnover_per_year": 8.410905772302076,
+        "fee_drag_per_year": 1.2616358658453113,
+        "book": "ensemble @15 bps (strategy_baseline)"
+      },
+      {
+        "cagr": 67.6864747977624,
+        "vol": 49.057995501578105,
+        "sharpe": 1.3797236129548964,
+        "mdd": -45.50137737227917,
+        "gross": 0.48291124800365043,
+        "total": 691.7848768532859,
+        "days": 1461,
+        "turnover_per_year": 8.410905772302076,
+        "fee_drag_per_year": 1.0513632215377595,
+        "book": "ensemble @12.5 bps (fees in BNB)"
+      }
+    ],
+    "2023-24": [
+      {
+        "cagr": 137.55721679069688,
+        "vol": 48.719479978407556,
+        "sharpe": 2.8234541265970443,
+        "mdd": -26.151375053867664,
+        "gross": 1.0,
+        "total": 465.67366283006237,
+        "days": 731,
+        "turnover_per_year": 0.0,
+        "fee_drag_per_year": 0.0,
+        "book": "btc_buy_and_hold"
+      },
+      {
+        "cagr": 53.704457319445,
+        "vol": 36.52362992592599,
+        "sharpe": 1.4704030631227962,
+        "mdd": -28.33903839885036,
+        "gross": 0.6416780665754674,
+        "total": 136.52899885893635,
+        "days": 731,
+        "turnover_per_year": 10.35248518011856,
+        "fee_drag_per_year": 1.552872777017784,
+        "book": "ensemble @15 bps (strategy_baseline)"
+      },
+      {
+        "cagr": 54.10190585230128,
+        "vol": 36.5243969989486,
+        "sharpe": 1.4812539096499981,
+        "mdd": -28.189610817084766,
+        "gross": 0.6416780665754674,
+        "total": 137.75549451972176,
+        "days": 731,
+        "turnover_per_year": 10.35248518011856,
+        "fee_drag_per_year": 1.29406064751482,
+        "book": "ensemble @12.5 bps (fees in BNB)"
+      }
+    ],
+    "2025-26": [
+      {
+        "cagr": -6.058681967709401,
+        "vol": 43.71337172074897,
+        "sharpe": -0.1386001978162117,
+        "mdd": -52.97176591351058,
+        "gross": 1.0,
+        "total": -10.256892793023786,
+        "days": 632,
+        "turnover_per_year": 0.0,
+        "fee_drag_per_year": 0.0,
+        "book": "btc_buy_and_hold"
+      },
+      {
+        "cagr": 11.00770566318847,
+        "vol": 24.184874283113857,
+        "sharpe": 0.4551483515824671,
+        "mdd": -25.978138750091073,
+        "gross": 0.37953586497890296,
+        "total": 19.819981831456367,
+        "days": 632,
+        "turnover_per_year": 8.970991561181433,
+        "fee_drag_per_year": 1.345648734177215,
+        "book": "ensemble @15 bps (strategy_baseline)"
+      },
+      {
+        "cagr": 11.256446416079458,
+        "vol": 24.18664156447188,
+        "sharpe": 0.46539931499271153,
+        "mdd": -25.833135936500963,
+        "gross": 0.37953586497890296,
+        "total": 20.28524962984961,
+        "days": 632,
+        "turnover_per_year": 8.970991561181433,
+        "fee_drag_per_year": 1.1213739451476792,
+        "book": "ensemble @12.5 bps (fees in BNB)"
+      }
+    ]
+  },
+  "saving": {
+    "ensemble_one_way_turnover_per_year": 8.618360392864302,
+    "ensemble_fee_line_pct_nav_per_year": 0.8618360392864302,
+    "ensemble_saving_pct_nav_per_year": 0.21545900982160754,
+    "fast_profile_fee_line_pct_nav_per_year": 6.8533333333333335,
+    "fast_profile_saving_pct_nav_per_year": 1.7133333333333334,
+    "fast_profile_source": "risk-and-ladder-2026-09-29.md \u00a72.3 L3R3 fees 10.28%/yr at 15 bps"
+  },
+  "bnb_float_risk": {
+    "ensemble": {
+      "full": {
+        "window": [
+          "2017-08-17",
+          "2026-09-24"
+        ],
+        "n_30d_windows": 3213,
+        "bnb_30d_return_mean": 0.12704468462974136,
+        "q05": -0.29155705854564606,
+        "q01": -0.4700443284668963,
+        "worst": -0.702146017699115,
+        "bnb_max_drawdown": -0.8001769911504425,
+        "bnb_daily_beta_to_btc": 0.9236932225920715,
+        "bnb_ann_vol": 0.9619000101696931,
+        "float_pct_nav": 0.07181966994053586,
+        "float_q05_loss_pct_nav": 0.02093953171358179,
+        "float_worst_loss_pct_nav": 0.05042789524121209,
+        "saving_per_year_pct_nav": 0.21545900982160754,
+        "break_even_30d_loss_on_float": 3.0
+      },
+      "2019-22": {
+        "window": [
+          "2019-01-01",
+          "2022-12-31"
+        ],
+        "n_30d_windows": 1431,
+        "bnb_30d_return_mean": 0.16252490196090358,
+        "q05": -0.312548772429172,
+        "q01": -0.46394290273173305,
+        "worst": -0.6397691496441122,
+        "bnb_max_drawdown": -0.7606666563244959,
+        "bnb_daily_beta_to_btc": 0.9451391783387908,
+        "bnb_ann_vol": 1.047161915624876,
+        "float_pct_nav": 0.07181966994053586,
+        "float_q05_loss_pct_nav": 0.022447149676182786,
+        "float_worst_loss_pct_nav": 0.04594800916557743,
+        "saving_per_year_pct_nav": 0.21545900982160754,
+        "break_even_30d_loss_on_float": 3.0
+      },
+      "2023-24": {
+        "window": [
+          "2023-01-01",
+          "2024-12-31"
+        ],
+        "n_30d_windows": 701,
+        "bnb_30d_return_mean": 0.05029168845019819,
+        "q05": -0.16061430171172608,
+        "q01": -0.2509843955082398,
+        "worst": -0.2877790497996565,
+        "bnb_max_drawdown": -0.41012366983031345,
+        "bnb_daily_beta_to_btc": 0.6691248210624197,
+        "bnb_ann_vol": 0.5201259958525273,
+        "float_pct_nav": 0.07181966994053586,
+        "float_q05_loss_pct_nav": 0.01153526613666581,
+        "float_worst_loss_pct_nav": 0.02066819637241236,
+        "saving_per_year_pct_nav": 0.21545900982160754,
+        "break_even_30d_loss_on_float": 3.0
+      },
+      "2025-26": {
+        "window": [
+          "2025-01-01",
+          "2026-09-24"
+        ],
+        "n_30d_windows": 600,
+        "bnb_30d_return_mean": 0.012039817283727801,
+        "q05": -0.24228762915502594,
+        "q01": -0.33710834980575405,
+        "worst": -0.34908289447193586,
+        "bnb_max_drawdown": -0.5819795013002906,
+        "bnb_daily_beta_to_btc": 0.8101298258032877,
+        "bnb_ann_vol": 0.49233408703117637,
+        "float_pct_nav": 0.07181966994053586,
+        "float_q05_loss_pct_nav": 0.017401017556588915,
+        "float_worst_loss_pct_nav": 0.02507101826286134,
+        "saving_per_year_pct_nav": 0.21545900982160754,
+        "break_even_30d_loss_on_float": 3.0
+      }
+    },
+    "fast_profile": {
+      "full": {
+        "window": [
+          "2017-08-17",
+          "2026-09-24"
+        ],
+        "n_30d_windows": 3213,
+        "bnb_30d_return_mean": 0.12704468462974136,
+        "q05": -0.29155705854564606,
+        "q01": -0.4700443284668963,
+        "worst": -0.702146017699115,
+        "bnb_max_drawdown": -0.8001769911504425,
+        "bnb_daily_beta_to_btc": 0.9236932225920715,
+        "bnb_ann_vol": 0.9619000101696931,
+        "float_pct_nav": 0.5711111111111111,
+        "float_q05_loss_pct_nav": 0.16651147565829122,
+        "float_worst_loss_pct_nav": 0.4010033923303835,
+        "saving_per_year_pct_nav": 1.7133333333333334,
+        "break_even_30d_loss_on_float": 3.0
+      },
+      "2019-22": {
+        "window": [
+          "2019-01-01",
+          "2022-12-31"
+        ],
+        "n_30d_windows": 1431,
+        "bnb_30d_return_mean": 0.16252490196090358,
+        "q05": -0.312548772429172,
+        "q01": -0.46394290273173305,
+        "worst": -0.6397691496441122,
+        "bnb_max_drawdown": -0.7606666563244959,
+        "bnb_daily_beta_to_btc": 0.9451391783387908,
+        "bnb_ann_vol": 1.047161915624876,
+        "float_pct_nav": 0.5711111111111111,
+        "float_q05_loss_pct_nav": 0.17850007669843823,
+        "float_worst_loss_pct_nav": 0.3653792699078596,
+        "saving_per_year_pct_nav": 1.7133333333333334,
+        "break_even_30d_loss_on_float": 3.0
+      },
+      "2023-24": {
+        "window": [
+          "2023-01-01",
+          "2024-12-31"
+        ],
+        "n_30d_windows": 701,
+        "bnb_30d_return_mean": 0.05029168845019819,
+        "q05": -0.16061430171172608,
+        "q01": -0.2509843955082398,
+        "worst": -0.2877790497996565,
+        "bnb_max_drawdown": -0.41012366983031345,
+        "bnb_daily_beta_to_btc": 0.6691248210624197,
+        "bnb_ann_vol": 0.5201259958525273,
+        "float_pct_nav": 0.5711111111111111,
+        "float_q05_loss_pct_nav": 0.09172861231091911,
+        "float_worst_loss_pct_nav": 0.16435381288558162,
+        "saving_per_year_pct_nav": 1.7133333333333334,
+        "break_even_30d_loss_on_float": 3.0
+      },
+      "2025-26": {
+        "window": [
+          "2025-01-01",
+          "2026-09-24"
+        ],
+        "n_30d_windows": 600,
+        "bnb_30d_return_mean": 0.012039817283727801,
+        "q05": -0.24228762915502594,
+        "q01": -0.33710834980575405,
+        "worst": -0.34908289447193586,
+        "bnb_max_drawdown": -0.5819795013002906,
+        "bnb_daily_beta_to_btc": 0.8101298258032877,
+        "bnb_ann_vol": 0.49233408703117637,
+        "float_pct_nav": 0.5711111111111111,
+        "float_q05_loss_pct_nav": 0.1383731570952037,
+        "float_worst_loss_pct_nav": 0.19936511973175003,
+        "saving_per_year_pct_nav": 1.7133333333333334,
+        "break_even_30d_loss_on_float": 3.0
+      }
+    }
+  },
+  "paper_fills": [
+    {
+      "db": "/home/shourya/earn-run/ft_userdata/a/runs/test-a-000.sqlite",
+      "closed_trades": 6,
+      "fees_usdt": 4.59438438,
+      "net_usdt": 29.3427114,
+      "gross_usdt": 33.93709578,
+      "fee_share_of_gross": 0.13537942108492348,
+      "fee_rate_recorded": [
+        0.001
+      ],
+      "fee_currency": [
+        "USDT"
+      ],
+      "saving_at_25pct_usdt": 1.148596095
+    },
+    {
+      "db": "/home/shourya/earn-run/ft_userdata/b/runs/test-b-000.sqlite",
+      "closed_trades": 6,
+      "fees_usdt": 4.947777991,
+      "net_usdt": 28.3823987,
+      "gross_usdt": 33.330176691,
+      "fee_share_of_gross": 0.1484473975901852,
+      "fee_rate_recorded": [
+        0.001
+      ],
+      "fee_currency": [
+        "USDT"
+      ],
+      "saving_at_25pct_usdt": 1.23694449775
+    }
+  ]
+}

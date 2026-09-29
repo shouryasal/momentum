@@ -1,0 +1,93 @@
+{
+  "costs_bps": 15.0,
+  "headline": 0.7678831733099271,
+  "headline_is_in_sample": false,
+  "in_sample_primary": {
+    "cagr": 36.6925618715108,
+    "vol": 34.98955441978316,
+    "sharpe": 1.0486718816506206,
+    "mdd": -38.78540399373851,
+    "gross": 0.45677063027940223,
+    "total": 799.3592781389528,
+    "days": 2565,
+    "turnover_per_year": 12.128719948018194,
+    "fee_drag_per_year": 1.8193079922027289,
+    "n": 2565
+  },
+  "baselines": {
+    "btc_buy_and_hold": 0.5835331656021546,
+    "strategy_baseline": 1.1174565116989332
+  },
+  "out_of_sample": {
+    "folds": 6,
+    "sharpe": 0.7678831733099271,
+    "unfiltered_sharpe_same_days": 0.9032030471376854,
+    "purge_days": 7
+  },
+  "regimes": {
+    "2019-22": {
+      "n": 1204,
+      "sharpe": 1.0274761711994518,
+      "cagr": 40.408080971294865,
+      "mdd": -38.767847438490364
+    },
+    "2023-24": {
+      "n": 731,
+      "sharpe": 1.5395228218903954,
+      "cagr": 54.29675843387231,
+      "mdd": -23.32342998022815
+    },
+    "2025-26": {
+      "n": 630,
+      "sharpe": 0.5313104077237091,
+      "cagr": 12.833801939724609,
+      "mdd": -25.978138750091073
+    }
+  },
+  "n_params": 2,
+  "edge_audit": {
+    "effective_n": 523.9,
+    "deflated_hurdle": 2.2796,
+    "deflated_hurdle_family": 1.7016
+  },
+  "both_directions": {
+    "days_total": 2565,
+    "BTC": {
+      "days_flagged": 169,
+      "n_effective_flagged": 24,
+      "share_flagged": 0.0659,
+      "asset_ret_on_flagged_days_ann_pct": 119.38,
+      "asset_ret_on_other_days_ann_pct": 43.78,
+      "p_7d_dd_lt_-8_flagged": 0.4142,
+      "p_7d_dd_lt_-8_unflagged": 0.2199,
+      "tail_ratio": 1.883,
+      "book_pnl_change_on_flagged_days_pct": -51.639,
+      "book_pnl_change_when_asset_fell_pct": 90.047,
+      "book_pnl_change_when_asset_rose_pct": -141.686
+    },
+    "ETH": {
+      "days_flagged": 211,
+      "n_effective_flagged": 30,
+      "share_flagged": 0.0823,
+      "asset_ret_on_flagged_days_ann_pct": 256.28,
+      "asset_ret_on_other_days_ann_pct": 54.58,
+      "p_7d_dd_lt_-8_flagged": 0.5545,
+      "p_7d_dd_lt_-8_unflagged": 0.3292,
+      "tail_ratio": 1.684,
+      "book_pnl_change_on_flagged_days_pct": -51.902,
+      "book_pnl_change_when_asset_fell_pct": 119.732,
+      "book_pnl_change_when_asset_rose_pct": -171.634
+    },
+    "book_total_change_pct": -52.742
+  },
+  "falsifier_triggered": true,
+  "falsifier_value": {
+    "mdd_gain_pp": 1.563,
+    "cagr_cost_pp": 7.937,
+    "dd_per_return_ratio": 0.197,
+    "regimes_sharpe_better": 1,
+    "wf_oos_sharpe_filtered": 0.7678831733099271,
+    "wf_oos_sharpe_unfiltered": 0.9032030471376854,
+    "triggered": true
+  }
+}

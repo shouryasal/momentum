@@ -98,7 +98,22 @@ universe:
     leveraged_suffixes: [UP, DOWN, BULL, BEAR]
   tiers:                           # membership only; the CAPS live in risk.max_weight/tier_caps
     major:     { min_median_quote_volume_usdt: 25000000, min_listing_age_days: 730 }
-    satellite: { min_median_quote_volume_usdt: 5000000 }   # the TRADEABLE floor: 32 pairs today
+    satellite: { min_median_quote_volume_usdt: 5000000 }   # the MEMBERSHIP floor: 31 pairs today
+  # ELIGIBILITY, stricter than membership: growth-audit.md §1.5's EXCLUSION FILTER with the
+  # numbers the audit measured — vol60 <= 1.00 AND listing age >= 1095d AND median 90d
+  # quote volume >= $10M. Passing names: median fwd 90d -7.17% vs -20.16%, P(90d dd < -40%)
+  # 18.3% vs 41.2%, better in every regime on every leg, a plateau across an 80-cell grid
+  # (100% of cells beat the baseline). Cost, stated: P(90d double) 5.41% -> 4.31%, and ZEC
+  # (+845%, vol 1.32) would be excluded by it — it is a major, and the filter is a
+  # satellite rule. Against the 2026-09-23 snapshot it removes 15 of the 23 satellites
+  # (TAO, PUMP, ONDO, ENA, PENGU, TRUMP, XPL on age; HBAR, FIL, FET, DOT on volume; BCH,
+  # INJ on volume and vol; UNI, PEPE on 60d vol) and keeps 8: LINK, AAVE, LTC, XLM, WLD,
+  # ADA, SUI, AVAX. Membership above is what the weekly resolver writes into the snapshot
+  # and is unchanged; eligibility is applied by ops.gen_freqtrade_config when the snapshot
+  # is rendered into riskgate.json — a failing satellite is rendered exit_only, so it cannot
+  # be entered and a held position is wound down through the normal path, not orphaned.
+  satellite_eligibility: { max_ann_vol: 1.00, min_listing_age_days: 1095,
+                           min_median_quote_volume_usdt: 10000000 }
   score:                           # §3.2 — deliberately NOT momentum (rank IC -0.067, t -7.4)
     liquidity_weight: 0.40         # the one cross-sectional sort that measured positive
     trend_quality_weight: 0.35
@@ -161,7 +176,17 @@ risk:                              # the gate reads these (via riskgate.json); o
     satellite: 0.05                # tradeable, median 90d volume >= $5M
   max_gross_exposure: 0.80
   usdt_floor: 0.20
-  daily_loss_stop: 0.03            # flatten + lock entries (measured from the Gulf-DAY anchor)
+  daily_loss_stop: 0.03            # fires the daily stop (measured from the Gulf-DAY anchor)
+  # HALVE, not flatten. docs/design/crisis-policy.md §0, 2019-01 -> 2026-09, costs on, the
+  # same -3% trigger: flatten + 24h lock = -5.23% CAGR, 66.7 fires/yr, 10.66%/yr in fees and
+  # a WORSE max drawdown than doing nothing; halve at the same trigger = +13.05% CAGR.
+  # "The flatten is what does the damage, not the trigger." The trigger is kept as
+  # measured; only the response moves. Entries stay locked for daily_stop_lock_hours.
+  # hold, not halve (2026-09-29). crisis-policy.md §0, 2019-01 -> 2026-09, costs on, the same
+  # -3% trigger: hold-and-stop-buying +30.53% CAGR, halve +13.05%, flatten -5.23%. Every
+  # sale into the trigger measured as a loss of return, so the stop LOCKS ENTRIES for
+  # daily_stop_lock_hours and sells nothing. The value says what the book actually does.
+  daily_loss_response: hold
   daily_stop_lock_hours: 24        # the lock expires on a timestamp, never on a date
   # Measured from the Gulf-MONTH anchor, and it ends when that month does: the boundary
   # re-anchors NAV and releases the lock in the same tick. Per mode
@@ -188,8 +213,15 @@ risk:                              # the gate reads these (via riskgate.json); o
   # N_eff saturating at 1.95 by N=20), and on the 20 worst BTC days since 2019 between
   # 86.7% and 100% of the top-30 alts fell with it. So width is capped, not celebrated.
   max_open_positions: 8            # per sleeve; 8 buys 1.82 of the 1.95 bets on offer
-  max_satellite_positions: 4       # satellite count is monotonically harmful past ~4
-  max_satellite_gross: 0.10        # whole satellite sleeve as a fraction of NAV
+  # Satellites TO THE FLOOR (docs/design/dip-strategy.md §8.1 item 2, §9 item 2): the dip
+  # study found 0 of 6,720 costed satellite configurations that beat holding BTC, the
+  # reliable-set alt book measured -6.4% to -8.1% CAGR / -84.6% drawdown, and in
+  # crisis-policy.md core recovered in 22 of 22 events while 65.1% of alts are still
+  # underwater. Two positions and 5% of NAV keep the satellite machinery observable in
+  # paper (one full-cap name, or two at the 2% min_position_pct_nav floor) without letting
+  # it carry the book. Was 4 / 0.10.
+  max_satellite_positions: 2
+  max_satellite_gross: 0.05
   max_beta_to_btc: 1.30            # portfolio 60d realised beta; alts measure 1.03-1.48
   max_avg_pairwise_corr: 0.70      # 60d avg pairwise corr of the held book (calm p90 0.591)
   min_position_pct_nav: 0.02       # below this a position can only be opened and closed
@@ -197,6 +229,19 @@ risk:                              # the gate reads these (via riskgate.json); o
   market_entries_allowed: false    # market ENTRY orders need an explicit human opt-in
   protections: { max_drawdown: { lookback_candles: 6, trade_limit: 2 } }
   reconcile: { tolerance_pct: 0.005, dust_usdt: 10.0, block_on_mismatch: true }
+  # --- the minimum-edge gate (docs/design/analogue-timing.md §4.4-4.5) -----------------
+  # The round trip is 0.30% (15 bps/side: 10 fee + 5 slippage, config/backtest.yaml). A
+  # plan whose SMALLEST booked target — lowest take-profit rung or lowest ROI level — does
+  # not clear that by `multiple` is refused at every entry (gate check `min_edge`) and at
+  # load time. k=3 is the dual form's first row: 0.90% gross needed. The shipped plan books
+  # nothing (roi 10.0, no ladder) and passes; the fast-test rungs were moved from
+  # 0.6%/1.2% (2x/4x) to 0.9%/1.5% (3x/5x) to clear it — see that profile's evidence.
+  min_edge: { round_trip_cost_pct: 0.0030, multiple: 3.0 }
+  # --- crisis-policy.md Tier 1: STOP BUYING, bounded ----------------------------------
+  # The only crisis tier the evidence supports. A block_entries flag, scope ALL, written
+  # through ops.lib.flags with expires_at = now + block_entries_hours. It touches no held
+  # position, costs zero in fees, and is structurally unable to cause or block an exit.
+  crisis: { block_entries_hours: 48 }
 
 trading:                           # every value bounded by risk.*; all human-only
   timeframe: "4h"
@@ -347,7 +392,11 @@ watch:                             # the LOCAL holdings watcher — runs between
   enabled: true
   cron: "*/7 * * * *"
   deadline_s: 120
-  task: classify                   # a declared cheap, tools-free, single-turn task
+  # holdings_watch, not classify (2026-09-29): the watcher was routing its one fuzzy question
+  # per holding through the news classifier's row, so tasks.holdings_watch in models.yaml —
+  # the row the owner's design names, local model at the head, haiku escalation — had never
+  # run once (docs/design/local-model-choice.md; paper-trading-review-2026-09-29.md §6 #12).
+  task: holdings_watch             # a declared cheap, tools-free task (models.yaml)
   local_only: true                 # the router is handed the local provider and nothing else
   max_holdings_per_cycle: 8
   max_mark_age_min: 30.0
@@ -427,7 +476,10 @@ news:
     etf:     [etf]
     hack:    [hack, exploit, stolen, breach]
     delist:  [delist]
-    lawsuit: [sec, lawsuit, charges, settle]
+    # `settlement`: the 09-25 word-boundary fix stopped `settle` matching it ("ment" is
+    # not an inflection). A lawsuit settlement is a real signal; "instant settlement
+    # rails" comes back with it and is the accepted cost.
+    lawsuit: [sec, lawsuit, charges, settle, settlement]
     upgrade: [upgrade, fork, "hard fork"]
     outage:  [outage, halt, paused]
     depeg:   [depeg, de-peg]

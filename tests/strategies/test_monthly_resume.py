@@ -87,7 +87,9 @@ class TestNoTenYearLocks:
         gate = benign_gate(gate_cfg, MemoryStateStore())
         gate.loop_tick(ps(nav=10000))
         actions = gate.loop_tick(ps(nav=9690, now=NOW + timedelta(hours=2)))
-        assert actions.flatten_reason == "risk_stop_daily"
+        # A hold since 2026-09-29 (risk.daily_loss_response): sells nothing; the timed lock
+        # is the whole action and is unchanged.
+        assert not actions.reduce and not actions.flatten
         assert actions.lock_until == NOW + timedelta(hours=26)
 
     def test_monthly_stop_never_supplies_a_lock_until(self, gate_cfg):

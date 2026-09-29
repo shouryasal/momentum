@@ -21,6 +21,7 @@
 import { formatUsd } from '@/lib/format';
 
 import type { FillRow, PortfolioPayload, Position } from '../portfolio/api';
+import { whyOf, type Why } from '../portfolio/why';
 import type { OverviewPayload } from './api';
 
 /* ------------------------------------------------------------------------- formatting */
@@ -131,10 +132,126 @@ export function seedHint(data: OverviewPayload | null | undefined): string {
  */
 export function totalValue(data: OverviewPayload | null | undefined): number | null {
   if (demoIsActive(data)) return finite(data?.demo?.value_usdt);
+  // The cumulative pot first: seed + every closed trade in every run database + the open
+  // book.  The ledger cards below restart from the seed whenever a bot gets a fresh
+  // database — on 2026-09-23 23:45Z that turned a 69.77 loss into "+9.68" on this card.
+  const pot = potTotal(data);
+  if (pot !== null) return pot;
   const cards = (data?.nav?.cards ?? []).filter((card) => card.sleeve !== 'benchmark');
   const values = cards.map((card) => finite(card.nav_usdt)).filter((v): v is number => v !== null);
   if (values.length === 0) return null;
   return values.reduce((sum, value) => sum + value, 0);
+}
+
+/**
+ * The cumulative pot across both bots, or `null` when the server did not send one, the
+ * two bots are on different kinds of money, or a position could not be priced (a partial
+ * total would read as a whole one).
+ */
+export function potTotal(data: OverviewPayload | null | undefined): number | null {
+  const pot = data?.pot;
+  if (!pot || pot.mixed || !pot.total) return null;
+  if (!pot.total.fully_priced) return null;
+  return finite(pot.total.cumulative_net_usdt);
+}
+
+/** The three numbers of the pot, each with the sentence that defines it. */
+export interface PotSummary {
+  /** What the money put in is worth now, counted across every restart. */
+  cumulative: number | null;
+  /** Closed trades, net of fees, since the bot started on its current database. */
+  sinceRun: number | null;
+  /** Closed trades in every earlier run database — what a restart used to hide. */
+  beforeRun: number | null;
+  /** Open positions marked to market. */
+  openMark: number | null;
+  fees: number | null;
+  restarts: number;
+  runs: number;
+  /** Coins that could not be priced; the cumulative figure is partial while non-empty. */
+  unpriced: string[];
+  definitions: Record<string, string>;
+  /** The old 15-minute ledger's answer, and how far it sits from the truth. */
+  ledger: number | null;
+  ledgerGap: number | null;
+}
+
+export function potSummary(data: OverviewPayload | null | undefined): PotSummary | null {
+  const pot = data?.pot;
+  if (!pot || pot.mixed || !pot.total) return null;
+  const t = pot.total;
+  return {
+    cumulative: finite(t.cumulative_net_usdt),
+    sinceRun: finite(t.realised_current_run_usdt),
+    beforeRun: finite(t.realised_earlier_runs_usdt),
+    openMark: finite(t.open_mark_usdt),
+    fees: finite(t.fees_usdt),
+    restarts: t.restarts ?? 0,
+    runs: t.runs ?? 0,
+    unpriced: t.unpriced ?? [],
+    definitions: pot.definitions ?? {},
+    ledger: finite(t.ledger_nav_usdt),
+    ledgerGap: finite(t.ledger_gap_usdt),
+  };
+}
+
+/**
+ * The sentence under "Since the current run started": what came before it.
+ *
+ * This is the line that makes a restart visible on the front of Home.  "Before this run:
+ * −$69.77 across 2 earlier runs" is exactly what the old card could not say.
+ */
+export function restartLine(summary: PotSummary | null): string {
+  if (!summary) return '';
+  if (summary.restarts === 0) {
+    return 'The bots have run on one database each, so nothing has been counted twice or lost to a restart.';
+  }
+  const before = summary.beforeRun === null ? 'an unrecorded amount' : signedMoney(summary.beforeRun);
+  const runs = summary.restarts === 1 ? '1 earlier run' : `${summary.restarts} earlier runs`;
+  return `Before this run: ${before} across ${runs}. Click for the run-by-run table.`;
+}
+
+/** A run database as a table row, with the id kept for the tooltip only. */
+export interface RunRow {
+  key: string;
+  sleeve: string;
+  /** Plain: "Rules bot (no AI) · run 1 of 2". */
+  label: string;
+  strategy: string | null;
+  run: string;
+  started: string | null;
+  ended: string | null;
+  current: boolean;
+  trades: number;
+  open: number;
+  realised: number;
+  fees: number;
+  gross: number;
+}
+
+export function runRows(data: OverviewPayload | null | undefined): RunRow[] {
+  const rows: RunRow[] = [];
+  for (const sleeve of data?.pot?.sleeves ?? []) {
+    const total = sleeve.runs.length;
+    sleeve.runs.forEach((run, index) => {
+      rows.push({
+        key: `${sleeve.sleeve}:${run.run}`,
+        sleeve: sleeve.sleeve,
+        label: `run ${index + 1} of ${total}`,
+        strategy: run.strategy,
+        run: run.run,
+        started: run.started_utc,
+        ended: run.ended_utc,
+        current: run.current,
+        trades: run.closed_trades,
+        open: run.open_trades,
+        realised: run.realised_usdt,
+        fees: run.fees_usdt,
+        gross: run.gross_usdt,
+      });
+    });
+  }
+  return rows;
 }
 
 /**
@@ -375,6 +492,8 @@ export interface TransactionRow {
   mode: string | null;
   /** The decision this came from, for the reasoning pane. Never shown on the row. */
   runId: string | null;
+  /** Why it happened and who did it, in plain words (`portfolio/why.ts`). */
+  why: Why;
 }
 
 /**
@@ -445,6 +564,7 @@ export function transactionRows(
       realisedFraction,
       mode: fill.mode ?? null,
       runId: fill.run_id ?? null,
+      why: whyOf(fill),
     });
   }
 

@@ -1,0 +1,67 @@
+whitelist: 31 pairs: ['AAVE/USDT', 'ADA/USDT', 'AVAX/USDT', 'BCH/USDT', 'BTC/USDT', 'DOGE/USDT', 'DOT/USDT', 'ENA/USDT', 'ETH/USDT', 'FET/USDT', 'FIL/USDT', 'HBAR/USDT', 'INJ/USDT', 'LINK/USDT', 'LTC/USDT', 'NEAR/USDT', 'ONDO/USDT', 'PENGU/USDT', 'PEPE/USDT', 'PUMP/USDT', 'SOL/USDT', 'SUI/USDT', 'TAO/USDT', 'TRUMP/USDT', 'TRX/USDT', 'UNI/USDT', 'WLD/USDT', 'XLM/USDT', 'XPL/USDT', 'XRP/USDT', 'ZEC/USDT']
+loaded 31 pairs with 1h data
+
+=== simulating none
+/home/shourya/earn-wk/re3/evals/research/execution-and-costs/min_hold_gate.py:199: UserWarning: Converting to Period representation will drop timezone information.
+  gulf_month = (t + GULF).to_period("M")
+none               full         net   -66.22% CAGR  -13.10% MDD  -66.45% trades  6226 hold    5.3h fees/yr   7.30% bps/day  137.9 | BTC hold CAGR   49.78% MDD  -76.63%
+none               calib_2024on net   -26.56% CAGR  -10.69% MDD  -26.93% trades  2215 hold    5.6h fees/yr  10.52% bps/day  130.2 | BTC hold CAGR   27.79% MDD  -52.97%
+none               2019-22      net   -46.57% CAGR  -14.50% MDD  -46.66% trades  3204 hold    4.9h fees/yr   9.32% bps/day  145.0 | BTC hold CAGR   44.47% MDD  -76.63%
+none               2023-24      net   -21.75% CAGR  -11.54% MDD  -21.66% trades  1611 hold    5.7h fees/yr  10.51% bps/day  124.8 | BTC hold CAGR  137.31% MDD  -26.15%
+none               2025-26      net   -19.15% CAGR  -11.59% MDD  -20.23% trades  1409 hold    5.7h fees/yr  10.97% bps/day  127.4 | BTC hold CAGR   -5.24% MDD  -52.97%
+
+=== simulating minhold_trend_k3
+/home/shourya/earn-wk/re3/evals/research/execution-and-costs/min_hold_gate.py:199: UserWarning: Converting to Period representation will drop timezone information.
+  gulf_month = (t + GULF).to_period("M")
+minhold_trend_k3   full         net   -66.87% CAGR  -13.32% MDD  -67.41% trades  6257 hold   13.7h fees/yr   7.49% bps/day   54.3 | BTC hold CAGR   49.78% MDD  -76.63%
+minhold_trend_k3   calib_2024on net   -29.92% CAGR  -12.22% MDD  -30.86% trades  2232 hold   14.0h fees/yr  10.51% bps/day   53.1 | BTC hold CAGR   27.79% MDD  -52.97%
+minhold_trend_k3   2019-22      net   -45.59% CAGR  -14.11% MDD  -45.86% trades  3211 hold   11.9h fees/yr   9.54% bps/day   59.7 | BTC hold CAGR   44.47% MDD  -76.63%
+minhold_trend_k3   2023-24      net   -19.37% CAGR  -10.21% MDD  -20.95% trades  1624 hold   15.5h fees/yr  10.69% bps/day   45.7 | BTC hold CAGR  137.31% MDD  -26.15%
+minhold_trend_k3   2025-26      net   -24.67% CAGR  -15.14% MDD  -26.39% trades  1420 hold   15.7h fees/yr  10.62% bps/day   47.1 | BTC hold CAGR   -5.24% MDD  -52.97%
+
+=== simulating minhold_all_k3
+/home/shourya/earn-wk/re3/evals/research/execution-and-costs/min_hold_gate.py:199: UserWarning: Converting to Period representation will drop timezone information.
+  gulf_month = (t + GULF).to_period("M")
+minhold_all_k3     full         net   441.72% CAGR   24.42% MDD  -69.31% trades  5379 hold  126.5h fees/yr  38.19% bps/day    6.1 | BTC hold CAGR   49.78% MDD  -76.63%
+minhold_all_k3     calib_2024on net    39.12% CAGR   12.86% MDD  -62.39% trades  2197 hold  126.1h fees/yr  14.40% bps/day    5.9 | BTC hold CAGR   27.79% MDD  -52.97%
+minhold_all_k3     2019-22      net   109.37% CAGR   20.29% MDD  -69.32% trades  2391 hold  116.8h fees/yr  27.25% bps/day    6.8 | BTC hold CAGR   44.47% MDD  -76.63%
+minhold_all_k3     2023-24      net   239.23% CAGR   84.18% MDD  -42.02% trades  1590 hold  139.8h fees/yr  20.51% bps/day    5.5 | BTC hold CAGR  137.31% MDD  -26.15%
+minhold_all_k3     2025-26      net   -25.66% CAGR  -15.79% MDD  -58.20% trades  1394 hold  127.5h fees/yr   7.93% bps/day    5.8 | BTC hold CAGR   -5.24% MDD  -52.97%
+
+=== simulating minhold_trend_k5
+/home/shourya/earn-wk/re3/evals/research/execution-and-costs/min_hold_gate.py:199: UserWarning: Converting to Period representation will drop timezone information.
+  gulf_month = (t + GULF).to_period("M")
+minhold_trend_k5   full         net   -66.72% CAGR  -13.27% MDD  -67.26% trades  6256 hold   13.8h fees/yr   7.49% bps/day   54.1 | BTC hold CAGR   49.78% MDD  -76.63%
+minhold_trend_k5   calib_2024on net   -29.65% CAGR  -12.09% MDD  -30.58% trades  2232 hold   14.0h fees/yr  10.51% bps/day   53.2 | BTC hold CAGR   27.79% MDD  -52.97%
+minhold_trend_k5   2019-22      net   -45.56% CAGR  -14.10% MDD  -45.83% trades  3210 hold   12.0h fees/yr   9.54% bps/day   59.5 | BTC hold CAGR   44.47% MDD  -76.63%
+minhold_trend_k5   2023-24      net   -19.42% CAGR  -10.23% MDD  -21.00% trades  1624 hold   15.8h fees/yr  10.69% bps/day   45.0 | BTC hold CAGR  137.31% MDD  -26.15%
+minhold_trend_k5   2025-26      net   -24.32% CAGR  -14.91% MDD  -26.05% trades  1420 hold   15.6h fees/yr  10.64% bps/day   47.4 | BTC hold CAGR   -5.24% MDD  -52.97%
+
+=== simulating minhold_all_k5
+/home/shourya/earn-wk/re3/evals/research/execution-and-costs/min_hold_gate.py:199: UserWarning: Converting to Period representation will drop timezone information.
+  gulf_month = (t + GULF).to_period("M")
+minhold_all_k5     full         net   409.16% CAGR   23.43% MDD  -70.48% trades  5288 hold  131.1h fees/yr  35.32% bps/day    5.9 | BTC hold CAGR   49.78% MDD  -76.63%
+minhold_all_k5     calib_2024on net    47.96% CAGR   15.44% MDD  -62.28% trades  2173 hold  129.5h fees/yr  14.54% bps/day    5.8 | BTC hold CAGR   27.79% MDD  -52.97%
+minhold_all_k5     2019-22      net    98.24% CAGR   18.66% MDD  -70.50% trades  2364 hold  119.1h fees/yr  26.72% bps/day    6.8 | BTC hold CAGR   44.47% MDD  -76.63%
+minhold_all_k5     2023-24      net   234.03% CAGR   82.76% MDD  -41.55% trades  1542 hold  149.3h fees/yr  18.86% bps/day    5.2 | BTC hold CAGR  137.31% MDD  -26.15%
+minhold_all_k5     2025-26      net   -25.06% CAGR  -15.39% MDD  -59.08% trades  1380 hold  131.1h fees/yr   7.75% bps/day    5.7 | BTC hold CAGR   -5.24% MDD  -52.97%
+
+=== simulating minhold_trend_k10
+/home/shourya/earn-wk/re3/evals/research/execution-and-costs/min_hold_gate.py:199: UserWarning: Converting to Period representation will drop timezone information.
+  gulf_month = (t + GULF).to_period("M")
+minhold_trend_k10  full         net   -66.74% CAGR  -13.27% MDD  -67.28% trades  6256 hold   13.8h fees/yr   7.49% bps/day   53.9 | BTC hold CAGR   49.78% MDD  -76.63%
+minhold_trend_k10  calib_2024on net   -29.73% CAGR  -12.13% MDD  -30.66% trades  2232 hold   14.0h fees/yr  10.51% bps/day   53.2 | BTC hold CAGR   27.79% MDD  -52.97%
+minhold_trend_k10  2019-22      net   -45.55% CAGR  -14.10% MDD  -45.81% trades  3210 hold   12.0h fees/yr   9.54% bps/day   59.4 | BTC hold CAGR   44.47% MDD  -76.63%
+minhold_trend_k10  2023-24      net   -19.39% CAGR  -10.22% MDD  -20.97% trades  1624 hold   15.9h fees/yr  10.69% bps/day   44.7 | BTC hold CAGR  137.31% MDD  -26.15%
+minhold_trend_k10  2025-26      net   -24.41% CAGR  -14.97% MDD  -26.14% trades  1420 hold   15.6h fees/yr  10.63% bps/day   47.4 | BTC hold CAGR   -5.24% MDD  -52.97%
+
+=== simulating minhold_all_k10
+/home/shourya/earn-wk/re3/evals/research/execution-and-costs/min_hold_gate.py:199: UserWarning: Converting to Period representation will drop timezone information.
+  gulf_month = (t + GULF).to_period("M")
+minhold_all_k10    full         net   432.73% CAGR   24.16% MDD  -74.17% trades  4524 hold  168.8h fees/yr  36.52% bps/day    4.8 | BTC hold CAGR   49.78% MDD  -76.63%
+minhold_all_k10    calib_2024on net    11.70% CAGR    4.14% MDD  -64.85% trades  1879 hold  167.9h fees/yr  11.73% bps/day    4.6 | BTC hold CAGR   27.79% MDD  -52.97%
+minhold_all_k10    2019-22      net    96.14% CAGR   18.34% MDD  -74.19% trades  2138 hold  143.0h fees/yr  26.93% bps/day    5.9 | BTC hold CAGR   44.47% MDD  -76.63%
+minhold_all_k10    2023-24      net   280.88% CAGR   95.16% MDD  -43.82% trades  1189 hold  222.4h fees/yr  19.83% bps/day    3.8 | BTC hold CAGR  137.31% MDD  -26.15%
+minhold_all_k10    2025-26      net   -32.77% CAGR  -20.55% MDD  -59.26% trades  1194 hold  161.0h fees/yr   7.03% bps/day    4.7 | BTC hold CAGR   -5.24% MDD  -52.97%
+
+written /home/shourya/earn-wk/re3/evals/research/execution-and-costs/results/min_hold_gate.json

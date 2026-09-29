@@ -29,6 +29,14 @@ from .conftest import NOW, benign_gate, gate_cfg_with
 
 QUOTE = "USDT"
 
+#: The satellite sleeve these fixtures were built on: four seats, 10% of NAV. The SHIPPED
+#: limits moved to 2 seats / 5% on 2026-09-29 (dip-strategy.md §8.1 item 2; pinned in
+#: tests/test_foundation/test_config_load.py), so the tests that exercise the seat count,
+#: the sleeve gross, the correlation cap and the concurrency rules on a four-satellite book
+#: set the sleeve explicitly instead of inheriting the shipped numbers — what they prove is
+#: the MECHANISM, and the mechanism is the same at any (seats, gross).
+FOUR_SEAT_SLEEVE = {"max_satellite_positions": 4, "max_satellite_gross": 0.10}
+
 #: A snapshot in the shape the resolver writes and the generator renders: BTC/ETH core,
 #: two majors, four satellites, one name being wound down, one watchlist-only name.
 SNAPSHOT = {
@@ -96,7 +104,9 @@ class TestTierCaps:
         assert cfg.cap_for("TIA/USDT") == pytest.approx(0.05)
 
     def test_a_satellite_past_its_5pct_cap_is_refused(self, tmp_path):
-        gate = benign_gate(wide_cfg(tmp_path))
+        # The sleeve gross is widened so the TIER cap is the check that speaks: at the
+        # shipped 5% sleeve a 6% single name is refused one check earlier (satellite_gross).
+        gate = benign_gate(wide_cfg(tmp_path, **FOUR_SEAT_SLEEVE))
         d = gate.check_entry("TIA/USDT", 200.0, wide_ps(positions={"TIA/USDT": 400.0}))
         assert not d.allowed and d.reason == "weight_cap:TIA/USDT"
 
@@ -152,16 +162,16 @@ class TestConcurrency:
 
     def test_a_ninth_position_is_refused(self, tmp_path):
         ps = wide_ps(positions=self._full_book())
-        gate = benign_gate(wide_cfg(tmp_path))
+        gate = benign_gate(wide_cfg(tmp_path, **FOUR_SEAT_SLEEVE))
         assert gate.check_entry("TINY/USDT", 300.0, ps).reason == "tier:TINY"
         # A tradeable ninth name is refused on the count itself.
         snap = dict(SNAPSHOT, tiers=dict(SNAPSHOT["tiers"], NEW="major"))
-        gate = benign_gate(wide_cfg(tmp_path, snapshot=snap))
+        gate = benign_gate(wide_cfg(tmp_path, snapshot=snap, **FOUR_SEAT_SLEEVE))
         d = gate.check_entry("NEW/USDT", 300.0, ps)
         assert not d.allowed and d.reason == "max_positions"
 
     def test_adding_to_a_name_already_held_is_not_a_ninth_position(self, tmp_path):
-        gate = benign_gate(wide_cfg(tmp_path))
+        gate = benign_gate(wide_cfg(tmp_path, **FOUR_SEAT_SLEEVE))
         assert gate.check_entry("SOL/USDT", 300.0,
                                 wide_ps(positions=self._full_book())).allowed
 
@@ -169,7 +179,7 @@ class TestConcurrency:
         book = self._full_book()
         book["JUP/USDT"] = 1.0        # dust: below execution.dust_weight of NAV
         snap = dict(SNAPSHOT, tiers=dict(SNAPSHOT["tiers"], NEW="major"))
-        gate = benign_gate(wide_cfg(tmp_path, snapshot=snap))
+        gate = benign_gate(wide_cfg(tmp_path, snapshot=snap, **FOUR_SEAT_SLEEVE))
         assert gate.check_entry("NEW/USDT", 300.0, wide_ps(positions=book)).allowed
 
 
@@ -190,17 +200,30 @@ class TestSatelliteSleeve:
                 "TIA/USDT": 100.0, "INJ/USDT": 100.0, "SEI/USDT": 100.0}
         assert gate.check_entry("JUP/USDT", 300.0, wide_ps(positions=held)).allowed
 
-    def test_the_whole_satellite_sleeve_is_capped_at_10pct_of_nav(self, tmp_path):
-        # 10% is the premium on an option, not a forecast: at that allocation the measured
-        # 2019-2026 result costs 1.2 pp of CAGR and 1.5 pp of drawdown against core-only.
-        gate = benign_gate(wide_cfg(tmp_path))
+    def test_the_whole_satellite_sleeve_is_capped_at_its_gross(self, tmp_path):
+        # At a 10% sleeve (the premium on an option, not a forecast: at that allocation the
+        # measured 2019-2026 result costs 1.2 pp of CAGR and 1.5 pp of drawdown against
+        # core-only). The shipped sleeve is 5% since 2026-09-29; the check is the same.
+        gate = benign_gate(wide_cfg(tmp_path, **FOUR_SEAT_SLEEVE))
         held = {"TIA/USDT": 300.0, "INJ/USDT": 300.0, "SEI/USDT": 200.0}   # 8% of NAV
         d = gate.check_entry("JUP/USDT", 300.0, wide_ps(positions=held))   # would be 11%
         assert not d.allowed and d.reason == "satellite_gross"
         assert gate.check_entry("JUP/USDT", 200.0, wide_ps(positions=held)).allowed
 
-    def test_cap_stake_trims_a_satellite_to_the_sleeve_rather_than_refusing_it(self, tmp_path):
+    def test_the_shipped_sleeve_is_two_seats_and_five_percent(self, tmp_path):
+        # Without the override: the committed riskgate.json (2 / 0.05). A third satellite is
+        # refused on the seat count before any gross arithmetic, and 5% is the gross.
         gate = benign_gate(wide_cfg(tmp_path))
+        assert gate.cfg.max_satellite_positions == 2
+        assert gate.cfg.max_satellite_gross == pytest.approx(0.05)
+        held = {"TIA/USDT": 200.0, "INJ/USDT": 200.0}                      # 4% of NAV
+        d = gate.check_entry("SEI/USDT", 200.0, wide_ps(positions=held))
+        assert not d.allowed and d.reason == "satellite_count"
+        d = gate.check_entry("INJ/USDT", 200.0, wide_ps(positions=held))   # would be 6%
+        assert not d.allowed and d.reason == "satellite_gross"
+
+    def test_cap_stake_trims_a_satellite_to_the_sleeve_rather_than_refusing_it(self, tmp_path):
+        gate = benign_gate(wide_cfg(tmp_path, **FOUR_SEAT_SLEEVE))
         held = {f"{a}/{QUOTE}": 300.0 for a in ("TIA", "INJ", "SEI")}
         # 10% of 10k = 1000 gross, 900 used: the order is shaped to the 100 that is left.
         assert gate.cap_stake("JUP/USDT", 5_000.0, wide_ps(positions=held)) == pytest.approx(100.0)
@@ -267,7 +290,7 @@ class TestBetaCap:
 
 class TestCorrelationCap:
     def test_a_book_that_is_one_position_wearing_many_names_is_refused(self, tmp_path):
-        cfg = wide_cfg(tmp_path)
+        cfg = wide_cfg(tmp_path, **FOUR_SEAT_SLEEVE)   # three satellites need three seats
         # Three perfectly correlated alts: avg pairwise corr 1.0 > the 0.70 cap.
         returns = {f"{a}/{QUOTE}": _series(scale=1.0 + i * 0.1)
                    for i, a in enumerate(("BTC", "TIA", "INJ", "SEI"))}
@@ -279,7 +302,7 @@ class TestCorrelationCap:
     def test_the_incremental_entry_is_what_is_refused(self, tmp_path):
         # The existing two-name book is allowed to exist; it is the THIRD name, which
         # pushes the average over, that the gate declines to add (§2.3).
-        cfg = wide_cfg(tmp_path)
+        cfg = wide_cfg(tmp_path, **FOUR_SEAT_SLEEVE)
         returns = {"BTC/USDT": _bench(), "TIA/USDT": _series(scale=1.0),
                    "INJ/USDT": _uncorrelated()}
         gate = benign_gate(cfg, returns_provider=returns.get)
@@ -359,7 +382,8 @@ def test_utilisation_reports_the_wide_universe_meters(tmp_path):
     assert rows["open_positions"]["limit"] == 8.0
     assert rows["satellite_positions"]["used"] == 1.0
     assert rows["satellite_gross"]["used"] == pytest.approx(0.04)
-    assert rows["satellite_gross"]["limit"] == pytest.approx(0.10)
+    assert rows["satellite_gross"]["limit"] == pytest.approx(gate.cfg.max_satellite_gross)
+    assert rows["satellite_gross"]["limit"] == pytest.approx(0.05)   # shipped since 2026-09-29
 
 
 def test_the_gate_reads_the_snapshot_identity_it_enforced(tmp_path):

@@ -225,7 +225,10 @@ A KPI row (host readiness, data age, next job, open incidents) over tabs:
   detached process under the same `flock` + `timeout` + `envwrap` wrapper the cron line
   uses, and writes a `console_jobs` row.
 * **Host readiness** — the `ops/windows/check-host.ps1` facts through WSL interop: ext4,
-  OneDrive, sleep-on-AC, the keep-alive task, timezone, Docker, disk.
+  OneDrive, sleep-on-AC, the keep-alive task, timezone, Docker, disk — plus `host_sleep`
+  (`ops.hostcheck`): whether the machine actually slept this week, in the sentence "this
+  host slept for X hours in the last 7 days; unattended trading is not possible on it as
+  configured", never blocking (see `docs/design/unattended-hosting.md`).
 * **Crontab & units** — the rendered crontab versus the installed one, with a
   step-up-gated install. systemd units are **staged** with the `sudo` lines printed,
   because the console is not root.

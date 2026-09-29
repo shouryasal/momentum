@@ -237,8 +237,34 @@ def _parse_ft_date(text: Any) -> datetime | None:
 
 
 def _ft_db(sleeve: str, root: Path | None = None) -> Path:
+    """The database the sleeve's bot is ACTUALLY writing trades to.
+
+    ``tradesv3.sqlite`` is only the default; a test or live run is minted with its own
+    ``runs/<run_id>.sqlite`` and the bot is pointed at it through ``db_url`` in
+    ``var/runtime/freqtrade-<s>.mode.json``. The watcher read the default unconditionally,
+    so from the 2026-09-23 profile transition onward it saw an empty table: six days of
+    ``holdings: 0`` in watch.log with positions open in both sleeves, and every numeric
+    invalidation, stop-proximity and weight check silently skipped (run_once returns before
+    the loop when holdings is empty). The between-decisions safety layer was not watching.
+
+    The overlay wins when it names a file that exists; otherwise the default, so a host
+    with no overlay behaves exactly as before.
+    """
     base = Path(root) if root is not None else earn_paths.state_root()
-    return base / "ft_userdata" / sleeve / "tradesv3.sqlite"
+    default = base / "ft_userdata" / sleeve / "tradesv3.sqlite"
+    try:
+        overlay = json.loads(
+            (base / "var" / "runtime" / f"freqtrade-{sleeve}.mode.json").read_text("utf-8"))
+        url = str(overlay.get("db_url") or "")
+    except (OSError, ValueError):
+        return default
+    if not url:
+        return default
+    # `sqlite:////freqtrade/user_data/runs/<run>.sqlite` — an in-container absolute path.
+    # Only the tail below `user_data/` is meaningful on this side of the mount.
+    tail = url.split("user_data/", 1)[-1] if "user_data/" in url else ""
+    candidate = base / "ft_userdata" / sleeve / tail if tail else default
+    return candidate if candidate.exists() else default
 
 
 def nav_basis(sleeve: str, root: Path | None = None) -> tuple[float | None, str]:

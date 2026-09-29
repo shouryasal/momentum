@@ -41,6 +41,7 @@ and the result says which, so the caller never has to guess.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -85,13 +86,28 @@ __all__ = [
 #: Never start an attempt with less than this much of the run's deadline left.
 MIN_STAGE_S = 15.0
 
-#: Characters per token, for the context-window check only. Deliberately LOW: English
-#: prose runs nearer 4, but these prompts are dense with JSON, symbols and numbers, which
-#: tokenize worse. Under-guessing the divisor over-estimates the token count, and
-#: over-estimating means we skip a model that might just have fitted — which is the safe
-#: error. The alternative error is the one that already cost us weeks: handing a model a
-#: prompt it silently truncates and trusting what comes back.
+#: Characters per token, the PROSE floor of the context-window check. English prose runs
+#: nearer 4. It is not enough on its own: the scan prompt is 55-85% compact JSON of the
+#: form ``"BTC/USDT.rsi_4h":52.1``, which the local tokenizers cut at roughly 2 characters
+#: per token, and measured against them (docs/design/local-model-choice.md §1) a
+#: chars/3.5 estimate was 1.55-1.91x too LOW — the journal said "~15,861 tokens", the real
+#: count was ~28,000, and a guard that under-counts is an invitation to raise ``num_ctx``
+#: to a number that still truncates. So :func:`estimated_tokens` takes the LARGER of this
+#: floor and a piece count that sees every symbol and digit group (:data:`_TOKEN_PIECES`).
+#: Over-estimating skips a model that might just have fitted, which is the safe error; the
+#: other error is the one that already cost weeks: handing a model a prompt it silently
+#: truncates and trusting what comes back.
 CHARS_PER_TOKEN = 3.5
+
+#: One piece per word, per DIGIT, and per punctuation character — how the local BPE
+#: tokenizers treat dense JSON, near enough. Calibrated 2026-09-29 against Ollama's own
+#: ``prompt_eval_count`` on 40 real lean scan prompts per model
+#: (docs/design/local-tier-2026-09-29.md §1): real/estimate was 0.90-0.93 for
+#: granite4.2:3b and 0.94-0.999 for qwen3.5:4b, i.e. never below the count and never more
+#: than 10% above it. Counting digits in runs of three (Llama-3 style) under-counted qwen,
+#: which splits every digit, by up to 16%; the chars/3.5 floor alone under-counted both by
+#: 1.45-1.66x.
+_TOKEN_PIECES = re.compile(r"[A-Za-z]+|\d|[^\w\s]|_")
 
 #: Room left for the answer inside the same window. Ollama's ``num_ctx`` covers prompt
 #: AND completion, so a prompt that exactly fills it leaves nothing to reply with.
@@ -99,8 +115,14 @@ OUTPUT_RESERVE_TOKENS = 1024
 
 
 def estimated_tokens(text: str) -> int:
-    """A deliberately pessimistic token count for ``text``. Never a billing number."""
-    return int(len(text) / CHARS_PER_TOKEN) + 1
+    """A deliberately pessimistic token count for ``text``. Never a billing number.
+
+    The larger of the prose floor (``len / CHARS_PER_TOKEN``) and the dense-text piece
+    count, plus one. Prose is governed by the floor; JSON, symbols and numbers by the
+    pieces. Neither is a tokenizer, and neither is meant to be — the number is compared
+    against a window with :data:`OUTPUT_RESERVE_TOKENS` to spare.
+    """
+    return max(int(len(text) / CHARS_PER_TOKEN), len(_TOKEN_PIECES.findall(text))) + 1
 
 
 def fits_context(text: str, max_ctx: int | None,

@@ -344,3 +344,34 @@ def summary(checks: list[HostCheck]) -> dict[str, Any]:
         "counts": counts,
         "checks": [c.to_json() for c in checks],
     }
+
+
+# --------------------------------------------------------------------------- host sleep
+
+
+def check_host_sleep(kdb: Any, *, now: Any = None, runner: Runner | None = None) -> HostCheck:
+    """Did the machine underneath sleep? ``ops.hostcheck`` measured, put into words.
+
+    The other checks here ask whether the host is *configured* to stay awake (sleep policy,
+    keep-alive task). This one asks whether it actually *did*, from the clock probe and the
+    ``host_suspended`` incidents, over the last :data:`ops.hostcheck.LOOKBACK_DAYS` days.
+    A laptop with a perfect power policy whose lid was closed still slept, and that is the
+    fact the owner needs before switching a sleeve to live. It never blocks the preflight
+    on its own — the policy checks above do — because a sleep last week says nothing about
+    the policy in force today; it says so in words instead.
+    """
+    from ops import hostcheck
+
+    report = hostcheck.assess(kdb, now=now, runner=runner)
+    data = {"slept_hours": report.slept_hours, "lookback_days": report.lookback_days,
+            "windows": report.windows, "verdict": report.verdict, "notes": report.notes,
+            "facts": report.facts.to_json()}
+    if report.warning:
+        return HostCheck("host_sleep", WARN, report.warning,
+                         f"read {hostcheck.DOC_REL}: keep the laptop awake, or move the "
+                         f"runtime to an always-on host", data=data)
+    if report.verdict == "unknown":
+        return HostCheck("host_sleep", WARN, report.headline,
+                         "python -m ops.hostcheck --record (the healthcheck does this "
+                         "every tick once wired)", data=data)
+    return HostCheck("host_sleep", OK, report.headline, data=data)

@@ -91,7 +91,14 @@ models:                        # alias -> {provider, exact id, capability tier}
   opus:        { provider: claude, id: claude-opus-5,             tier: 4 }
   sonnet:      { provider: claude, id: claude-sonnet-5,           tier: 3 }
   haiku:       { provider: claude, id: claude-haiku-4-5-20251001, tier: 2 }
-  local_small: { provider: ollama, id: "llama3.1:8b",             tier: 1 }
+  # granite4.2:3b, not llama3.1:8b (2026-09-29, docs/design/local-tier-2026-09-29.md). One
+  # local model serves scan, classify and holdings_watch because the ~6 GB GPU holds one:
+  # granite is 100% GPU-resident (llama was 68%, a third on the CPU, 5-7x slower and
+  # load-sensitive). On the lean scan prompt: schema-valid 40/40, zero invented keys or
+  # hashes over ~200 items, 12.0 s p50 / 20.9 s p95, and it misses few of the items Haiku
+  # keeps; its error is permissiveness, which the validator's daily cap bounds. On
+  # classify (09-25): 79% exact at batch 5 with 1% false positives against qwen's 30%.
+  local_small: { provider: ollama, id: "granite4.2:3b",           tier: 1 }
 
 capabilities:                  # claude defaults to all true; ollama to structured output
   # max_ctx is ENFORCED now (runs/llm/chain.py): a prompt that will not fit skips this
@@ -126,10 +133,12 @@ tasks:
 
   classify:
     why: >-
-      One label from a fixed set, on Haiku because the two local generators are not
-      schema-reliable — qwen3.5:4b answers 0-100 where the schema says 0-1, 0 of 3 valid.
-      Invalid labels are discarded and `on_all_failed: rule` falls back to the keyword
-      rules, so a wrong answer costs nothing but the call.
+      One label from a fixed set, on Haiku first because it is the most accurate reader of
+      a headline measured (90% exact at batch 5 vs granite's 79%, 2026-09-25); the local
+      model is the fallback, not a risk — with Ollama's schema constraint and think:false
+      it was schema-valid on every call measured. Invalid labels are discarded and
+      `on_all_failed: rule` falls back to the keyword rules, so a wrong answer costs
+      nothing but the call.
     chain: [haiku, local_small]
     escalation: haiku
     tools: none

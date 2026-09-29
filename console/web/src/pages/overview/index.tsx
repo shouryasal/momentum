@@ -45,8 +45,15 @@ import { routeBlurb } from '@/routes';
 
 import type { PortfolioPayload } from '../portfolio/api';
 import { ControlCard } from './ControlCard';
-import { HomeDetail, HOME_DETAIL_SUBTITLE, HOME_DETAIL_TITLE, LEGACY_DETAIL_KINDS } from './HomeDetail';
+import {
+  HomeDetail,
+  HOME_DETAIL_SUBTITLE,
+  HOME_DETAIL_TITLE,
+  LEGACY_DETAIL_KINDS,
+  POT_DETAIL_KIND,
+} from './HomeDetail';
 import { MoneyBadge } from './MoneyBadge';
+import { ProfitGapsCard } from './ProfitGapsCard';
 import { HOME_SLEEVES, overviewApi, overviewKeys } from './api';
 import {
   benchmarkLine,
@@ -55,6 +62,8 @@ import {
   holdingRows,
   lastRunFor,
   money,
+  potSummary,
+  restartLine,
   seedHint,
   signedMoney,
   signedPct,
@@ -67,8 +76,11 @@ import { Reasoning, type ReasoningTarget } from './Reasoning';
 
 const REFETCH_TOPICS = ['nav', 'gate', 'signal', 'config', 'mode', 'kill', 'run'] as const;
 
-/** The two kinds of row a double click opens, plus the kinds old links still carry. */
-export const HOME_DETAIL_KINDS = ['holding', 'transaction', ...LEGACY_DETAIL_KINDS] as const;
+/**
+ * The two kinds of row a double click opens, the run-by-run table behind the money
+ * cards, plus the kinds old links still carry.
+ */
+export const HOME_DETAIL_KINDS = ['holding', 'transaction', POT_DETAIL_KIND, ...LEGACY_DETAIL_KINDS] as const;
 
 function amountText(value: number): string {
   if (!Number.isFinite(value)) return '—';
@@ -153,6 +165,7 @@ export default function OverviewPage() {
   }
 
   const summary = totals(data);
+  const pot = potSummary(data);
   const demo = demoLine(data);
   const allTest = Object.values(data.mode?.sleeves ?? {}).every(
     (sleeve) => String(sleeve.state ?? '').toUpperCase() === 'TEST',
@@ -205,7 +218,18 @@ export default function OverviewPage() {
         */}
         <ControlCard />
 
-        {/* 1 and 2: what went in, what it is worth, and the one BTC comparison. */}
+        {/*
+          1 and 2: what went in, what it is worth, and the one BTC comparison.
+
+          "What it is worth now" is the cumulative pot: the seed, plus every closed trade
+          in every database a bot has ever run on, plus the open positions at today's
+          price. It used to be the 15-minute ledger, which restarts from the seed whenever
+          a bot gets a fresh database — on 2026-09-23 23:45Z that turned a 69.77 loss into
+          "+9.68" on this card, and the owner, who remembered 20,000 going in and knew it
+          was worth less, was right and the screen was wrong. So the pot is three numbers
+          now, each with its definition on the card, and a restart is a line here and a
+          row in the table behind it rather than something that vanishes.
+        */}
         <Group align="stretch" gap="md" grow wrap="wrap" data-testid="money-cards">
           <StatCard
             label="Money put in"
@@ -223,8 +247,45 @@ export default function OverviewPage() {
                     positive: summary.gain >= 0,
                   }
             }
-            hint={benchmarkLine(data)}
+            hint={
+              pot
+                ? `${benchmarkLine(data)} ${
+                    pot.unpriced.length > 0
+                      ? `Could not price ${pot.unpriced.join(', ')}, so this is partial.`
+                      : 'Counted across every restart: the money put in, every trade ever closed, and what is open now.'
+                  }`
+                : benchmarkLine(data)
+            }
+            {...(pot
+              ? {
+                  tooltip: pot.definitions.cumulative_net_usdt ?? '',
+                  onClick: () => detail.open(POT_DETAIL_KIND, 'runs'),
+                }
+              : {})}
           />
+          {pot ? (
+            <StatCard
+              label="Since the current run started"
+              value={pot.sinceRun === null ? 'not recorded' : signedMoney(pot.sinceRun)}
+              hint={restartLine(pot)}
+              tooltip={pot.definitions.realised_current_run_usdt ?? ''}
+              onClick={() => detail.open(POT_DETAIL_KIND, 'runs')}
+            />
+          ) : null}
+          {pot ? (
+            <StatCard
+              label="Open positions, marked to market"
+              value={pot.openMark === null ? 'not recorded' : signedMoney(pot.openMark)}
+              hint={
+                pot.unpriced.length > 0
+                  ? `Not yet realised. ${pot.unpriced.join(', ')} could not be priced and is left out.`
+                  : 'Not yet realised; it moves with the market until the position is closed.'
+              }
+              tooltip={pot.definitions.open_mark_usdt ?? ''}
+            />
+          ) : null}
+          {/* What it should earn and what it is losing: part of the money block, its own row. */}
+          <ProfitGapsCard />
         </Group>
 
         {/*
@@ -417,6 +478,22 @@ const transactionColumns: Array<DataTableColumn<TransactionRow>> = [
     render: (row) => <Text size="xs">{money(row.value)}</Text>,
   },
   {
+    key: 'why',
+    header: 'Why, and who',
+    sortValue: (row) => row.why.short,
+    render: (row) => (
+      <Text
+        size="xs"
+        fw={row.why.event ? 600 : undefined}
+        c={row.why.event ? (row.why.who === 'human' ? 'red' : 'orange') : row.why.who === 'unknown' ? 'dimmed' : undefined}
+        title={row.why.long}
+        data-testid={`why-${row.key}`}
+      >
+        {row.why.short}
+      </Text>
+    ),
+  },
+  {
     key: 'realised',
     header: 'Profit or loss on the sale',
     align: 'right',
@@ -481,6 +558,7 @@ export function reasoningTarget(
       mode: row.mode,
       facts: [
         { label: 'Traded by', value: sleeveFullName(row.sleeve) },
+        { label: 'Why, and who', value: row.why.short, meaning: row.why.long },
         { label: 'When', value: formatUtcStamp(row.when), meaning: 'Times are UTC everywhere.' },
         {
           label: row.side === 'buy' ? 'Bought' : 'Sold',

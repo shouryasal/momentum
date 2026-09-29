@@ -3,6 +3,7 @@ import { Badge, Button, Group, Stack, Text, Tooltip } from '@mantine/core';
 import { DataTable, type DataTableColumn } from '@/components';
 
 import type { FillRow, OrderRow } from '../api';
+import { whyOf } from '../why';
 
 function SimBadge({ mode }: { mode: string | null }) {
   if ((mode ?? 'test') === 'live') return null;
@@ -112,6 +113,26 @@ export function FillsTable({ rows, loading, onSelect }: {
       render: (r) => (
         <Badge size="xs" color={r.side === 'buy' ? 'teal' : 'orange'}>{r.side}</Badge>
       ) },
+    {
+      key: 'why',
+      header: 'Why, and who',
+      sortValue: (r) => whyOf(r).short,
+      render: (r) => {
+        const why = whyOf(r);
+        return (
+          <Tooltip label={why.long} withArrow multiline w={320}>
+            <Text
+              size="xs"
+              fw={why.event ? 600 : undefined}
+              c={why.event ? (why.who === 'human' ? 'red' : 'orange') : why.who === 'unknown' ? 'dimmed' : undefined}
+              data-testid={`fill-why-${r.id}`}
+            >
+              {why.short}
+            </Text>
+          </Tooltip>
+        );
+      },
+    },
     { key: 'amount', header: 'Amount', align: 'right',
       render: (r) => <Text size="xs" ff="monospace">{r.fill_amount}</Text> },
     { key: 'price', header: 'Price', align: 'right',

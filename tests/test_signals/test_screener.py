@@ -8,15 +8,18 @@ row. An item that cites something else is DROPPED, not corrected.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import pytest
 
 from runs.llm.stub import scripted
 from runs.signals import screener as screenerlib
 from runs.signals.features import build as build_features
+from runs.signals.features import core_pairs
 from schemas.signals import ScreenItem, screen_schema, validate_screen
 
 from .conftest import NOW, seed_candles, seed_news
+from .test_features import widen
 
 
 @pytest.fixture
@@ -199,7 +202,8 @@ class TestScreen:
         provider.script([scripted(text=json.dumps(_answer()))])
         screenerlib.screen(cfg, CANDIDATES, features, root=root)
         prompt = provider.requests[0].prompt
-        assert prompt.count(features.render()) == 1
+        shown = screenerlib.lean_features(features, CANDIDATES, core=core_pairs(cfg))
+        assert prompt.count(shown.render()) == 1
         assert prompt.count('"news_hash": "real-hash"') == 1
         assert "{{" not in prompt          # nothing left unfilled either
 
@@ -278,3 +282,194 @@ class TestChainFloors:
 
         refs, _ = resolve_chain("scan", load_models_cfg())
         assert any(r.is_local for r in refs)
+
+
+# --------------------------------------------------------------------------- lean render
+
+
+ALTS = [f"ALT{i}/USDT" for i in range(105)]
+
+
+def _news_title(i: int) -> str:
+    return (f"Headline {i}: exchange reports record inflows as traders weigh macro data,"
+            f" regulators comment and a protocol ships an upgrade")[:110]
+
+
+@pytest.fixture
+def wide_env(cfg, dbs, monkeypatch):
+    """A production-shaped cycle: 107 watched pairs, 20 rich, a 60-item news window.
+
+    Everything is synthetic but SHAPED like the runtime's 2026-09-29 cycle: 107 pairs of
+    which ~30 are priced (the fast-test profile's candles), six cheap keys on the rest,
+    rich keys on 20, sixty news rows of realistic length with mixed asset tags.
+    """
+    root, jdb, kdb = dbs
+    pairs = widen(monkeypatch, cfg, ["BTC/USDT", "ETH/USDT", *ALTS])
+    for p in pairs[:32]:
+        seed_candles(kdb, pair=p, tf="1d", n=40, start=100.0, step=1.0)
+        seed_candles(kdb, pair=p, tf="4h", n=40, start=100.0, step=1.0)
+        seed_candles(kdb, pair=p, tf="1h", n=80, start=100.0, step=0.1)
+    assets = (("BTC",), ("ETH",), ("ALT3",), ("ALT7",), (), ("ALT50",), ("SOL", "XRP"))
+    for i in range(60):
+        kdb.execute(
+            "INSERT OR REPLACE INTO news_items(url_hash, source, source_class, title, url,"
+            " published_at, fetched_at, classified_by, event_class, assets, corroborated,"
+            " corroborating_sources) VALUES (?,?,?,?,?,?,?, 'rule', ?,?,?,1)",
+            (f"hash-{i:02d}", "CoinDesk", "secondary", _news_title(i), f"https://n/{i}",
+             (NOW.replace(minute=0) - timedelta(minutes=17 * i))
+             .strftime("%Y-%m-%dT%H:%M:%SZ"), NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+             "macro" if i % 9 == 0 else None, json.dumps(list(assets[i % len(assets)])),
+             int(i % 3 == 0)))
+    kdb.commit()
+    features = build_features(kdb, cfg, now=NOW, jdb=jdb, root=root)
+    assert len(features.pairs) == 107 and len(features.rich) == 20
+    assert len(features.news) == 60
+    return cfg, features, root
+
+
+def _cand(sid, pair, detector="move", **detail):
+    return {"signal_id": sid, "detector": detector, "pair": pair, "direction": "up",
+            "detector_score": 0.8, "reason": f"{detector}:{pair}:up",
+            "feature_keys": [f"{pair}.ret_24h"] if pair else [],
+            "news_hashes": [], "detail": detail or {"pct": 9.1, "threshold": 8.0}}
+
+
+WIDE_BATCH = [
+    _cand("sig-a", "ALT3/USDT"),
+    _cand("sig-b", "ALT7/USDT", "dip_from_high", pct=13.0, threshold=10.0),
+    _cand("sig-c", "ALT7/USDT", "rsi_extreme", rsi=81.2),
+    _cand("sig-d", "ALT11/USDT"),
+    {**_cand("sig-e", None, "news_event", event_class="hack", assets=["ALT50"], n_items=2),
+     "news_hashes": ["hash-05", "hash-12"]},
+]
+
+
+class TestLeanPrompt:
+    """The lean render: what the chain head is handed so that it can be handed anything.
+
+    The full render of a 107-pair cycle is 19,000-31,000 real tokens against
+    ``capabilities.local_small.max_ctx: 8192`` — the local screener was skipped with
+    ``skipped_capability`` on every cycle from 2026-09-23 (local-model-choice.md §1).
+    """
+
+    def test_a_five_candidate_batch_fits_local_small_with_margin(self, wide_env):
+        """The one number this package promises: the lean prompt fits the declared
+        window with room. Counted with the router's own estimator, the one that decides
+        whether the model is skipped, and the estimator is the dense-text one (see
+        ``runs.llm.chain.estimated_tokens``) — chars/3.5 under-counted this payload by up
+        to 1.9x."""
+        from ops.models_config import load_models_cfg
+        from runs.llm.chain import OUTPUT_RESERVE_TOKENS, fits_context
+
+        cfg, features, root = wide_env
+        max_ctx = load_models_cfg(overlay=None).caps_for("local_small").max_ctx
+        assert max_ctx, "local_small declares no max_ctx; this test guards that window"
+        lean = screenerlib.render_prompt(cfg, WIDE_BATCH, features, root=root, lean=True)
+        fits, est = fits_context(lean, max_ctx)
+        assert fits, f"lean prompt ~{est} tokens does not fit {max_ctx}"
+        # margin: at least 1,024 tokens stay free AFTER the answer reserve. Measured on 40
+        # real lean batches the estimate ran 3,127-6,400 tokens, so a news-heavy cycle or
+        # a longer rationale still cannot tip a real prompt into silent truncation.
+        assert est + OUTPUT_RESERVE_TOKENS <= max_ctx - 1024, (est, max_ctx)
+        # and the reason the lean render exists at all: the full one does not fit
+        full = screenerlib.render_prompt(cfg, WIDE_BATCH, features, root=root, lean=False)
+        assert not fits_context(full, max_ctx)[0]
+
+    def test_candidates_and_schema_are_byte_identical_between_renders(self, wide_env):
+        cfg, features, root = wide_env
+        lean = screenerlib.render_prompt(cfg, WIDE_BATCH, features, root=root, lean=True)
+        full = screenerlib.render_prompt(cfg, WIDE_BATCH, features, root=root, lean=False)
+        block = json.dumps(WIDE_BATCH, indent=2, sort_keys=True)
+        assert lean.count(block) == 1 and full.count(block) == 1
+        # the template's rules and output contract are the same text in both
+        assert lean.split("## Candidates")[0] == full.split("## Candidates")[0]
+
+    def test_features_shrink_to_the_named_pairs_plus_core(self, wide_env):
+        cfg, features, root = wide_env
+        shown = screenerlib.lean_features(features, WIDE_BATCH, core=core_pairs(cfg))
+        assert set(shown.pairs) == {"BTC/USDT", "ETH/USDT", "ALT3/USDT", "ALT7/USDT",
+                                    "ALT11/USDT"}
+        assert set(shown.rich) <= set(features.rich) and "BTC/USDT" in shown.rich
+        # same value under the same key: a citation verifies against either view
+        assert shown.pairs["ALT3/USDT"] == features.pairs["ALT3/USDT"]
+        assert shown.globals == features.globals
+        lean = screenerlib.render_prompt(cfg, WIDE_BATCH, features, root=root, lean=True)
+        assert '"ALT3/USDT.ret_24h"' in lean and '"BTC/USDT.close"' in lean
+        assert "ALT50/USDT." not in lean and "ALT99/USDT" not in lean
+        assert '"shown":5' in lean and '"watchlist":107' in lean
+
+    def test_news_keeps_what_is_cited_or_relevant_and_caps_the_rest(self, wide_env):
+        cfg, features, root = wide_env
+        shown = screenerlib.lean_features(features, WIDE_BATCH, core=core_pairs(cfg))
+        hashes = [n.url_hash for n in shown.news]
+        assert hashes[:2] == ["hash-05", "hash-12"]           # cited by the news_event
+        assert len(hashes) <= 2 + screenerlib.LEAN_NEWS_MAX
+        named = {"BTC", "ETH", "ALT3", "ALT7", "ALT11"}
+        assert all(n.url_hash in {"hash-05", "hash-12"} or not n.assets
+                   or named & set(n.assets) for n in shown.news)
+        assert not any(n.assets == ("SOL", "XRP") for n in shown.news)
+        # nothing shown is invented: every lean hash is a hash the full view carries
+        assert set(hashes) <= features.news_hashes()
+
+    def test_screen_hands_the_chain_the_lean_render_and_says_so(self, wide_env, provider):
+        cfg, features, root = wide_env
+        provider.script([scripted(text=json.dumps({"items": []}))])
+        out = screenerlib.screen(cfg, WIDE_BATCH, features, root=root)
+        assert out.ok and out.prompt_mode == "lean" and out.prompt_est_tokens
+        lean = screenerlib.render_prompt(cfg, WIDE_BATCH, features, root=root, lean=True)
+        assert provider.requests[0].prompt == lean
+        assert provider.requests[0].output_schema == screen_schema()
+
+    def test_the_full_render_is_one_flag_away(self, wide_env, provider, monkeypatch):
+        """Behind a flag, not deleted: the cloud escalation can still be shown everything
+        if a measurement ever says that is worth its price."""
+        cfg, features, root = wide_env
+        monkeypatch.setattr(screenerlib, "LEAN_PROMPT", False)
+        provider.script([scripted(text=json.dumps({"items": []}))])
+        out = screenerlib.screen(cfg, WIDE_BATCH, features, root=root)
+        assert out.prompt_mode == "full"
+        assert provider.requests[0].prompt == screenerlib.render_prompt(
+            cfg, WIDE_BATCH, features, root=root, lean=False)
+
+    def test_the_escalation_may_see_the_full_render_only_when_asked(self, wide_env,
+                                                                     provider, monkeypatch):
+        cfg, features, root = wide_env
+        lo, hi = cfg.signals.scanner.screen.gray_zone
+        gray = {"items": [{"signal_id": "sig-a", "score": (lo + hi) / 2, "keep": True,
+                           "rationale": "borderline", "cited_feature_keys": [],
+                           "news_hashes": []}]}
+        lean = screenerlib.render_prompt(cfg, WIDE_BATCH, features, root=root, lean=True)
+        full = screenerlib.render_prompt(cfg, WIDE_BATCH, features, root=root, lean=False)
+
+        provider.script([scripted(text=json.dumps(gray)), scripted(text=json.dumps(gray))])
+        out = screenerlib.screen(cfg, WIDE_BATCH, features, root=root)
+        assert out.escalated and [r.prompt for r in provider.requests] == [lean, lean]
+
+        monkeypatch.setattr(screenerlib, "FULL_PROMPT_ON_ESCALATION", True)
+        provider.script([scripted(text=json.dumps(gray)), scripted(text=json.dumps(gray))])
+        out = screenerlib.screen(cfg, WIDE_BATCH, features, root=root)
+        assert out.escalated and [r.prompt for r in provider.requests] == [lean, full]
+
+    def test_flags_read_the_config_key_when_it_exists(self):
+        class Grown:                     # what ScreenCfg looks like once tier 2 adds them
+            lean_prompt = False
+            full_prompt_on_escalation = True
+
+        class Today:                     # today's ScreenCfg: neither key
+            pass
+
+        assert screenerlib.prompt_flags(Grown()) == (False, True)
+        assert screenerlib.prompt_flags(Today()) == (screenerlib.LEAN_PROMPT,
+                                                     screenerlib.FULL_PROMPT_ON_ESCALATION)
+
+    def test_a_scan_report_carries_the_prompt_mode(self, wide_env, dbs, provider):
+        from runs.signals import pipeline as pipelinelib
+
+        cfg, features, root = wide_env
+        _, jdb, kdb = dbs
+        provider.script([scripted(text=json.dumps({"items": []}))])
+        report = pipelinelib.scan(cfg, jdb, kdb, root=root, now=NOW, spawn=lambda cmd: None,
+                                  plan_fast_path=False)
+        assert report.screened or report.screened_out, "the wide env fires no detector"
+        assert report.screen_prompt_mode == "lean"
+        assert report.screen_prompt_tokens and report.screen_prompt_tokens > 0

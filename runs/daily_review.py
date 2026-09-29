@@ -47,7 +47,7 @@ from ops import db
 from ops.config import REPO_ROOT, EarnConfig, load_config
 from ops.lib import kill as killlib
 from ops.lib import locks, paths, tg
-from runs import apply_changes, decision_core, router, worktree
+from runs import apply_changes, decision_core, profit_gaps, router, worktree
 from runs import trace as tracelib
 from runs.common import guard_env, gulf_now, utc_iso
 from runs.review_run import (
@@ -404,6 +404,10 @@ class DailyReview:
             lines.append(f"- AUTO-REVERT REQUESTED {cid}: {reason}")
         if tier0:
             lines.append(f"- tier-0 commits merged onto the live branch: {len(tier0)}")
+        # The profit & gap ledger, once a night. appendix_line never raises: a ledger
+        # failure is one line in the appendix, never a failed review.
+        lines.append(profit_gaps.appendix_line(self.cfg, self.jdb, self.kdb,
+                                               self.state_root, now=self.now))
         rp = self.report_path()
         rp.parent.mkdir(parents=True, exist_ok=True)
         base = rp.read_text().rstrip("\n") if rp.exists() else \

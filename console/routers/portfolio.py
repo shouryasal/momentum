@@ -11,6 +11,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
 
+from ..services import overview_service
 from ..services import portfolio_service as svc
 from .risk import Session, StepUp, bot_api, error, get_cfg
 
@@ -59,13 +60,20 @@ def portfolio(sleeve: str, _actor: Session) -> dict[str, Any]:
     }
     with svc.journal_conn(cfg) as conn:
         recent_orders = svc.orders(conn, sleeve=sleeve, limit=100)
-        recent_fills = svc.fills(conn, sleeve=sleeve, limit=100)
+        recent_fills = svc.annotate_fills(
+            svc.fills(conn, sleeve=sleeve, limit=100), sleeve=sleeve, conn=conn)
+        # The cumulative pot — seed + every closed trade in every run database + the open
+        # book marked to market. ``nav`` above is the bot's view of its CURRENT database
+        # and restarts from the seed with every fresh one; this does not.
+        pot = svc.pot(cfg, sleeve, conn=conn, bot_status=bot["status"],
+                      marks=overview_service.marks(cfg))
     return {
         "sleeve": sleeve,
         "bot_up": bot["up"],
         "positions": rows,
         "orders": recent_orders,
         "fills": recent_fills,
+        "pot": pot,
         "wallet": svc.wallet(cfg, sleeve, ledger=ledger,
                              exchange={"total": nav,
                                        "currencies": balance.get("currencies") or []}),
@@ -96,8 +104,8 @@ def fills(
 ) -> dict[str, Any]:
     cfg = get_cfg()
     with svc.journal_conn(cfg) as conn:
-        return {"rows": svc.fills(conn, sleeve=_sleeve(sleeve), pair=pair, since=since,
-                                  limit=limit)}
+        rows = svc.fills(conn, sleeve=_sleeve(sleeve), pair=pair, since=since, limit=limit)
+        return {"rows": svc.annotate_fills(rows, sleeve=_sleeve(sleeve), conn=conn)}
 
 
 @router.get("/{sleeve}/nav")

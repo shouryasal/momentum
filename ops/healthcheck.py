@@ -46,6 +46,40 @@ Four bugs this file used to have, all fixed here:
   re-armed on every tick the data is still stale, and ``runs/ingest.py`` re-evaluates it too
   — see :meth:`Healthcheck.check_data_freshness`.
 
+The sequel, 2026-09-25 → 09-29: the host was asleep, not the loop
+-------------------------------------------------------------------
+The laptop lid closed at 12:16Z on 09-25; Windows hibernated on 09-26; the lid opened at
+04:52Z on 09-29. Sixty-four hours in which nothing ran because nothing *could*. The first
+tick after resume then did everything this file knew how to do, and most of it was the wrong
+reaction: ``AUTONOMY NEVER_RAN: No job has completed in 26h. The loop is not running``
+(critical — the loop was fine); nine detached reruns spawned at once while WSL's resolver
+was still down, so the ingest rerun failed on ``getaddrinfo`` and that failure was quoted in
+TRADING IS BLOCKED; a ``missed_run`` flag for a slot the host slept through, then a
+``missed_run`` *incident every five minutes* for the same slot; and TRADING IS BLOCKED kept
+firing after the data was fresh, because the newest gate refusals were the ones made during
+09-26's standby wakes. Meanwhile ``runs/ingest.py`` lifted the flag itself at T+8m41s, which
+is the one thing that went right and the reason a human was never needed.
+
+"The host was asleep" and "the loop is broken" demand opposite reactions (do nothing; fix
+cron), so this file now tells them apart:
+
+* :meth:`Healthcheck.check_host_suspend` — first thing every tick — stamps a last-tick time
+  in ``ops_state`` and, when the gap since the previous stamp exceeds
+  :data:`SUSPEND_GAP_MULT` × the watchdog's own interval, records **one** ``host_suspended``
+  incident with the window, spawns ingest immediately (the resume burst: data catches up on
+  this tick, not the next cron slot) and says so in plain words.
+* :meth:`Healthcheck.check_missed_runs` treats every fire time inside a suspend window as
+  SUSPENDED: no rerun, no "STILL missing", and a ``missed_run`` flag whose slot fell in the
+  window is cleared (:meth:`Healthcheck.reconcile_missed_run_flag`). The flag also gains an
+  expiry and a clearer, which it never had.
+* :func:`ops.autonomy.liveness` measures its 26-hour silence in *awake* time and answers
+  ``resumed`` for the first :data:`ops.autonomy.RESUME_SETTLE_MIN` minutes, so
+  :meth:`Healthcheck.check_autonomy` stays quiet, and :func:`ops.autonomy.acting` ignores
+  refusals older than the resume.
+* A stale-data block inside :data:`RESUME_TRANSIENT_MIN` of a resume is a *warning* that
+  says the host just woke and ingest is already running — never a critical. The flag is
+  still set and the gate stays fail-closed; only the words change.
+
 Every dependency (bot APIs, subprocess runner, spawner, clock, Telegram) is injected so
 the whole thing is unit-testable; main() wires the real ones.
 """
@@ -68,6 +102,7 @@ from ops.lib import flags as flagslib
 from ops.lib import freshness as freshlib
 from ops.lib import kill as killlib
 from ops.lib import locks, paths, tg
+from ops.lib import suspend as suspendlib
 from ops.lib.freqtrade_api import BotApi
 
 #: Fallback display timezone. The *configured* one is ``cfg.meta.display_timezone``, which
@@ -127,6 +162,24 @@ RERUN_CMDS = {
 #: Extra wait, on top of a rerun's own deadline, before a missing artifact escalates.
 STILL_MISSING_GRACE_MIN = 10
 
+#: Suspend detection. A tick whose gap since the previous tick exceeds
+#: ``max(SUSPEND_GAP_MULT × interval, SUSPEND_GAP_FLOOR_MIN)`` closes a suspend window. The
+#: watchdog runs ``*/5`` under ``flock -n`` and may legitimately lose one tick behind its own
+#: 240 s predecessor, so a 10-minute gap is normal; twenty minutes is four ticks and nothing
+#: short of the host (or cron) being down produces it. Constants, not config: ``earn.yaml``
+#: is owned by another change today, and these describe the watchdog's own mechanics.
+SUSPEND_GAP_MULT = 4
+SUSPEND_GAP_FLOOR_MIN = 20
+#: Inside this many minutes after a detected resume, stale data is the expected state (the
+#: resume-burst ingest is running) and is reported as such — a warning with the plain
+#: words, not the critical a real wedge gets. Matches ``runs.ingest.RESUME_TRANSIENT_MIN``.
+RESUME_TRANSIENT_MIN = 10
+#: ``missed_run`` used to be written with no expiry and had no clearer anywhere, so the flag
+#: set for ``daily_review 2026-09-24T17:30Z`` was still standing five days later with its
+#: reason overwritten. It is informational (severity ``info``), and a day-old "output is
+#: missing" is no longer information: it lapses after this many hours unless re-set.
+MISSED_RUN_FLAG_TTL_H = 24
+
 #: Strategy name that means "this bot cannot trade" — a live bot reporting it is a bug
 #: serious enough to kill (fix #1 in section 11).
 DEAD_STRATEGY = "Scaffold"
@@ -149,6 +202,13 @@ def display_tz(cfg: EarnConfig) -> tzinfo:
 
 def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def autonomy_humanise(minutes: float | None) -> str:
+    """``ops.autonomy._humanise_minutes`` without importing the whole engine at load."""
+    from ops.autonomy import _humanise_minutes
+
+    return _humanise_minutes(minutes)
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -191,6 +251,8 @@ class Healthcheck:
         self.freshness_path = self.root / freshlib.FRESHNESS_REL
         #: One :func:`ops.autonomy.liveness` per tick — see :meth:`liveness_view`.
         self._liveness_view: dict | None = None
+        #: Suspend windows read once per tick — see :meth:`suspend_windows`.
+        self._suspend_windows: list[suspendlib.Window] | None = None
 
     @staticmethod
     def _real_runner(cmd: list[str], timeout: int = 600) -> int:
@@ -243,6 +305,103 @@ class Healthcheck:
             self._set_state("install_utc", _iso(self.now))
             return self.now
         return stamped
+
+    # ------------------------------------------------------------- host suspend
+
+    def tick_interval_min(self) -> float:
+        """Minutes between two watchdog fires, from its own cron expression (default 5)."""
+        try:
+            expr = self.crons_for("healthcheck")[0]
+            it = croniter(expr, self.now.astimezone(self.tz))
+            a = it.get_next(datetime)
+            b = it.get_next(datetime)
+            minutes = (b - a).total_seconds() / 60.0
+            return minutes if minutes > 0 else 5.0
+        except Exception:  # noqa: BLE001 - a bad expression must not stop the tick
+            return 5.0
+
+    def suspend_windows(self) -> list[suspendlib.Window]:
+        if self._suspend_windows is None:
+            try:
+                self._suspend_windows = suspendlib.windows(self.kdb)
+            except Exception:  # noqa: BLE001
+                self._suspend_windows = []
+        return self._suspend_windows
+
+    def suspended(self, at: datetime | None) -> suspendlib.Window | None:
+        """The suspend window covering ``at`` — a fire time the host could not have run."""
+        return suspendlib.covering(self.suspend_windows(), at)
+
+    def resume_transient(self) -> suspendlib.Window | None:
+        """The window whose resume is within :data:`RESUME_TRANSIENT_MIN` of now, if any."""
+        return suspendlib.resumed_within(self.suspend_windows(), self.now,
+                                         RESUME_TRANSIENT_MIN)
+
+    def host_words(self, window: suspendlib.Window) -> str:
+        """The plain sentence about a sleep, from the same source the console reads."""
+        label = suspendlib.zone_label(
+            getattr(getattr(self.cfg, "meta", None), "display_timezone", None))
+        try:
+            caught = suspendlib.catch_up(self.kdb, window)
+        except Exception:  # noqa: BLE001
+            caught = {"caught_up_at": None, "trading_since": None}
+        return suspendlib.words(
+            window, tz=self.tz, tz_label=label, caught_up_at=caught["caught_up_at"],
+            trading_since=caught["trading_since"],
+            data_age_min=freshlib.data_age_minutes(self.freshness_path, self.now))
+
+    def check_host(self) -> None:
+        """Can this HOST keep the loop alive at all? One sentence, once, when it cannot.
+
+        Every other check asks whether a component is healthy. This one asks whether the
+        machine under them was even on: ``ops.hostcheck`` reads the ``host_suspended``
+        incidents :meth:`check_host_suspend` records and the wall-vs-monotonic clock probe,
+        and warns "this host slept for X hours in the last 7 days; unattended trading is not
+        possible on it as configured" with a pointer to docs/design/unattended-hosting.md.
+        Both outages this system has had were the lid, not the software.
+        """
+        from ops import hostcheck
+
+        hostcheck.check(self.kdb, now=self.now, sender=self.sender)
+
+    def check_host_suspend(self) -> None:
+        """First thing every tick: stamp the tick, and if it ends a sleep, say so and catch up.
+
+        One incident per window, never per tick. The resume burst is the existing detached
+        rerun path (``flock -n`` on the cron lock, the job's own ``timeout``), so a cron
+        ingest already running simply wins and the burst exits quietly. The staleness flag is
+        re-evaluated by :meth:`check_data_freshness` later in this same tick — still set,
+        still fail-closed, but worded for what it is.
+        """
+        window = suspendlib.record_tick(
+            self.kdb, self.now, interval_min=self.tick_interval_min(),
+            mult=SUSPEND_GAP_MULT, floor_min=SUSPEND_GAP_FLOOR_MIN)
+        self._suspend_windows = None
+        if window is None:
+            return
+        age = freshlib.data_age_minutes(self.freshness_path, self.now)
+        age_words = "unknown" if age == float("inf") else f"{age:.0f} min"
+        cmd = self._rerun_command("ingest", self.now)
+        pid = self.spawner(cmd, self.root) if cmd else None
+        self.kdb.execute(
+            "INSERT OR IGNORE INTO ops_runs(job, scheduled_for, started_at, status,"
+            " rerun_count, rerun_started_utc, detached_pid)"
+            " VALUES ('ingest',?,?,'resume_burst',0,?,?)",
+            (_iso(self.now), _iso(self.now), _iso(self.now), pid))
+        self.kdb.commit()
+        self._incident(
+            "host_suspended",
+            f"from {_iso(window.from_utc)} to {_iso(window.to_utc)} "
+            f"({autonomy_humanise(window.gap_minutes)}); data {age_words} old at resume; "
+            f"ingest spawned{f' (pid {pid})' if pid else ''}; fire times inside the window "
+            "are suspended, not missed")
+        self.sender(
+            f"{self.host_words(window)}. Nothing was broken: no job could run while the host "
+            f"was off. Ingest has been started now{f' (pid {pid})' if pid else ''} so the "
+            "data catches up on this tick; jobs whose fire time fell inside the window are "
+            "marked suspended, not missed, and will not be rerun.",
+            "warn", key="host_suspended", ttl=60)
+        self.reconcile_missed_run_flag()
 
     # ------------------------------------------------------------- containers
 
@@ -359,9 +518,20 @@ class Healthcheck:
                               reason=f"data age {age:.0f} min", set_by="healthcheck",
                               expires_at=self.stale_flag_expiry(),
                               now=self.now, audit_conn=self.kdb)
-            self.sender(f"market data stale ({age:.0f} min) — entries blocked",
-                        "critical", key="data_stale", ttl=60)
-            self._incident("stale_data", f"age {age:.0f} min")
+            resumed = self.resume_transient()
+            if resumed is not None:
+                # The block is real and stays. The *diagnosis* is different: the host just
+                # woke and the catch-up ingest is already running, so this is the expected
+                # few minutes after a lid-open, not a wedge — a warning, worded as such.
+                ago = (self.now - resumed.to_utc).total_seconds() / 60.0
+                self.sender(
+                    f"host resumed {ago:.0f} min ago: market data is {age:.0f} min old — "
+                    "entries stay blocked until ingest catches up (it is already running)",
+                    "warn", key="data_stale", ttl=60)
+            else:
+                self.sender(f"market data stale ({age:.0f} min) — entries blocked",
+                            "critical", key="data_stale", ttl=60)
+                self._incident("stale_data", f"age {age:.0f} min")
         elif latched and raw.get("set_by") != "human":
             flagslib.clear_flag(self.flags_path, "data_stale", by="healthcheck",
                                 now=self.now, audit_conn=self.kdb)
@@ -599,6 +769,40 @@ class Healthcheck:
         except Exception:  # noqa: BLE001 - never let this module break the watchdog
             return True
 
+    def reconcile_missed_run_flag(self) -> str | None:
+        """Clear a ``missed_run`` flag that no longer says anything true. Returns why.
+
+        The flag had one writer and no clearer, so it stood for five days with its reason
+        overwritten on every new miss. Three honest exits: the slot fell inside a suspend
+        window (the host could not have run it — this is the ``daily_review
+        2026-09-24T17:30Z`` case, set at 21:45Z after the host had slept through 17:30Z);
+        the output has since appeared; or the flag is older than :data:`MISSED_RUN_FLAG_TTL_H`
+        and was written without an expiry by the old code. A human's flag is never touched.
+        """
+        raw = self._raw_flag("missed_run")
+        if not raw or not raw.get("active") or raw.get("set_by") == "human":
+            return None
+        parts = str(raw.get("reason") or "").split()
+        job = parts[0] if parts else None
+        slot = _parse_iso(parts[1]) if len(parts) > 1 else None
+        set_at = _parse_iso(raw.get("set_at"))
+        why: str | None = None
+        if slot is not None and self.suspended(slot) is not None:
+            why = f"the host was asleep at {_iso(slot)}; {job} could not have run"
+        elif (job in self.cfg.ops.schedules and slot is not None
+              and self._artifact_present(job, slot)):
+            why = f"{job}'s output for {_iso(slot)} has since appeared"
+        elif (not raw.get("expires_at") and set_at is not None
+              and self.now - set_at >= timedelta(hours=MISSED_RUN_FLAG_TTL_H)):
+            why = (f"set {autonomy_humanise((self.now - set_at).total_seconds() / 60)} ago "
+                   "with no expiry")
+        if why is None:
+            return None
+        flagslib.clear_flag(self.flags_path, "missed_run", by="healthcheck",
+                            now=self.now, audit_conn=self.kdb)
+        self.sender(f"missed_run flag cleared — {why}", "info")
+        return why
+
     def check_missed_runs(self) -> None:
         grace = timedelta(minutes=self.cfg.ops.missed_run_grace_min)
         floor = self.install_floor()
@@ -615,8 +819,17 @@ class Healthcheck:
             if self._artifact_present(job, fire_utc):
                 continue
             slot = _iso(fire_utc)
+            if self.suspended(fire_utc) is not None:
+                # The host was asleep at this fire time. There is no output because nothing
+                # could have produced it — not a miss, not a rerun, not a STILL missing.
+                # Recorded so the Ops page can show the slot for what it was.
+                self.kdb.execute(
+                    "INSERT OR IGNORE INTO ops_runs(job, scheduled_for, started_at, status,"
+                    " rerun_count) VALUES (?,?,?,'suspended',0)", (job, slot, _iso(self.now)))
+                self.kdb.commit()
+                continue
             row = self.kdb.execute(
-                "SELECT rerun_count, rerun_started_utc, started_at FROM ops_runs"
+                "SELECT rerun_count, rerun_started_utc, started_at, status FROM ops_runs"
                 " WHERE job=? AND scheduled_for=?", (job, slot)).fetchone()
             if row is None:
                 cmd = self._rerun_command(job, fire_utc)
@@ -634,6 +847,8 @@ class Healthcheck:
                 # A rerun gets its own full deadline, and never escalates while its lock
                 # is still held: that combination is what produced the "killed rerun then
                 # STILL missing" alert storm.
+                if row["status"] == "still_missing":
+                    continue  # said once, with its incident; the alert key dedupes the rest
                 started = _parse_iso(row["rerun_started_utc"]) or _parse_iso(row["started_at"])
                 if started is not None:
                     due = started + timedelta(seconds=sched.deadline_s) + timedelta(
@@ -644,10 +859,19 @@ class Healthcheck:
                     continue
                 self.sender(f"{job} STILL missing after rerun ({slot})", "critical",
                             key=f"missed2_{job}_{slot}", ttl=24 * 60)
+                # One incident per (job, slot). On 2026-09-29 this branch wrote a
+                # ``missed_run`` incident every five minutes for the same nav_job slot.
                 self._incident("missed_run", f"{job} {slot}")
-                flagslib.set_flag(self.flags_path, "missed_run", severity="info",
-                                  reason=f"{job} {slot}", set_by="healthcheck",
-                                  now=self.now, audit_conn=self.kdb)
+                self.kdb.execute(
+                    "UPDATE ops_runs SET status='still_missing' WHERE job=? AND"
+                    " scheduled_for=?", (job, slot))
+                self.kdb.commit()
+                flagslib.set_flag(
+                    self.flags_path, "missed_run", severity="info",
+                    reason=f"{job} {slot}", set_by="healthcheck",
+                    expires_at=_iso(self.now + timedelta(hours=MISSED_RUN_FLAG_TTL_H)),
+                    now=self.now, audit_conn=self.kdb)
+        self.reconcile_missed_run_flag()
 
     # ------------------------------------------------------------- autonomy liveness
 
@@ -667,8 +891,11 @@ class Healthcheck:
         view = self.liveness_view()
         verdict = view["verdict"]
         # `blocked` has its own, far more specific alert in check_trading_blocked; repeating
-        # it here as "AUTONOMY BLOCKED" would be two alarms for one fact.
-        if verdict in ("alive", "off", "blocked"):
+        # it here as "AUTONOMY BLOCKED" would be two alarms for one fact. `resumed` is the
+        # host having been asleep — check_host_suspend already said so in plain words, and
+        # "AUTONOMY NEVER_RAN" for a host that was off is the diagnosis this file got wrong
+        # on 2026-09-29.
+        if verdict in ("alive", "off", "blocked", "resumed"):
             return
         severity = "critical" if verdict in ("not_scheduled", "never_ran") else "warn"
         self.sender(f"AUTONOMY {verdict.upper()}: {view['headline']}", severity,
@@ -742,6 +969,19 @@ class Healthcheck:
                 self.kdb.execute("DELETE FROM ops_state WHERE key='trading_blocked_since'")
                 self.kdb.commit()
                 self.sender(f"Trading is possible again — {raw['headline']}", "info")
+            return
+
+        resumed = self.resume_transient()
+        if resumed is not None:
+            # Blocked, yes — on data the host could not have fetched while asleep, with the
+            # catch-up ingest already running. That is the expected first minutes after a
+            # lid-open, and calling it a wedge would be the second wrong diagnosis of the
+            # morning. A warning with the words; the critical returns if it does not clear.
+            self.sender(
+                f"host resumed {(self.now - resumed.to_utc).total_seconds() / 60:.0f} min "
+                f"ago and entries are still blocked — {raw['headline']} Ingest is running to "
+                "catch up; this becomes a critical if it has not cleared in "
+                f"{RESUME_TRANSIENT_MIN} min.", "warn", key="trading_blocked", ttl=60)
             return
 
         lines = [f"TRADING IS BLOCKED — {raw['headline']}",
@@ -1108,8 +1348,14 @@ class Healthcheck:
     # ------------------------------------------------------------- entry
 
     def run(self) -> int:
-        for check in (self.check_containers, self.check_data_freshness,
-                      self.check_missed_runs, self.check_autonomy,
+        # check_host_suspend goes first: every check after it asks "was the host asleep at
+        # that time?" and the answer has to be recorded before they do.
+        for check in (self.check_host_suspend, self.check_containers,
+                      self.check_data_freshness, self.check_missed_runs, self.check_autonomy,
+                      # After check_autonomy: ops.hostcheck reads the host_suspended incidents
+                      # check_host_suspend wrote this tick and says, once, whether this HOST
+                      # can keep the loop alive at all (docs/design/unattended-hosting.md).
+                      self.check_host,
                       # After check_data_freshness so a flag this tick just set is counted,
                       # and after check_autonomy so both read one liveness_view().
                       self.check_trading_blocked, self.check_console_supervised,
@@ -1126,11 +1372,17 @@ class Healthcheck:
 
 def main() -> int:
     cfg = load_config()
-    with locks.acquire("health"):
-        with db.connect(REPO_ROOT / cfg.paths.journal_db) as jdb, \
-                db.connect(REPO_ROOT / cfg.paths.knowledge_db) as kdb:
-            apis = {s: BotApi.for_sleeve(cfg, s) for s in ("a", "b")}
-            return Healthcheck(cfg, jdb, kdb, apis).run()
+    try:
+        with locks.acquire("health"):
+            with db.connect(REPO_ROOT / cfg.paths.journal_db) as jdb, \
+                    db.connect(REPO_ROOT / cfg.paths.knowledge_db) as kdb:
+                apis = {s: BotApi.for_sleeve(cfg, s) for s in ("a", "b")}
+                return Healthcheck(cfg, jdb, kdb, apis).run()
+    except locks.LockBusy as e:
+        # The message names the holder (pid, awake age, cmdline) and says HUNG when it has
+        # outlived this job's own deadline — one dated line, not a traceback.
+        print(f"healthcheck {_iso(datetime.now(UTC))}: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

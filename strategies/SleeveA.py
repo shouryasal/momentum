@@ -195,7 +195,7 @@ class SleeveA(EarnBaseStrategy):
             instrument("want_none", pair, ps.now, f"reentry_cooldown:{entry_tag or ''}")
             return 0.0
         target = self._target_weight(pair)
-        gap = sc.desired_stake_for_target(target, ps.nav, ps.positions.get(pair, 0.0))
+        gap = sc.desired_stake_for_target(target, ps.nav, ps.committed(pair))
         if entry_tag == "dca":
             gap = min(gap, self._scheduled_chunk(ps))
         if gap <= 0:
@@ -253,7 +253,7 @@ class SleeveA(EarnBaseStrategy):
         if not self._dca_due(pair, current_time):
             instrument("dca_none", pair, current_time, "not_due")
             return None
-        gap = target_w * ps.nav - ps.positions.get(pair, 0.0)
+        gap = target_w * ps.nav - ps.committed(pair)
         if gap <= 0:
             instrument("dca_none", pair, current_time, "no_gap")
             return None

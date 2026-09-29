@@ -2,6 +2,13 @@
 /balance, plus the buy-and-hold benchmark row (sleeve_c_benchmark). Closes the
 "nobody writes sleeve NAV" gap — the digest, Excel NAV sheet, G3 evaluation and the
 near-stop hard-case flag all read these rows.
+
+Like ``runs/nav_tick.py`` this reads the bot, and a bot only knows the database it is
+running on: ``/balance`` is ``dry_run_wallet`` plus that database's profit. A restart onto
+a fresh database (2026-09-23 23:37Z) therefore resets this series to the seed too — the
+2026-09-24 rows read 9,994.78 for both sleeves although 69.77 had already been lost the
+evening before. The cumulative figure lives in ``console.services.pot_service``, which
+reads every run database rather than asking the bot.
 """
 
 from __future__ import annotations

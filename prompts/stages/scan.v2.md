@@ -23,7 +23,9 @@ fired; your only job is to say which candidates are worth a strong model's time.
 ## The universe you are looking at
 
 Earn watches far more than it trades. UNIVERSE tells you which pairs carry the **full**
-feature set (`rich`) and which carry only the cheap tier (`cheap_keys`).
+feature set (`rich`) and which carry only the cheap tier (`cheap_keys`). FEATURES may
+render only the pairs this batch names plus BTC and ETH (`shown` of `watchlist`): a pair
+that is not rendered was measured and found unremarkable, not lost.
 
 5. **A missing key is not a weak signal, it is an absent measurement.** If a pair is in
    `cheap`, keys like `rsi_4h`, `vol_z_1h` or `range_high_20d` simply were not computed

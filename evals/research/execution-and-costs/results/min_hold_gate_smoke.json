@@ -1,0 +1,464 @@
+{
+  "min_edge": {
+    "floor": 0.009000000000000001,
+    "L3R3_refuses_all_entries": false,
+    "L0R0_refuses_all_entries": true,
+    "L3R3_smallest_target": 0.009,
+    "L0R0_smallest_target": 0.005
+  },
+  "variants": {
+    "none": {
+      "gate": "none",
+      "k": 0.0,
+      "windows": {
+        "full": {
+          "window": [
+            "2025-06-01",
+            "2025-09-30"
+          ],
+          "days": 122,
+          "years": 0.3315068493150685,
+          "net_pct": -4.251914357404695,
+          "cagr_pct": -12.28408469312081,
+          "vol_pct": 3.271865958499264,
+          "sharpe": -3.7544584188147065,
+          "mdd_pct": -4.3438194960099485,
+          "trades": 269,
+          "trades_per_year": 811.4462809917354,
+          "mean_hold_h": 5.977695167286245,
+          "median_hold_h": 5.0,
+          "win_rate": 0.6319702602230484,
+          "avg_ret_per_trade_pct": -0.3417332433597828,
+          "fees_pct_start_per_year": 11.864920474044272,
+          "bps_per_holding_day": 120.28552219734456,
+          "exit_mix": {
+            "exit_signal": {
+              "n": 86,
+              "pnl": -1016.1953121294991
+            },
+            "roi": {
+              "n": 136,
+              "pnl": 589.0744834846535
+            },
+            "stop_loss": {
+              "n": 6,
+              "pnl": -184.10420639124357
+            },
+            "trailing_stop_loss": {
+              "n": 41,
+              "pnl": 160.54920342193782
+            }
+          },
+          "btc_hold_cagr_pct": 25.980094983172663,
+          "btc_hold_mdd_pct": -12.213539877847357,
+          "btc_hold_sharpe": 0.8717526510140778,
+          "refused": {
+            "day_cap": 1137,
+            "spacing": 4211,
+            "cooldown": 12,
+            "fee_budget": 2604
+          },
+          "blocked_exits": 0
+        },
+        "calib_2024on": {
+          "window": [
+            "2025-06-01",
+            "2025-09-30"
+          ],
+          "days": 122,
+          "years": 0.3315068493150685,
+          "net_pct": -4.251914357404695,
+          "cagr_pct": -12.28408469312081,
+          "vol_pct": 3.271865958499264,
+          "sharpe": -3.7544584188147065,
+          "mdd_pct": -4.3438194960099485,
+          "trades": 269,
+          "trades_per_year": 811.4462809917354,
+          "mean_hold_h": 5.977695167286245,
+          "median_hold_h": 5.0,
+          "win_rate": 0.6319702602230484,
+          "avg_ret_per_trade_pct": -0.3417332433597828,
+          "fees_pct_start_per_year": 11.864920474044272,
+          "bps_per_holding_day": 120.28552219734456,
+          "exit_mix": {
+            "exit_signal": {
+              "n": 86,
+              "pnl": -1016.1953121294991
+            },
+            "roi": {
+              "n": 136,
+              "pnl": 589.0744834846535
+            },
+            "stop_loss": {
+              "n": 6,
+              "pnl": -184.10420639124357
+            },
+            "trailing_stop_loss": {
+              "n": 41,
+              "pnl": 160.54920342193782
+            }
+          },
+          "btc_hold_cagr_pct": 25.980094983172663,
+          "btc_hold_mdd_pct": -12.213539877847357,
+          "btc_hold_sharpe": 0.8717526510140778,
+          "refused": {
+            "day_cap": 1137,
+            "spacing": 4211,
+            "cooldown": 12,
+            "fee_budget": 2604
+          },
+          "blocked_exits": 0
+        },
+        "2019-22": {},
+        "2023-24": {},
+        "2025-26": {
+          "window": [
+            "2025-01-01",
+            "2026-09-24"
+          ],
+          "days": 122,
+          "years": 0.3315068493150685,
+          "net_pct": -4.251914357404695,
+          "cagr_pct": -12.28408469312081,
+          "vol_pct": 3.271865958499264,
+          "sharpe": -3.7544584188147065,
+          "mdd_pct": -4.3438194960099485,
+          "trades": 269,
+          "trades_per_year": 811.4462809917354,
+          "mean_hold_h": 5.977695167286245,
+          "median_hold_h": 5.0,
+          "win_rate": 0.6319702602230484,
+          "avg_ret_per_trade_pct": -0.3417332433597828,
+          "fees_pct_start_per_year": 11.864920474044272,
+          "bps_per_holding_day": 120.28552219734456,
+          "exit_mix": {
+            "exit_signal": {
+              "n": 86,
+              "pnl": -1016.1953121294991
+            },
+            "roi": {
+              "n": 136,
+              "pnl": 589.0744834846535
+            },
+            "stop_loss": {
+              "n": 6,
+              "pnl": -184.10420639124357
+            },
+            "trailing_stop_loss": {
+              "n": 41,
+              "pnl": 160.54920342193782
+            }
+          },
+          "btc_hold_cagr_pct": -5.242696015148651,
+          "btc_hold_mdd_pct": -52.97176591351065,
+          "btc_hold_sharpe": -0.11975474472463701,
+          "refused": {
+            "day_cap": 1137,
+            "spacing": 4211,
+            "cooldown": 12,
+            "fee_budget": 2604
+          },
+          "blocked_exits": 0
+        }
+      }
+    },
+    "minhold_trend_k5": {
+      "gate": "minhold_trend",
+      "k": 5.0,
+      "windows": {
+        "full": {
+          "window": [
+            "2025-06-01",
+            "2025-09-30"
+          ],
+          "days": 122,
+          "years": 0.3315068493150685,
+          "net_pct": -4.449515138925674,
+          "cagr_pct": -12.829014367497493,
+          "vol_pct": 5.158355926976044,
+          "sharpe": -2.487035510753943,
+          "mdd_pct": -5.487620315621822,
+          "trades": 270,
+          "trades_per_year": 814.4628099173553,
+          "mean_hold_h": 15.088888888888889,
+          "median_hold_h": 6.0,
+          "win_rate": 0.8037037037037037,
+          "avg_ret_per_trade_pct": -0.35684161607610304,
+          "fees_pct_start_per_year": 11.82562093745325,
+          "bps_per_holding_day": 47.714738903579295,
+          "exit_mix": {
+            "roi": {
+              "n": 183,
+              "pnl": 716.0173456493328
+            },
+            "stop_loss": {
+              "n": 44,
+              "pnl": -1343.8116151742784
+            },
+            "trailing_stop_loss": {
+              "n": 43,
+              "pnl": 153.37534971334026
+            }
+          },
+          "btc_hold_cagr_pct": 25.980094983172663,
+          "btc_hold_mdd_pct": -12.213539877847357,
+          "btc_hold_sharpe": 0.8717526510140778,
+          "refused": {
+            "day_cap": 1152,
+            "spacing": 4090,
+            "cooldown": 10,
+            "fee_budget": 2523
+          },
+          "blocked_exits": 1581
+        },
+        "calib_2024on": {
+          "window": [
+            "2025-06-01",
+            "2025-09-30"
+          ],
+          "days": 122,
+          "years": 0.3315068493150685,
+          "net_pct": -4.449515138925674,
+          "cagr_pct": -12.829014367497493,
+          "vol_pct": 5.158355926976044,
+          "sharpe": -2.487035510753943,
+          "mdd_pct": -5.487620315621822,
+          "trades": 270,
+          "trades_per_year": 814.4628099173553,
+          "mean_hold_h": 15.088888888888889,
+          "median_hold_h": 6.0,
+          "win_rate": 0.8037037037037037,
+          "avg_ret_per_trade_pct": -0.35684161607610304,
+          "fees_pct_start_per_year": 11.82562093745325,
+          "bps_per_holding_day": 47.714738903579295,
+          "exit_mix": {
+            "roi": {
+              "n": 183,
+              "pnl": 716.0173456493328
+            },
+            "stop_loss": {
+              "n": 44,
+              "pnl": -1343.8116151742784
+            },
+            "trailing_stop_loss": {
+              "n": 43,
+              "pnl": 153.37534971334026
+            }
+          },
+          "btc_hold_cagr_pct": 25.980094983172663,
+          "btc_hold_mdd_pct": -12.213539877847357,
+          "btc_hold_sharpe": 0.8717526510140778,
+          "refused": {
+            "day_cap": 1152,
+            "spacing": 4090,
+            "cooldown": 10,
+            "fee_budget": 2523
+          },
+          "blocked_exits": 1581
+        },
+        "2019-22": {},
+        "2023-24": {},
+        "2025-26": {
+          "window": [
+            "2025-01-01",
+            "2026-09-24"
+          ],
+          "days": 122,
+          "years": 0.3315068493150685,
+          "net_pct": -4.449515138925674,
+          "cagr_pct": -12.829014367497493,
+          "vol_pct": 5.158355926976044,
+          "sharpe": -2.487035510753943,
+          "mdd_pct": -5.487620315621822,
+          "trades": 270,
+          "trades_per_year": 814.4628099173553,
+          "mean_hold_h": 15.088888888888889,
+          "median_hold_h": 6.0,
+          "win_rate": 0.8037037037037037,
+          "avg_ret_per_trade_pct": -0.35684161607610304,
+          "fees_pct_start_per_year": 11.82562093745325,
+          "bps_per_holding_day": 47.714738903579295,
+          "exit_mix": {
+            "roi": {
+              "n": 183,
+              "pnl": 716.0173456493328
+            },
+            "stop_loss": {
+              "n": 44,
+              "pnl": -1343.8116151742784
+            },
+            "trailing_stop_loss": {
+              "n": 43,
+              "pnl": 153.37534971334026
+            }
+          },
+          "btc_hold_cagr_pct": -5.242696015148651,
+          "btc_hold_mdd_pct": -52.97176591351065,
+          "btc_hold_sharpe": -0.11975474472463701,
+          "refused": {
+            "day_cap": 1152,
+            "spacing": 4090,
+            "cooldown": 10,
+            "fee_budget": 2523
+          },
+          "blocked_exits": 1581
+        }
+      }
+    },
+    "minhold_all_k5": {
+      "gate": "minhold_all",
+      "k": 5.0,
+      "windows": {
+        "full": {
+          "window": [
+            "2025-06-01",
+            "2025-09-30"
+          ],
+          "days": 122,
+          "years": 0.3315068493150685,
+          "net_pct": 12.599680693051397,
+          "cagr_pct": 43.04191995714292,
+          "vol_pct": 46.633147736059975,
+          "sharpe": 0.92298980546535,
+          "mdd_pct": -16.817947196494774,
+          "trades": 265,
+          "trades_per_year": 799.3801652892562,
+          "mean_hold_h": 137.3358490566038,
+          "median_hold_h": 106.0,
+          "win_rate": 0.32075471698113206,
+          "avg_ret_per_trade_pct": 1.1526544545158,
+          "fees_pct_start_per_year": 12.880702514492828,
+          "bps_per_holding_day": 5.381388272469313,
+          "exit_mix": {
+            "exit_signal": {
+              "n": 40,
+              "pnl": 2184.022341585304
+            },
+            "roi": {
+              "n": 4,
+              "pnl": 161.7615415260882
+            },
+            "stop_loss": {
+              "n": 170,
+              "pnl": -5837.869785897847
+            },
+            "trailing_stop_loss": {
+              "n": 51,
+              "pnl": 4521.992498316854
+            }
+          },
+          "btc_hold_cagr_pct": 25.980094983172663,
+          "btc_hold_mdd_pct": -12.213539877847357,
+          "btc_hold_sharpe": 0.8717526510140778,
+          "refused": {
+            "day_cap": 327,
+            "spacing": 2715,
+            "cooldown": 4,
+            "fee_budget": 306
+          },
+          "blocked_exits": 15474
+        },
+        "calib_2024on": {
+          "window": [
+            "2025-06-01",
+            "2025-09-30"
+          ],
+          "days": 122,
+          "years": 0.3315068493150685,
+          "net_pct": 12.599680693051397,
+          "cagr_pct": 43.04191995714292,
+          "vol_pct": 46.633147736059975,
+          "sharpe": 0.92298980546535,
+          "mdd_pct": -16.817947196494774,
+          "trades": 265,
+          "trades_per_year": 799.3801652892562,
+          "mean_hold_h": 137.3358490566038,
+          "median_hold_h": 106.0,
+          "win_rate": 0.32075471698113206,
+          "avg_ret_per_trade_pct": 1.1526544545158,
+          "fees_pct_start_per_year": 12.880702514492828,
+          "bps_per_holding_day": 5.381388272469313,
+          "exit_mix": {
+            "exit_signal": {
+              "n": 40,
+              "pnl": 2184.022341585304
+            },
+            "roi": {
+              "n": 4,
+              "pnl": 161.7615415260882
+            },
+            "stop_loss": {
+              "n": 170,
+              "pnl": -5837.869785897847
+            },
+            "trailing_stop_loss": {
+              "n": 51,
+              "pnl": 4521.992498316854
+            }
+          },
+          "btc_hold_cagr_pct": 25.980094983172663,
+          "btc_hold_mdd_pct": -12.213539877847357,
+          "btc_hold_sharpe": 0.8717526510140778,
+          "refused": {
+            "day_cap": 327,
+            "spacing": 2715,
+            "cooldown": 4,
+            "fee_budget": 306
+          },
+          "blocked_exits": 15474
+        },
+        "2019-22": {},
+        "2023-24": {},
+        "2025-26": {
+          "window": [
+            "2025-01-01",
+            "2026-09-24"
+          ],
+          "days": 122,
+          "years": 0.3315068493150685,
+          "net_pct": 12.599680693051397,
+          "cagr_pct": 43.04191995714292,
+          "vol_pct": 46.633147736059975,
+          "sharpe": 0.92298980546535,
+          "mdd_pct": -16.817947196494774,
+          "trades": 265,
+          "trades_per_year": 799.3801652892562,
+          "mean_hold_h": 137.3358490566038,
+          "median_hold_h": 106.0,
+          "win_rate": 0.32075471698113206,
+          "avg_ret_per_trade_pct": 1.1526544545158,
+          "fees_pct_start_per_year": 12.880702514492828,
+          "bps_per_holding_day": 5.381388272469313,
+          "exit_mix": {
+            "exit_signal": {
+              "n": 40,
+              "pnl": 2184.022341585304
+            },
+            "roi": {
+              "n": 4,
+              "pnl": 161.7615415260882
+            },
+            "stop_loss": {
+              "n": 170,
+              "pnl": -5837.869785897847
+            },
+            "trailing_stop_loss": {
+              "n": 51,
+              "pnl": 4521.992498316854
+            }
+          },
+          "btc_hold_cagr_pct": -5.242696015148651,
+          "btc_hold_mdd_pct": -52.97176591351065,
+          "btc_hold_sharpe": -0.11975474472463701,
+          "refused": {
+            "day_cap": 327,
+            "spacing": 2715,
+            "cooldown": 4,
+            "fee_budget": 306
+          },
+          "blocked_exits": 15474
+        }
+      }
+    }
+  }
+}

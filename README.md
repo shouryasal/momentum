@@ -222,6 +222,13 @@ trading. From an **Administrator PowerShell on Windows**:
 The live preflight blocks going live while standby-on-AC is non-zero or the keep-alive task
 is missing.
 
+The idle timers are not the whole story: on 2026-09-24 and again on 2026-09-25 → 09-29 the
+laptop's **lid** put it into Modern Standby and then hibernation with every timer at 0, and
+the WSL VM was paused with it. `docs/design/unattended-hosting.md` has what stops and what
+survives, the exact `powercfg`/task/Update commands to keep the laptop awake, what it takes
+to move the runtime to an always-on host, and `python -m ops.hostcheck` — the check that
+says "this host slept for X hours in the last 7 days" instead of blaming the crontab.
+
 ### 11. The week-1 verification gate
 
 Every command must exit 0, twice in a row:

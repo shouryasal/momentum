@@ -211,6 +211,11 @@ class SleeveB(EarnBaseStrategy):
 
     def _no_targets(self, reason: str) -> None:
         self._targets = {pair: 0.0 for pair in self.gate_cfg.pairs}
+        # NAME nothing. A zero target is only an instruction to sell when a proposal put it
+        # there (see :meth:`_named_zero`); with no mandate the sleeve holds what it has and
+        # buys nothing. Clearing the set here means a mandate that vanishes mid-session
+        # cannot leave the previous decision's names behind to be read as a fresh sell.
+        self._named = frozenset()
         self._set_source(SOURCE_NONE, reason)
 
     def _set_source(self, source: str, reason: str) -> None:
@@ -305,7 +310,7 @@ class SleeveB(EarnBaseStrategy):
             return 0.0
         if self._reentry_blocked(pair, ps.now):
             return 0.0  # stopped out recently and no newer proposal: stay flat
-        gap = sc.desired_stake_for_target(target_w, ps.nav, ps.positions.get(pair, 0.0))
+        gap = sc.desired_stake_for_target(target_w, ps.nav, ps.committed(pair))
         if mx.within_band(gap, ps.nav, self.gate_cfg.rebalance_band):
             return 0.0  # inside the dead-band: no churn
         return gap
@@ -351,7 +356,7 @@ class SleeveB(EarnBaseStrategy):
                 min_interval_hours=float((self.mech.get("rebalance") or {}).get(
                     "min_interval_hours", 0))):
             return None
-        gap = target_w * ps.nav - ps.positions.get(pair, 0.0)
+        gap = target_w * ps.nav - ps.committed(pair)
         if mx.within_band(gap, ps.nav, self._rebalance_band()):
             return None
         stamp = current_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -386,12 +391,26 @@ class SleeveB(EarnBaseStrategy):
     def _named_zero(self, pair: str) -> bool:
         """Is being flat in this pair a DECISION rather than an omission?
 
-        Yes when the proposal named the asset (at zero, or at a weight the exposure scale
-        took to zero), and yes when there is no mandate at all — ``SOURCE_NONE`` means
-        nothing authorises holding anything and the sleeve flattens. No when the asset is
-        simply not among the handful a sparse proposal named.
+        Yes when the PROPOSAL named the asset — at zero, or at a weight the exposure scale
+        took to zero. That is a decision, and a decision may sell.
+
+        No when there is no mandate at all. ``SOURCE_NONE`` used to mean "flatten", and that
+        was wrong twice over. Factually: the absence of a proposal is the absence of a
+        decision, not a decision to sell — and ``SOURCE_NONE`` is reached by plumbing, not by
+        judgement. The store is namespaced ``run:<run_id>:`` while freqtrade's trades table is
+        not, so a minted run id, an unreadable runtime overlay, a memory-store fallback or one
+        loop with an empty ``proposals/`` directory made the mandate vanish while the
+        positions remained. On 2026-09-23 that sold the whole sleeve at market fifteen minutes
+        after it bought, 57 seconds before it adopted a valid proposal (−27.56 USDT, 15.01 of
+        it fees). Measured: `crisis-policy.md` §0 puts "sell everything on a trigger" at
+        −5.23% CAGR against +30.53% for holding and not buying.
+
+        So no mandate now means **hold what you have and buy nothing** — entries are already
+        refused for ``SOURCE_NONE`` at :meth:`_sleeve_adjust`. A real flatten still has two
+        routes that both require a decision: a proposal that names the asset at zero, and the
+        operator's own kill switch or console flatten.
         """
-        return self._target_source == SOURCE_NONE or pair in self._named
+        return pair in self._named
 
     def _unwind_exhausted(self, pair: str, ps: PortfolioState) -> bool:
         """Has an orderly wind-down shrunk this position past the point of slicing it?

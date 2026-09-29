@@ -1,0 +1,39 @@
+{
+  "family": {
+    "closed_by": null,
+    "n_selection_trials": 2,
+    "opened_utc": "2026-09-29T14:20:46Z"
+  },
+  "history": [
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:20:46Z",
+      "what": "carry-leverage-onchain re2: H1 funding risk-off overlay grid (5 forms x 3 multipliers = 15 cells) on the BTC/ETH trend ensemble, 2019-09..2026-09, 15 bps"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:20:47Z",
+      "what": "carry-leverage-onchain re2: H3 OI build-up de-risk overlay grid (3 triggers x 3 multipliers = 9 cells), 2020-09..2026-09, 15 bps"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": false,
+      "utc": "2026-09-29T14:20:48Z",
+      "what": "carry-leverage-onchain re2: H2 carry cash-yield quantification on idle capital (1 construction, 2 splits)"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": false,
+      "utc": "2026-09-29T14:20:48Z",
+      "what": "carry-leverage-onchain re2: H4 basis-momentum screen (NW regression + top-tercile overlay)"
+    }
+  ],
+  "n_selection_trials": 2,
+  "n_trials": 4
+}

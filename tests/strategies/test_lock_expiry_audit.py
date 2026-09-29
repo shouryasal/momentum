@@ -18,11 +18,15 @@ AT = datetime(2021, 3, 4, 12, 0, tzinfo=UTC)   # a backtest candle: not "now"
 
 
 class TestTheDailyStopEndsOnItsTimestamp:
+    """The daily stop is a HOLD since 2026-09-29 (``risk.daily_loss_response``): it sells
+    nothing, so neither pending read ever returns anything for it; the timed entry lock IS
+    the action, and this class pins that the lock ends on its timestamp."""
+
     def _tripped(self, gate_cfg, at=AT):
         gate = benign_gate(gate_cfg, MemoryStateStore())
         gate.loop_tick(ps(nav=10000, now=at))
         a = gate.loop_tick(ps(nav=9690, now=at + timedelta(hours=2)))   # -3.1%
-        assert a.flatten and a.flatten_reason == "risk_stop_daily"
+        assert not a.reduce and not a.flatten                           # hold (§0)
         assert a.lock_until == at + timedelta(hours=2 + gate_cfg.daily_lock_hours)
         return gate
 
@@ -30,12 +34,15 @@ class TestTheDailyStopEndsOnItsTimestamp:
         gate = self._tripped(gate_cfg)
         fired = AT + timedelta(hours=2)
         hours = gate_cfg.daily_lock_hours
-        assert gate.flatten_pending(fired + timedelta(hours=hours - 1)) == "risk_stop_daily"
-        assert gate.flatten_pending(fired + timedelta(hours=hours, minutes=1)) is None
+        inside, after = fired + timedelta(hours=hours - 1), fired + timedelta(hours=hours, minutes=1)
+        assert gate.check_entry("BTC/USDT", ENTRY, ps(nav=9690, now=inside)).reason == "daily_lock"
+        assert gate.check_entry("BTC/USDT", ENTRY, ps(nav=9690, now=after)).allowed
+        assert gate.reduce_pending(inside) is None and gate.flatten_pending(inside) is None
 
     def test_it_does_not_survive_into_a_later_month(self, gate_cfg):
         """The daily lock is a timestamp, so unlike the old monthly flag it cannot."""
         gate = self._tripped(gate_cfg)
+        assert gate.reduce_pending(AT + timedelta(days=90)) is None
         assert gate.flatten_pending(AT + timedelta(days=90)) is None
         assert gate.check_entry("BTC/USDT", ENTRY,
                                 ps(nav=9690, now=AT + timedelta(days=90))).allowed
@@ -45,6 +52,7 @@ class TestTheDailyStopEndsOnItsTimestamp:
         gate = self._tripped(gate_cfg)
         later = AT + timedelta(days=5)
         assert gate.store.get("daily_stop_fired_date")     # still on record
+        assert gate.reduce_pending(later) is None
         assert gate.flatten_pending(later) is None
         assert gate.check_entry("BTC/USDT", ENTRY, ps(nav=9690, now=later)).allowed
 
@@ -85,5 +93,6 @@ class TestNoGateFlagIsOpenEnded:
         far = AT + timedelta(days=5 * 365)
         gate.loop_tick(ps(nav=8900, now=far))
         assert gate.flatten_pending(far) is None
+        assert gate.reduce_pending(far) is None
         assert not gate.monthly_locked(far)
         assert gate.check_entry("BTC/USDT", ENTRY, ps(nav=8900, now=far)).allowed

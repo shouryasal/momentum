@@ -487,10 +487,20 @@ def _flags_panel(cfg: Any) -> dict[str, Any]:
 
 
 def _mode_panel() -> dict[str, Any]:
+    from ops.config import load_config
+    from ops.lib import kill as killlib
     from ops.lib import mode_state
 
     state = mode_state.load()
-    kill_engaged = (paths.REPO_ROOT / "ops" / "killdir" / "KILL").exists()
+    # `ops.lib.kill`, never a hand-built path. Home said "the kill switch is off" against
+    # REPO_ROOT while the gate read `cfg.risk.kill_file` under $EARN_STATE_ROOT and refused
+    # every entry — the one control that must never be misreported, misreported on any host
+    # that keeps its state beside the checkout rather than inside it. `ops.lib.kill`'s own
+    # docstring records this same bug being fixed in six other callers; this was the seventh.
+    try:
+        kill_engaged = killlib.is_engaged(load_config(), paths.state_root())
+    except Exception:  # noqa: BLE001 - an unreadable config must not blank the panel
+        kill_engaged = (paths.state_root() / "ops" / "killdir" / "KILL").exists()
     return {
         "verified": state.verified,
         "reason": state.reason,
@@ -677,6 +687,39 @@ def _seed_panel(
     }
 
 
+# ------------------------------------------------------------------ the cumulative pot
+
+
+def _pot_panel(
+    conn: sqlite3.Connection | None,
+    cfg: Any,
+    seed_panel: Mapping[str, Any],
+    *,
+    root: Path | None = None,
+    asset_marks: Mapping[str, float] | None = None,
+) -> dict[str, Any]:
+    """What the money put in is worth, counted across every bot restart.
+
+    ``console.services.pot_service`` does the reading; this wrapper only guarantees that
+    Home still paints when it cannot (a missing ``ft_userdata``, a broken file): the block
+    then carries ``total: None`` and the reason, never a zero.
+    """
+    from console.services import pot_service
+
+    try:
+        return pot_service.panel(cfg, conn, seed_panel, root=root, marks=asset_marks)
+    except Exception as e:  # noqa: BLE001 - the pot is a read; Home must still answer
+        return {
+            "basis": seed_panel.get("basis", "simulated"),
+            "mixed": bool(seed_panel.get("mixed")),
+            "definitions": dict(pot_service.DEFINITIONS),
+            "total": None,
+            "sleeves": [],
+            "error": f"pot reader failed ({type(e).__name__})",
+            "as_of_utc": _iso(datetime.now(UTC)),
+        }
+
+
 # ------------------------------------------------------------------ the demo account
 
 
@@ -812,11 +855,16 @@ def overview(root: Path | None = None) -> dict[str, Any]:
         mode_panel = _mode_panel()
         asset_marks = marks(cfg, root)
         demo_panel = _demo_panel(conn, cfg, mode_panel, root=root, asset_marks=asset_marks)
+        seed_panel = _seed_panel(conn, cfg, mode_panel, demo=demo_panel)
         payload: dict[str, Any] = {
             "ok": True,
             "generated_utc": _iso(datetime.now(UTC)),
             "mode": mode_panel,
-            "seed": _seed_panel(conn, cfg, mode_panel, demo=demo_panel),
+            "seed": seed_panel,
+            # The cumulative pot, read from the bots' own databases. ``nav`` below is the
+            # 15-minute ledger, which restarts from the seed whenever a bot gets a fresh
+            # database (2026-09-23 23:45Z hid -69.77 that way); the page prefers ``pot``.
+            "pot": _pot_panel(conn, cfg, seed_panel, root=root, asset_marks=asset_marks),
             "demo": demo_panel,
             "nav": nav,
             "nav_series": _nav_series(conn),

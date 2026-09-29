@@ -125,6 +125,35 @@ def wallet(cfg: EarnConfig, sleeve: str, *, ledger: dict[str, Any] | None = None
     }
 
 
+# --------------------------------------------------------------------------- the pot
+
+def pot(cfg: EarnConfig, sleeve: str, *, conn: sqlite3.Connection | None,
+        bot_status: list[dict[str, Any]] | None = None,
+        marks: dict[str, float] | None = None,
+        root: Path | None = None) -> dict[str, Any]:
+    """The sleeve's cumulative pot: seed + every closed trade in every run database +
+    open positions marked to market, with the per-run table. See ``pot_service``."""
+    from console.services import pot_service
+
+    return pot_service.sleeve_pot(cfg, sleeve, conn=conn, root=root, bot_status=bot_status,
+                                  marks=marks)
+
+
+def annotate_fills(rows: list[dict[str, Any]], *, sleeve: str,
+                   conn: sqlite3.Connection | None,
+                   root: Path | None = None) -> list[dict[str, Any]]:
+    """Name what each fill was: Freqtrade's enter tag or exit reason (``force_exit``,
+    ``target_zero``, ``trailing_stop_loss`` …), who caused it (``human:console`` for a hand
+    flatten, ``bot`` otherwise) and which run database it lives in."""
+    from console.services import pot_service
+
+    try:
+        events = pot_service.fill_events(sleeve, root=root)
+    except Exception:  # noqa: BLE001 - an unreadable bot DB leaves the rows unannotated
+        events = {}
+    return pot_service.annotate_fills(rows, events, conn, sleeve)
+
+
 # --------------------------------------------------------------------------- journal reads
 
 def orders(conn: sqlite3.Connection | None, *, sleeve: str | None = None,
@@ -139,9 +168,12 @@ def orders(conn: sqlite3.Connection | None, *, sleeve: str | None = None,
 def fills(conn: sqlite3.Connection | None, *, sleeve: str | None = None,
           pair: str | None = None, since: str | None = None,
           limit: int = 200) -> list[dict[str, Any]]:
+    # ``ft_order_id`` is the join to the bot's own ``orders.order_id`` — the one exact
+    # link from a fill to its exit reason and run database (``pot_service.annotate_fills``).
     return _rows(conn,
                  "SELECT id, ts_utc, sleeve, pair, side, fill_amount, fill_price,"
-                 " fee_amount, fee_currency, quote_bid, quote_ask, mode, run_id FROM fills",
+                 " fee_amount, fee_currency, quote_bid, quote_ask, mode, run_id, ft_order_id"
+                 " FROM fills",
                  sleeve=sleeve, pair=pair, since=since, limit=limit)
 
 

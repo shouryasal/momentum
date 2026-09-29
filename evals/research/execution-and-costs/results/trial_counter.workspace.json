@@ -1,0 +1,193 @@
+{
+  "family": {
+    "closed_by": null,
+    "n_selection_trials": 26,
+    "opened_utc": "2026-09-29T14:23:48Z"
+  },
+  "history": [
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:48Z",
+      "what": "2026-09-29-bnb-fee-discount: one-month BNB fee float, 12.5 vs 15 bps on the ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:48Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 0 theta 1.0 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:48Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 1/15 theta 1.0 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:49Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 2/15 theta 1.0 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:49Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 3/15 theta 1.0 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:50Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 4/15 theta 1.0 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:50Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 5/15 theta 1.0 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:51Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 0 theta 0.5 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:51Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 1/15 theta 0.5 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:51Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 2/15 theta 0.5 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:52Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 3/15 theta 0.5 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:52Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 4/15 theta 0.5 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:53Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 5/15 theta 0.5 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:53Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 0 theta 0.25 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:53Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 1/15 theta 0.25 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:54Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 2/15 theta 0.25 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:54Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 3/15 theta 0.25 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:55Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 4/15 theta 0.25 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:55Z",
+      "what": "2026-09-29-ensemble-weight-hysteresis: band 5/15 theta 0.25 on the BTC/ETH ensemble [20170817-20260924]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:56Z",
+      "what": "2026-09-29-min-hold-vs-min-edge: ungated fast-profile replay, 31 pairs 1h [20190101-20260923]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:56Z",
+      "what": "2026-09-29-min-hold-vs-min-edge: minhold_trend k=3 on the fast-profile replay [20190101-20260923]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:57Z",
+      "what": "2026-09-29-min-hold-vs-min-edge: minhold_all k=3 on the fast-profile replay [20190101-20260923]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:57Z",
+      "what": "2026-09-29-min-hold-vs-min-edge: minhold_trend k=5 on the fast-profile replay [20190101-20260923]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:57Z",
+      "what": "2026-09-29-min-hold-vs-min-edge: minhold_all k=5 on the fast-profile replay [20190101-20260923]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:58Z",
+      "what": "2026-09-29-min-hold-vs-min-edge: minhold_trend k=10 on the fast-profile replay [20190101-20260923]"
+    },
+    {
+      "hypothesis": "",
+      "pass": "edge-audit",
+      "selection": true,
+      "utc": "2026-09-29T14:23:58Z",
+      "what": "2026-09-29-min-hold-vs-min-edge: minhold_all k=10 on the fast-profile replay [20190101-20260923]"
+    }
+  ],
+  "n_selection_trials": 26,
+  "n_trials": 26
+}

@@ -287,6 +287,32 @@ class TestHost:
         assert isinstance(body["ok"], bool)
         assert set(body["counts"]) <= {"ok", "warn", "fail"}
 
+    def test_host_endpoint_says_when_the_host_slept(self, ops_client, cfg, state, monkeypatch):
+        """A ``host_suspended`` incident this week surfaces as the ``host_sleep`` warn with
+        the exact sentence ``ops.hostcheck`` alerts with — one wording, two surfaces."""
+        monkeypatch.setattr(host_checks, "run_cmd",
+                            lambda argv, timeout=10.0: (127, "", "not found"))
+        with db.opened(state / cfg.paths.knowledge_db) as conn:
+            conn.execute("INSERT INTO ops_incidents(opened_at, kind, detail) VALUES (?,?,?)",
+                         (datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "host_suspended",
+                          json.dumps({"hours": 64.6})))
+            conn.commit()
+        body = ops_client.get("/api/ops/host").json()
+        sleep = next(c for c in body["checks"] if c["name"] == "host_sleep")
+        assert sleep["status"] == "warn" and not sleep["blocking"]
+        assert sleep["detail"].startswith("this host slept for 64.6 hours in the last 7 days")
+        assert sleep["detail"].endswith("see docs/design/unattended-hosting.md")
+        assert sleep["data"]["slept_hours"] == 64.6
+        # It is a fact for the owner, not a preflight block: `ok` is untouched by it.
+        assert "host_sleep" not in body["blocking_failures"]
+
+    def test_host_endpoint_host_sleep_unknown_without_a_record(self, ops_client, monkeypatch):
+        monkeypatch.setattr(host_checks, "run_cmd",
+                            lambda argv, timeout=10.0: (127, "", "not found"))
+        body = ops_client.get("/api/ops/host").json()
+        sleep = next(c for c in body["checks"] if c["name"] == "host_sleep")
+        assert sleep["status"] == "warn" and sleep["data"]["verdict"] == "unknown"
+
     def test_health_snapshot_reports_freshness_and_incidents(self, ops_client, cfg, state):
         from ops.lib import freshness
 

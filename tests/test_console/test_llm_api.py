@@ -53,7 +53,12 @@ def ollama_client(app):  # noqa: ANN001
         if url.endswith("/api/version"):
             return httpx.Response(200, json={"version": "0.34.1"})
         if url.endswith("/api/tags"):
+            # Two pulled models: the one models.yaml declares as local_small (granite, since
+            # 2026-09-29) and one it does not, so the "declared" flag is tested both ways.
             return httpx.Response(200, json={"models": [
+                {"name": "granite4.2:3b", "size": 2920000000,
+                 "details": {"parameter_size": "3B", "quantization_level": "Q4_K_M",
+                             "family": "granite"}},
                 {"name": "llama3.1:8b", "size": 4661224676,
                  "details": {"parameter_size": "8.0B", "quantization_level": "Q4_K_M",
                              "family": "llama"}}]})
@@ -180,9 +185,11 @@ def test_the_model_list_flags_what_models_yaml_declares(auth_client: TestClient,
                                                         ollama_client, knowledge: Path):
     auth_client.get("/api/llm/ollama/detect")            # seed the cache
     body = auth_client.get("/api/llm/ollama/models").json()
-    assert body["models"][0]["name"] == "llama3.1:8b"
-    assert body["models"][0]["declared_in_models_yaml"] is True
-    assert body["models"][0]["parameter_size"] == "8.0B"
+    by_name = {m["name"]: m for m in body["models"]}
+    assert by_name["granite4.2:3b"]["declared_in_models_yaml"] is True
+    assert by_name["granite4.2:3b"]["parameter_size"] == "3B"
+    assert by_name["llama3.1:8b"]["declared_in_models_yaml"] is False, \
+        "a pulled model nothing routes to must not read as declared"
 
 
 def test_an_unreachable_daemon_is_a_503_with_the_guidance(auth_client: TestClient,
@@ -216,7 +223,7 @@ def test_the_matrix_carries_the_whole_chain_with_provider_and_tier(
     rows = {row["task"]: row for row in auth_client.get("/api/llm/routing").json()["tasks"]}
     chain = rows["brief"]["chain"]
     assert [entry["alias"] for entry in chain] == ["sonnet", "haiku", "local_small"]
-    assert chain[-1]["local"] is True and chain[-1]["id"] == "llama3.1:8b"
+    assert chain[-1]["local"] is True and chain[-1]["id"] == "granite4.2:3b"
     assert rows["brief"]["local_mode"] == "context_pack"
     assert rows["decide"]["escalation"]["alias"] == "fable"
 

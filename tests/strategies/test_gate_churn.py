@@ -195,8 +195,10 @@ def test_check_order_matches_the_spec():
     assert CHECK_ORDER == (
         "nav_valid", "kill", "monthly_lock", "daily_lock", "blackout", "staleness",
         "reconcile", "exit_only", "tier", "trades_per_day", "orders_per_day",
-        "turnover_day", "fee_budget", "min_notional", "step_size", "order_notional",
-        "entries_per_trade", "min_position", "max_positions", "satellite_count",
+        # min_edge (2026-09-29, analogue-timing.md §4.5) sits with the budget checks,
+        # after fee_budget and before order feasibility; never in EXIT_CHECK_ORDER.
+        "turnover_day", "fee_budget", "min_edge", "min_notional", "step_size",
+        "order_notional", "entries_per_trade", "min_position", "max_positions", "satellite_count",
         "satellite_gross", "weight_cap", "beta_cap", "corr_cap", "gross_cap",
         "usdt_floor",
     )

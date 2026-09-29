@@ -1,0 +1,119 @@
+{
+  "audit_problems": [],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "refuted",
+  "closed_utc": "2026-09-29T14:22:38Z",
+  "costs_bps": 15.0,
+  "falsifier": "Over 2020-09-02..2026-09-22 (BTC) / 2021-12-02..2026-09-22 (ETH) at 15 bps per side the primary rule (trigger = OI 24h change >= +8%, multiplier 0.5, per-asset, lagged one day) improves the ensemble book's MaxDD by less than 2.0pp, OR gives up more pp of CAGR than it gains in MaxDD (ratio below 1.0), OR fails to raise Sharpe in at least 2 of the 3 regimes 2020-22 / 2023-24 / 2025-26, OR the purged (7d) expanding walk-forward pick over the (trigger form, multiplier) grid has an OOS Sharpe below the unfiltered ensemble on the same OOS days",
+  "horizon": "3d",
+  "id": "2026-09-29-clo-oi-buildup-derisk",
+  "n_params": 2,
+  "opened_utc": "2026-09-29T14:14:50Z",
+  "outcome": "refuted",
+  "regimes": [
+    "2020-22",
+    "2023-24",
+    "2025-26"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": 0.6917481657531297,
+      "strategy_baseline": 1.1952750600202302
+    },
+    "both_directions": {
+      "BTC": {
+        "asset_ret_on_flagged_days_ann_pct": 125.39,
+        "asset_ret_on_other_days_ann_pct": 47.13,
+        "book_pnl_change_on_flagged_days_pct": -3.998,
+        "book_pnl_change_when_asset_fell_pct": 11.695,
+        "book_pnl_change_when_asset_rose_pct": -15.693,
+        "days_flagged": 77,
+        "n_effective_flagged": 11,
+        "p_7d_dd_lt_-8_flagged": 0.3377,
+        "p_7d_dd_lt_-8_unflagged": 0.2216,
+        "share_flagged": 0.0348,
+        "tail_ratio": 1.523
+      },
+      "ETH": {
+        "asset_ret_on_flagged_days_ann_pct": 191.29,
+        "asset_ret_on_other_days_ann_pct": 56.92,
+        "book_pnl_change_on_flagged_days_pct": -0.228,
+        "book_pnl_change_when_asset_fell_pct": 6.138,
+        "book_pnl_change_when_asset_rose_pct": -6.366,
+        "days_flagged": 56,
+        "n_effective_flagged": 8,
+        "p_7d_dd_lt_-8_flagged": 0.3214,
+        "p_7d_dd_lt_-8_unflagged": 0.3503,
+        "share_flagged": 0.0253,
+        "tail_ratio": 0.917
+      },
+      "book_total_change_pct": -7.48,
+      "days_total": 2211
+    },
+    "costs_bps": 15.0,
+    "edge_audit": {
+      "deflated_hurdle": 2.5186,
+      "deflated_hurdle_family": 1.896,
+      "effective_n": 523.9
+    },
+    "falsifier_triggered": true,
+    "falsifier_value": {
+      "cagr_cost_pp": 1.572,
+      "dd_per_return_ratio": -0.031,
+      "mdd_gain_pp": -0.049,
+      "regimes_sharpe_better": 1,
+      "triggered": true,
+      "wf_oos_sharpe_filtered": 0.5258438134069675,
+      "wf_oos_sharpe_unfiltered": 0.681528782106273
+    },
+    "headline": 0.5258438134069675,
+    "headline_is_in_sample": false,
+    "in_sample_primary": {
+      "cagr": 45.836008830154306,
+      "days": 2211,
+      "fee_drag_per_year": 1.9537652645861603,
+      "gross": 0.48970300015076135,
+      "mdd": -40.39762304886489,
+      "n": 2211,
+      "sharpe": 1.167779956207215,
+      "total": 883.142470731681,
+      "turnover_per_year": 13.025101763907735,
+      "vol": 39.25055280022377
+    },
+    "n_params": 2,
+    "out_of_sample": {
+      "folds": 5,
+      "purge_days": 7,
+      "sharpe": 0.5258438134069675,
+      "unfiltered_sharpe_same_days": 0.681528782106273
+    },
+    "regimes": {
+      "2020-22": {
+        "cagr": 73.7914628139257,
+        "mdd": -40.38649506708262,
+        "n": 850,
+        "sharpe": 1.4869977258868694
+      },
+      "2023-24": {
+        "cagr": 48.6448059363505,
+        "mdd": -28.353393280156393,
+        "n": 731,
+        "sharpe": 1.3519001120521041
+      },
+      "2025-26": {
+        "cagr": 12.587732351067181,
+        "mdd": -25.41220546786487,
+        "n": 630,
+        "sharpe": 0.523793938216685
+      }
+    }
+  },
+  "seal": "868d0af12787f37d5904c74f4e77af47300220e755370d2484494bd16878d26f",
+  "seal_ok": true,
+  "statement": "A 24h open-interest build-up (OI change at or above +8%, the crypto-research s1.3 level) or the price_down_oi_up quadrant on an asset predicts a 3-to-7-day drawdown on that leg, so halving that leg's ensemble weight while the trigger is on reduces the BTC/ETH trend-ensemble book's MaxDD by more than it reduces CAGR, net of 15 bps per side",
+  "status": "closed",
+  "surface": "binance-bulk-archive metrics (sum_open_interest, BTCUSDT 2020-09-01+, ETHUSDT 2021-12-01+) via runs.features.binance_archive on a workspace copy, joined to local 1d spot candles"
+}

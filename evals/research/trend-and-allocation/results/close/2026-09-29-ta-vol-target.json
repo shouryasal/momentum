@@ -1,0 +1,115 @@
+{
+  "costs_bps": 15.0,
+  "headline_is_in_sample": false,
+  "edge_audit": {
+    "effective_n": 577.9,
+    "deflated_hurdle": 2.426,
+    "n_selection_trials": 7910,
+    "years": 7.73,
+    "purged": true,
+    "embargo_bars": 30,
+    "note": "effective_n is BTC 1d triple-barrier (10-bar) from edge-audit labels; hurdle = BTC hold OOS Sharpe + expected_max_sharpe(N, 7.73)"
+  },
+  "baselines": {
+    "btc_buy_and_hold": 0.809,
+    "strategy_baseline": 1.189,
+    "btc_buy_and_hold_cagr": 49.7,
+    "strategy_baseline_cagr": 49.33,
+    "btc_buy_and_hold_mdd": -76.63,
+    "strategy_baseline_mdd": -45.62,
+    "note": "strategy_baseline is the plain BTC/ETH 15-member trend ensemble, OOS window 2019-01-01..2026-09-24, 15 bps/side"
+  },
+  "headline": 1.216,
+  "n_params": 2,
+  "out_of_sample": {
+    "method": "expanding walk-forward, yearly OOS 2019-2026, 30d embargo, selection = max in-sample CAGR s.t. MDD within 2pp of plain",
+    "n": 2824,
+    "cagr": 40.89,
+    "vol": 33.62,
+    "sharpe": 1.216,
+    "mdd": -37.06,
+    "gross": 0.462,
+    "total": 1318.94,
+    "turnover_yr": 14.28,
+    "fee_yr": 2.14,
+    "months_below_m10": 4,
+    "sharpe_meanstd": 1.188,
+    "chosen": [
+      [
+        2019,
+        "t20_cap1"
+      ],
+      [
+        2020,
+        "t60_cap2"
+      ],
+      [
+        2021,
+        "t60_cap2"
+      ],
+      [
+        2022,
+        "t80_cap1"
+      ],
+      [
+        2023,
+        "t80_cap1"
+      ],
+      [
+        2024,
+        "t60_cap2"
+      ],
+      [
+        2025,
+        "t60_cap2"
+      ],
+      [
+        2026,
+        "t60_cap2"
+      ]
+    ],
+    "oos_2020_plus": {
+      "n": 2459,
+      "cagr": 43.94,
+      "vol": 35.67,
+      "sharpe": 1.232,
+      "mdd": -37.06,
+      "gross": 0.51,
+      "total": 1063.13,
+      "turnover_yr": 15.33,
+      "fee_yr": 2.3,
+      "months_below_m10": 4,
+      "sharpe_meanstd": 1.2
+    }
+  },
+  "regimes": {
+    "2019-22": {
+      "n": 1461,
+      "cagr": 48.84,
+      "mdd": -37.04,
+      "sharpe": 1.421
+    },
+    "2023-24": {
+      "n": 731,
+      "cagr": 52.3,
+      "mdd": -32.17,
+      "sharpe": 1.41
+    },
+    "2025-26": {
+      "n": 632,
+      "cagr": 13.41,
+      "mdd": -27.71,
+      "sharpe": 0.498
+    }
+  },
+  "both_directions": {
+    "avoided": "max drawdown -37.06% vs plain -45.62% (+8.56pp); months below -10%: 4 vs 7",
+    "gave_up": "CAGR 40.89% vs plain 49.33% (-8.44pp); fee drag 2.14%/yr vs 1.36%/yr"
+  },
+  "falsifier_triggered": true,
+  "falsifier_value": {
+    "cagr_gain_pp": -8.44,
+    "mdd_diff_pp": 8.56
+  },
+  "surface_note": "every target 20..80 at cap 1 or 2 scores Sharpe 1.22-1.31 vs plain 1.19; CAGR rises monotonically with the target and drawdown deepens with it"
+}

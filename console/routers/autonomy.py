@@ -143,6 +143,10 @@ def overview(_actor: Actor, cfg: Cfg, settings: Settings) -> dict[str, Any]:
 
 @router.get("/liveness", summary="Per job: last run, next fire, lock, and one verdict")
 def liveness(_actor: Actor, cfg: Cfg, settings: Settings) -> dict[str, Any]:
+    """Also carries ``host``: whether the machine was asleep, when, and whether the data has
+    caught up since — verdict ``resumed`` with that sentence as the headline for the first
+    half hour after a resume, so "the host was off" is never shown as "the loop is broken".
+    """
     return autonomy_service.liveness(cfg, root_path=_root(settings))
 
 

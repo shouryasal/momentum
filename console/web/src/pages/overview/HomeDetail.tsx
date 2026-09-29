@@ -19,6 +19,7 @@ import { Link } from 'react-router-dom';
 import { sleeveFullName } from '@/lib/plain';
 
 import type { OverviewPayload } from './api';
+import { money, potSummary, runRows, signedMoney } from './money';
 import { clock, modePhrase, systemStatus } from './story';
 
 /**
@@ -31,7 +32,14 @@ import { clock, modePhrase, systemStatus } from './story';
  */
 export const LEGACY_DETAIL_KINDS = ['status', 'check', 'incident', 'change', 'decision', 'limits'] as const;
 
+/**
+ * The one detail kind Home DOES open from the money cards: the run-by-run table behind
+ * "what it is worth".  A restart is a row here, never a number that quietly vanished.
+ */
+export const POT_DETAIL_KIND = 'pot' as const;
+
 export const HOME_DETAIL_TITLE: Record<string, string> = {
+  pot: 'What the money is worth, run by run',
   status: 'How the system is doing, in detail',
   check: 'An order the safety check turned down',
   incident: 'Something that went wrong',
@@ -41,6 +49,8 @@ export const HOME_DETAIL_TITLE: Record<string, string> = {
 };
 
 export const HOME_DETAIL_SUBTITLE: Record<string, string> = {
+  pot:
+    'Every database a bot has traded from, with what it made and what it paid. The total on Home is the seed plus every row here plus the open positions.',
   status:
     'Everything behind the status line: what is open, what is due to run, what the safety checks did, and what the thinking cost.',
   check:
@@ -88,6 +98,130 @@ function Nothing({ children }: { children: ReactNode }) {
     <Text size="xs" c="dimmed">
       {children}
     </Text>
+  );
+}
+
+/* ------------------------------------------------------------------ the pot, run by run */
+
+/**
+ * The run-by-run table behind "what it is worth now".
+ *
+ * On 2026-09-23 the bots were restarted onto fresh databases and the front page forgot
+ * the 69.77 lost that evening.  This pane exists so that can never happen silently
+ * again: one row per database, its dates, what it made and what it paid, and the three
+ * totals with the sentence that defines each.
+ */
+function PotDetail({ data }: { data: OverviewPayload }) {
+  const summary = potSummary(data);
+  const rows = runRows(data);
+  if (!summary) {
+    return (
+      <Nothing>
+        {data.pot?.error
+          ? `The pot could not be read (${data.pot.error}).`
+          : data.pot?.mixed
+            ? 'The two bots are on different kinds of money, so their pots are not added together.'
+            : 'The server has not sent the pot yet.'}
+      </Nothing>
+    );
+  }
+  return (
+    <Stack gap="md" data-testid="pot-detail">
+      <Group gap="xl" wrap="wrap">
+        <Fact
+          label="Worth now, all runs"
+          value={money(summary.cumulative)}
+          meaning={summary.definitions.cumulative_net_usdt ?? ''}
+        />
+        <Fact
+          label="Since the current run started"
+          value={signedMoney(summary.sinceRun)}
+          meaning={summary.definitions.realised_current_run_usdt ?? ''}
+        />
+        <Fact
+          label="Open positions, marked to market"
+          value={signedMoney(summary.openMark)}
+          meaning={summary.definitions.open_mark_usdt ?? ''}
+        />
+        <Fact
+          label="Before the current run"
+          value={signedMoney(summary.beforeRun)}
+          meaning={`Closed trades in ${summary.restarts === 1 ? 'the one earlier run database' : `${summary.restarts} earlier run databases`}. What the old front page forgot.`}
+        />
+        <Fact label="Fees paid, all runs" value={money(summary.fees)} meaning="Every entry and exit fee, in every run." />
+      </Group>
+
+      {summary.ledger !== null && summary.ledgerGap !== null && Math.abs(summary.ledgerGap) >= 0.005 ? (
+        <Text size="sm" data-testid="pot-detail-ledger">
+          The 15-minute ledger says {money(summary.ledger)}, {signedMoney(summary.ledgerGap)} away from the
+          figure above, because it restarts from the seed whenever a bot gets a fresh database.
+        </Text>
+      ) : null}
+
+      <Section title="Run by run">
+        {rows.length === 0 ? (
+          <Nothing>No bot has a run database yet, so the pot is the seed.</Nothing>
+        ) : (
+          <Table withTableBorder striped data-testid="pot-detail-runs">
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Bot</Table.Th>
+                <Table.Th>Run</Table.Th>
+                <Table.Th>Started (UTC)</Table.Th>
+                <Table.Th>Ended (UTC)</Table.Th>
+                <Table.Th ta="right">Trades</Table.Th>
+                <Table.Th ta="right">Realised</Table.Th>
+                <Table.Th ta="right">Fees</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {rows.map((row) => (
+                <Table.Tr key={row.key} data-testid={`pot-detail-run-${row.key}`}>
+                  <Table.Td>
+                    <Text size="xs">{sleeveFullName(row.sleeve)}</Text>
+                  </Table.Td>
+                  <Table.Td>
+                    <Group gap={6} wrap="nowrap">
+                      <Text size="xs" title={row.run}>
+                        {row.label}
+                        {row.strategy ? ` · ${row.strategy}` : ''}
+                      </Text>
+                      {row.current ? (
+                        <Badge size="xs" color="teal" variant="light">
+                          current
+                        </Badge>
+                      ) : null}
+                    </Group>
+                  </Table.Td>
+                  <Table.Td>
+                    <Text size="xs">{row.started ?? 'no trades yet'}</Text>
+                  </Table.Td>
+                  <Table.Td>
+                    <Text size="xs">{row.ended ?? (row.current ? 'still running' : '—')}</Text>
+                  </Table.Td>
+                  <Table.Td ta="right">
+                    <Text size="xs" ff="monospace">
+                      {row.trades}
+                      {row.open ? ` (+${row.open} open)` : ''}
+                    </Text>
+                  </Table.Td>
+                  <Table.Td ta="right">
+                    <Text size="xs" ff="monospace" c={row.realised >= 0 ? 'teal' : 'red'}>
+                      {signedMoney(row.realised)}
+                    </Text>
+                  </Table.Td>
+                  <Table.Td ta="right">
+                    <Text size="xs" ff="monospace">
+                      {money(row.fees)}
+                    </Text>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        )}
+      </Section>
+    </Stack>
   );
 }
 
@@ -396,6 +530,7 @@ export function HomeDetail({
   /** Lets a row inside the pane open another row, without leaving the screen. */
   open: (kind: string, id: string) => void;
 }) {
+  if (kind === POT_DETAIL_KIND) return <PotDetail data={data} />;
   if (kind === 'status') return <StatusDetail data={data} open={open} />;
   if (kind === 'limits') return <LimitsDetail data={data} />;
   if (kind === 'decision') return <DecisionDetail data={data} />;

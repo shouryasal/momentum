@@ -517,6 +517,59 @@ def _seed_item(kdb, title, h):
     kdb.commit()
 
 
+class TestTheTrendWriterRunsEveryIngestCycle:
+    """The ensemble gate fails CLOSED on a missing/stale trend.json — so the writer must be
+    a recurring phase, not a function with no caller (which is how it was handed over on
+    2026-09-29; deployed alone it would have stopped every BTC/ETH entry on both sleeves)."""
+
+    @staticmethod
+    def _payload(root, weights):
+        assets = {a: {"asset": a, "weight": w, "status": "ok" if w is not None else "warmup",
+                      "asof_open_utc": "2026-09-28T00:00:00Z",
+                      "asof_close_utc": "2026-09-29T00:00:00Z", "close": 1.0, "bars": 300,
+                      "members_on": 15 if w else 0, "members": {}, "detail": ""}
+                  for a, w in weights.items()}
+        return {"version": 1, "assets": assets}
+
+    def test_the_phase_is_in_the_cycle_right_after_candles(self, ing):
+        import inspect
+
+        from runs.ingest import TRADING_PHASES, Ingest
+
+        src = inspect.getsource(Ingest.run)
+        assert src.index('("candles"') < src.index('("trend"') < src.index('("books"')
+        assert "trend" not in TRADING_PHASES, "a dead trend writer must never stop the feeds"
+
+    def test_a_full_weight_set_is_ok_and_names_the_bar(self, ing, monkeypatch):
+        ingest, _, kdb, root = ing
+        from runs.features import trend
+        (root / "knowledge" / "state").mkdir(parents=True, exist_ok=True)
+        target = root / "knowledge" / "state" / "trend.json"
+
+        def fake_write(cfg, kdb_, root_, *, now=None):
+            target.write_text(json.dumps(self._payload(root_, {"BTC": 1.0, "ETH": 0.5})))
+            return target
+        monkeypatch.setattr(trend, "write_state", fake_write)
+        note = ingest.refresh_trend()
+        assert note.status == "ok"
+        assert "BTC=1.00" in note.detail and "ETH=0.50" in note.detail
+        assert "2026-09-29T00:00:00Z" in note.detail
+
+    def test_a_missing_weight_is_degraded_and_names_the_asset(self, ing, monkeypatch):
+        ingest, _, kdb, root = ing
+        from runs.features import trend
+        (root / "knowledge" / "state").mkdir(parents=True, exist_ok=True)
+        target = root / "knowledge" / "state" / "trend.json"
+
+        def fake_write(cfg, kdb_, root_, *, now=None):
+            target.write_text(json.dumps(self._payload(root_, {"BTC": 1.0, "ETH": None})))
+            return target
+        monkeypatch.setattr(trend, "write_state", fake_write)
+        note = ingest.refresh_trend()
+        assert note.status == "degraded"
+        assert "ETH:warmup" in note.detail and "BTC" not in note.detail.split("no weight for")[1]
+
+
 class TestKeywordRulesMatchWordsNotSubstrings:
     """The rule labels were 51% correct on 88 real headlines, and one keyword did it.
 
@@ -559,21 +612,28 @@ class TestKeywordRulesMatchWordsNotSubstrings:
         ingest, _, _ = classify_env
         assert self._event(ingest, title) == expected, title
 
-    def test_settlement_no_longer_matches_settle_and_that_is_a_real_trade_off(
+    def test_settlement_is_a_lawsuit_because_the_config_says_so_not_the_matcher(
             self, classify_env):
-        """Recorded as a decision, not hidden as a pass.
+        """The word-boundary matcher and the keyword list divide the work, on purpose.
 
-        ``settle`` + "ment" is not an inflection, so "reaches settlement with the regulator"
-        — a genuine lawsuit signal — stops matching, while "instant settlement rails" — a
-        payments headline that was a false positive — correctly stops matching too. Substring
-        matching caught both. Recovering the first without the second means adding
-        ``settlement`` to ``config/earn.yaml: news.event_keywords.lawsuit``, which is a
-        blessed tier-2 config change and an operator's call, not this function's.
+        ``settle`` + "ment" is not an inflection, so the matcher alone would NOT label
+        "reaches settlement with the regulator" — a genuine lawsuit signal. On 2026-09-29
+        ``settlement`` was added to ``config/earn.yaml: news.event_keywords.lawsuit`` (a
+        blessed tier-2 change, made deliberately), so the label comes back — and so does the
+        known cost: "instant settlement rails", a payments headline, is a false positive
+        again. That trade-off belongs in the config, where an operator can see and reverse
+        it, not hidden inside a regex. This test pins the division: the matcher stays
+        boundary-strict; the list decides which stems are worth a false positive.
         """
         ingest, _, _ = classify_env
-        assert self._event(ingest, "Firm reaches settlement with regulator") is None
-        assert self._event(ingest, "Instant settlement rails go live") is None
+        assert "settlement" in ingest.event_keywords["lawsuit"], \
+            "config/earn.yaml no longer lists `settlement`; update this test's expectation"
+        assert self._event(ingest, "Firm reaches settlement with regulator") == "lawsuit"
+        assert self._event(ingest, "Instant settlement rails go live") == "lawsuit"  # accepted cost
         assert self._event(ingest, "Firm settles with regulator") == "lawsuit"
+        # the matcher itself still refuses non-inflection suffixes for stems NOT in the list
+        from runs.ingest import Ingest
+        assert not Ingest._kw_hit("firm reaches settlement", ["settle"])
 
 
 def test_classifier_labels_and_corroborate_preserves(classify_env):

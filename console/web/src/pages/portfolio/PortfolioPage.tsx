@@ -29,6 +29,7 @@ import { routeBlurb } from '@/routes';
 import { portfolioApi, type OrderRow, type PortfolioPayload, type Sleeve } from './api';
 import { FillsTable, OrdersTable } from './components/ActivityTables';
 import { PositionsTable } from './components/PositionsTable';
+import { PotCard } from './components/PotCard';
 import { TradingDetail } from './components/TradingDetail';
 import { WalletPanel } from './components/WalletPanel';
 
@@ -183,6 +184,8 @@ export default function PortfolioPage() {
 
         {data ? (
           <Stack>
+            {/* The pot across every restart leads; the ledger of the current run follows. */}
+            <PotCard pot={data.pot} />
             <WalletPanel wallet={data.wallet} />
             <Card withBorder padding="md">
               <Text fw={600}>What it holds right now</Text>

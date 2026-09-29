@@ -1,0 +1,121 @@
+{
+  "audit_problems": [],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "inconclusive",
+  "closed_utc": "2026-09-29T14:26:25Z",
+  "costs_bps": 15.0,
+  "falsifier": "Refuted if the CAGR gain over 2019-01-01..2026-09-24 at a 2.0% APR on idle cash is below 1.0 percentage point, or if the max drawdown changes by more than 0.5 percentage points",
+  "horizon": "1d",
+  "id": "2026-09-29-ta-cash-yield",
+  "n_params": 1,
+  "opened_utc": "2026-09-29T14:17:50Z",
+  "outcome": "inconclusive",
+  "regimes": [
+    "2019-22",
+    "2023-24",
+    "2025-26"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": 0.809,
+      "btc_buy_and_hold_cagr": 49.7,
+      "btc_buy_and_hold_mdd": -76.63,
+      "note": "strategy_baseline is the plain BTC/ETH 15-member trend ensemble, OOS window 2019-01-01..2026-09-24, 15 bps/side",
+      "strategy_baseline": 1.189,
+      "strategy_baseline_cagr": 49.33,
+      "strategy_baseline_mdd": -45.62
+    },
+    "both_directions": {
+      "avoided": "max drawdown -45.04% vs -45.62% (+0.58pp, shallower)",
+      "gave_up": "nothing on the return side; operationally: the cash sits in Simple Earn instead of the spot wallet and must be redeemed before an order (instant for Flexible, inside the daily quick-redeem quota), the Real-Time APR is variable minute to minute and was 1.5-2% in 2026, the 4-6% headline tiers cover only the first 200 USDT, and availability is per region"
+    },
+    "costs_bps": 15.0,
+    "edge_audit": {
+      "deflated_hurdle": 2.426,
+      "effective_n": 577.9,
+      "embargo_bars": 30,
+      "n_selection_trials": 7910,
+      "note": "effective_n is BTC 1d triple-barrier (10-bar) from edge-audit labels; hurdle = BTC hold OOS Sharpe + expected_max_sharpe(N, 7.73)",
+      "purged": true,
+      "years": 7.73
+    },
+    "falsifier_note": "the drawdown clause was written symmetric ('changes by more than 0.5pp') and fired on a 0.58pp IMPROVEMENT; the CAGR clause did not fire. The seal forbids rewriting it, so the letter of the pre-registration decides",
+    "falsifier_triggered": true,
+    "falsifier_value": {
+      "cagr_gain_pp_at_1p5pct": 1.12,
+      "cagr_gain_pp_at_2pct": 1.5,
+      "mdd_diff_pp": 0.58
+    },
+    "headline": 1.225,
+    "headline_is_in_sample": false,
+    "n_params": 1,
+    "out_of_sample": {
+      "apr_0.015": {
+        "cagr": 50.45,
+        "fee_yr": 1.36,
+        "gross": 0.501,
+        "mdd": -45.18,
+        "months_below_m10": 7,
+        "n": 2824,
+        "sharpe": 1.216,
+        "sharpe_meanstd": 1.193,
+        "total": 2257.89,
+        "turnover_yr": 9.04,
+        "vol": 41.5
+      },
+      "apr_0.040": {
+        "cagr": 52.34,
+        "fee_yr": 1.36,
+        "gross": 0.501,
+        "mdd": -44.45,
+        "months_below_m10": 7,
+        "n": 2824,
+        "sharpe": 1.261,
+        "sharpe_meanstd": 1.223,
+        "total": 2496.85,
+        "turnover_yr": 9.04,
+        "vol": 41.5
+      },
+      "cagr": 50.83,
+      "fee_yr": 1.36,
+      "gross": 0.501,
+      "mdd": -45.04,
+      "method": "nothing fitted; the APR is a verified quoted rate, not a parameter searched; whole 2019-2026 window",
+      "months_below_m10": 7,
+      "n": 2824,
+      "sharpe": 1.225,
+      "sharpe_meanstd": 1.199,
+      "total": 2303.86,
+      "turnover_yr": 9.04,
+      "vol": 41.5
+    },
+    "regimes": {
+      "2019-22": {
+        "cagr": 69.07,
+        "mdd": -45.04,
+        "n": 1461,
+        "sharpe": 1.408
+      },
+      "2023-24": {
+        "cagr": 54.81,
+        "mdd": -27.84,
+        "n": 731,
+        "sharpe": 1.501
+      },
+      "2025-26": {
+        "cagr": 12.39,
+        "mdd": -24.86,
+        "n": 632,
+        "sharpe": 0.512
+      }
+    }
+  },
+  "seal": "7bc8b9970f18b8b3ec2996e4fda65d758f666f13a33b33426b448e47936235af",
+  "seal_ok": true,
+  "statement": "Placing the ensemble book's idle USDT in Binance Simple Earn USDT Flexible at the standard Real-Time APR (verified 2026: about 1.5-2% above the 200 USDT bonus tier, instant redemption) predicts a higher CAGR at unchanged max drawdown at a 1d horizon",
+  "status": "closed",
+  "surface": "local-candles (panel_1d.parquet) + Binance Simple Earn announcement terms (read 2026-09-29)"
+}

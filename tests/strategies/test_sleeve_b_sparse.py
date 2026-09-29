@@ -47,12 +47,31 @@ class TestANamedZeroIsADecision:
         s = _sleeve(monkeypatch, tmp_path, {BTC: 0.0}, named=[BTC])
         assert s._custom_exit_extra(BTC, FakeTrade()) == "target_zero"
 
-    def test_no_mandate_at_all_also_exits_immediately(self, monkeypatch, tmp_path):
-        # SOURCE_NONE means nothing authorises holding anything; that is a flatten, and
-        # the sparse rule must not soften it.
+    def test_no_mandate_at_all_HOLDS_it_does_not_flatten(self, monkeypatch, tmp_path):
+        """The absence of a decision is not a decision to sell.
+
+        ``SOURCE_NONE`` used to mean "flatten". It is reached by plumbing, not judgement:
+        the gate store is namespaced ``run:<run_id>:`` while freqtrade's trades table is
+        not, so a minted run id, an unreadable runtime overlay or one loop with an empty
+        ``proposals/`` directory made the mandate vanish while the positions stayed. On
+        2026-09-23 that sold the whole sleeve at market fifteen minutes after buying it and
+        57 seconds before it adopted a valid proposal (−27.56 USDT, 15.01 of it fees), and
+        `crisis-policy.md` §0 measures exactly that reflex at −5.23% CAGR against +30.53%
+        for holding and not buying. Entries are already refused under ``SOURCE_NONE``
+        (``_desired_stake``), so "hold and buy nothing" is the whole behaviour.
+        """
         s = _sleeve(monkeypatch, tmp_path, {BTC: 0.0}, named=[])
         s._target_source = sleeve_b.SOURCE_NONE
-        assert s._custom_exit_extra(BTC, FakeTrade()) == "target_zero"
+        assert s._custom_exit_extra(BTC, FakeTrade()) is None
+
+    def test_losing_the_mandate_mid_session_does_not_sell_what_it_named_before(
+            self, monkeypatch, tmp_path):
+        """The 09-23 shape exactly: a proposal named BTC, then the mandate vanished."""
+        s = _sleeve(monkeypatch, tmp_path, {BTC: 0.30}, named=[BTC])
+        s._no_targets("no_proposal_ever")
+        assert s._target_source == sleeve_b.SOURCE_NONE
+        assert s._custom_exit_extra(BTC, FakeTrade()) is None, "a lost mandate sold the book"
+        assert s._desired_stake(BTC, _ps(monkeypatch, s)[0], 0.0, "proposal") == 0.0
 
 
 class TestAnAbsentAssetIsWoundDown:

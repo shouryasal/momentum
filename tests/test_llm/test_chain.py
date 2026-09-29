@@ -284,6 +284,25 @@ class TestCircuitBreakers:
                                providers={"claude:subscription": p})
         assert health_mod.read_state(jdb, "claude:subscription").state == "closed"
 
+    @pytest.mark.parametrize("text", [
+        "Claude Code returned an error result: Reached maximum budget ($0.05) (exit code: 1)",
+        "Claude Code returned an error result: Reached maximum number of turns (2) (exit code: 1)",
+    ])
+    def test_the_cli_wording_for_our_own_caps_is_read_as_ours(self, text):
+        """The classifier must recognise a cap WE set, in the words the CLI actually uses.
+
+        `budget_exhausted` sits outside PROVIDER_FAILURES on purpose, but the SDK reports a
+        cap as a plain error result whose text matched no rule, so it fell through to
+        `error` — a provider failure. Three of them inside fifteen minutes opened the
+        credential-wide breaker and took `validate` and `decide` down with the cheap task
+        that caused it (measured 2026-09-24/25, scan at a $0.05 cap).
+        """
+        from runs.llm.base import classify_text
+        from runs.llm.types import PROVIDER_FAILURES
+
+        assert classify_text(text) == "budget_exhausted"
+        assert "budget_exhausted" not in PROVIDER_FAILURES
+
     @pytest.mark.parametrize("failure", ["error", "timeout", "rate_limited",
                                          "auth_error", "quota_exhausted", "provider_down"])
     def test_a_transport_or_credential_failure_still_opens_it(self, mc, jdb, failure):

@@ -384,8 +384,30 @@ class ProvidersResponse(_Dto):
     month: MonthTotals
 
 
+# --------------------------------------------------------------------------- profit & gaps
+
+
+class ProfitGapsResponse(_Dto):
+    """``GET /profit-gaps`` — the profit & gap ledger (``runs.profit_gaps.Report``)."""
+
+    generated_utc: str = Field(description="When the ledger was computed, UTC.")
+    profile: str | None = Field(
+        default=None,
+        description="The active profile the expectation is declared for; null is shipped.",
+    )
+    windows: dict[str, Any] = Field(
+        description="'last_24h' and 'since_start', each a runs.profit_gaps.Ledger: window, "
+                    "expected (A), realised (B), gaps[] (C), top_three[] (D), errors[]."
+    )
+    cached: bool = Field(default=False, description="True when this is the five-minute copy.")
+    error: str | None = Field(
+        default=None, description="Set when the ledger itself could not be computed."
+    )
+
+
 #: Everything the leak scan walks. Add a response DTO here when you add one.
 RESPONSE_MODELS: tuple[type[BaseModel], ...] = (
+    ProfitGapsResponse,
     ErrorDetail,
     ErrorResponse,
     Ok,
@@ -490,6 +512,7 @@ __all__ = [
     "MetaResponse",
     "MonthTotals",
     "Ok",
+    "ProfitGapsResponse",
     "ProviderCard",
     "ProvidersResponse",
     "RateLimitState",

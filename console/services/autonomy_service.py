@@ -124,8 +124,17 @@ def liveness(cfg: EarnConfig, *, root_path: Path | None = None,
     its age and its exit, per-source and per-phase ingest freshness, and whether anything
     will restart the console when it dies. The console reads them; it computes none of them,
     so the watchdog's alert and the red state on Home are one measurement, not two.
+
+    ``host`` is the 2026-09-25 sequel: the laptop slept for 64 hours and the first tick after
+    it woke said "the loop is not running". The block carries the watchdog's suspend record
+    and one sentence — ``Host was asleep from 2026-09-25 16:15 to 2026-09-29 08:50 (Dubai);
+    data caught up at 09:00; trading possible again since 09:00`` — and for the first
+    :data:`ops.autonomy.RESUME_SETTLE_MIN` minutes after a resume that sentence *is* the
+    headline (verdict ``resumed``). Home prints ``headline`` verbatim, so the words a person
+    reads are the words the watchdog decided on; nothing is rephrased here.
     """
     view = autonomy.liveness(cfg, root=root(root_path), runner=runner)
+    view.setdefault("host", {"asleep_recently": False, "settling": False, "words": None})
     modes = mode_state.load()
     view["modes"] = {
         b: {"state": modes.state_of(b), "verified": modes.verified,

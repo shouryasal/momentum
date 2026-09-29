@@ -1,0 +1,98 @@
+{
+  "sections": {
+    "cv": {
+      "effective_n": 577.9,
+      "effective_n_per_fold": 115.6,
+      "embargo_pct": 0.01,
+      "folds": [
+        {
+          "embargoed": 33,
+          "fold": 0,
+          "leaks": 0,
+          "purged": 2,
+          "test": 655,
+          "train": 2583
+        },
+        {
+          "embargoed": 33,
+          "fold": 1,
+          "leaks": 0,
+          "purged": 10,
+          "test": 655,
+          "train": 2575
+        },
+        {
+          "embargoed": 33,
+          "fold": 2,
+          "leaks": 0,
+          "purged": 11,
+          "test": 655,
+          "train": 2574
+        },
+        {
+          "embargoed": 33,
+          "fold": 3,
+          "leaks": 0,
+          "purged": 15,
+          "test": 654,
+          "train": 2571
+        },
+        {
+          "embargoed": 0,
+          "fold": 4,
+          "leaks": 0,
+          "purged": 10,
+          "test": 654,
+          "train": 2609
+        }
+      ],
+      "pair": "BTC/USDT",
+      "splits": 5,
+      "timeframe": "1d",
+      "total_leaks": 0,
+      "verdict": "purged"
+    },
+    "hurdle": {
+      "baseline_sharpe": 0.58,
+      "deflated_hurdle": 2.0695,
+      "expected_max_sharpe": 1.4895,
+      "n_measurements_all_time": 7910,
+      "n_selection_trials_all_time": 7910,
+      "n_trials": 7910,
+      "note": "a candidate must beat the deflated hurdle, not the baseline. N is the OPEN selection family \u2014 the trials that could actually have produced a change, spent since the last merged change of the loop's own. No total in the counter ever decreases, and a family closes only behind a change the gate recomputed and merged",
+      "years": 9.11
+    },
+    "labels": {
+      "bars": 3324,
+      "effective_n": 582.3,
+      "first_bar": "2017-08-17T00:00:00Z",
+      "label_mix": {
+        "-1": 1607,
+        "0": 600,
+        "1": 1066
+      },
+      "last_bar": "2026-09-22T00:00:00Z",
+      "max_concurrency": 11,
+      "mean_span_bars": 6.19,
+      "mean_uniqueness": 0.1779,
+      "pair": "ETH/USDT",
+      "params": {
+        "max_bars": 10,
+        "pt_mult": 2.0,
+        "sl_mult": 1.0
+      },
+      "rows": 3273,
+      "rows_per_effective_sample": 5.62,
+      "timeframe": "1d"
+    },
+    "power": {
+      "note": "live testing proves the plumbing, not the edge; quote this beside any claim that a good quarter validated a change",
+      "power": 0.8,
+      "sharpe_a": 1.22,
+      "sharpe_b": 0.81,
+      "years_to_detect_one_sided": 113.0,
+      "years_to_detect_two_sided": 143.4
+    }
+  },
+  "updated_utc": "2026-09-29T14:26:10Z"
+}

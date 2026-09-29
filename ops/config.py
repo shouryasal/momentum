@@ -475,6 +475,40 @@ class UniverseTiers(_Model):
     )
 
 
+class SatelliteEligibility(_Model):
+    """growth-audit.md section 1.5 — the exclusion filter, as SATELLITE ELIGIBILITY.
+
+    Membership (which names the weekly resolver puts in the satellite tier) is
+    ``universe.tiers.satellite`` and is unchanged, so the committed snapshot stays the
+    artefact it was resolved as. Eligibility is stricter: a satellite in the snapshot that
+    fails any leg here is rendered ``exit_only`` by ``ops.gen_freqtrade_config`` — the gate
+    refuses every entry for it and a held position is wound down, never orphaned. Built
+    only from features that held sign in all three regimes, all known at T; a plateau across
+    an 80-cell grid (100% of cells beat the all-eligible baseline on median forward 90d
+    return AND on P(90d drawdown < -40%): 41.2% failing vs 18.3% passing). A leg set to
+    null is off.
+    """
+
+    max_ann_vol: float | None = F(
+        1.00,
+        desc="Annualised 60d realised-volatility ceiling (the snapshot's ann_vol_short). "
+             "vol60 <= 1.00 measured; null = off.",
+        group="universe", unit="fraction", protected=True, gt=0,
+    )
+    min_listing_age_days: int | None = F(
+        1095,
+        desc="Binance listing-age floor. 3 years measured — the entire defence against a "
+             "LUNA-shaped name; null = off.",
+        group="universe", unit="days", protected=True, ge=0,
+    )
+    min_median_quote_volume_usdt: float | None = F(
+        10_000_000.0,
+        desc="Median 90d quote-volume floor for an ENTERABLE satellite; the tier floor in "
+             "universe.tiers.satellite stays the membership floor. $10M measured; null = off.",
+        group="universe", unit="usdt", protected=True, ge=0,
+    )
+
+
 class UniverseScore(_Model):
     """The satellite candidate score. Deliberately not momentum: the rank IC of 90d
     trailing against 90d forward return is -0.067 at t = -7.4 over 345 weekly
@@ -594,6 +628,12 @@ class Universe(_Model):
     )
     tiers: UniverseTiers = F(
         default_factory=UniverseTiers, desc="Tier membership and the cap each tier carries.",
+        group="universe", protected=True,
+    )
+    satellite_eligibility: SatelliteEligibility = F(
+        default_factory=SatelliteEligibility,
+        desc="growth-audit.md section 1.5: which satellites in the snapshot may be ENTERED. "
+             "A failing satellite is rendered exit_only.",
         group="universe", protected=True,
     )
     score: UniverseScore = F(
@@ -909,6 +949,54 @@ class TierCaps(_Model):
     )
 
 
+class MinEdge(_Model):
+    """A trade must be able to pay for itself before it is allowed to exist.
+
+    analogue-timing.md section 4.4-4.5: the cost floor is a horizon floor — the round
+    trip is ~0.30% and a booked target that clears it by less than a small multiple hands
+    most of the gain to the venue. The gate reads the SMALLEST target the mechanics will
+    book at (the lowest take-profit rung and the lowest ROI level) and refuses every entry
+    for a sleeve whose plan cannot clear ``multiple x round_trip_cost_pct``. A sleeve with
+    no target at all (the shipped ``roi_table {"0": 10.0}`` and an empty ladder) passes:
+    there is no rung to fail. ``multiple: 0`` switches the check off.
+    """
+
+    round_trip_cost_pct: float = F(
+        0.0030,
+        desc="Assumed round-trip cost as a fraction: 15 bps per side (10 fee + 5 slippage, "
+             "config/backtest.yaml), the measured floor every study in docs/design costs at.",
+        group="risk.mechanics", unit="fraction", protected=True, ge=0, lt=0.05,
+    )
+    multiple: float = F(
+        3.0,
+        desc="How many round trips the smallest booked profit target must clear. 3 = a "
+             "0.90% first rung against a 0.30% round trip (analogue-timing.md 4.5 dual "
+             "form, k=3). 0 disables the check.",
+        group="risk.mechanics", protected=True, ge=0, le=50,
+    )
+
+
+class Crisis(_Model):
+    """crisis-policy.md Tier 1 — STOP BUYING, for a bounded window, and nothing else.
+
+    A deterministic crisis flag (``market_shock`` or a human's) is written through
+    ``ops.lib.flags`` with severity ``block_entries``, scope ALL and ``expires_at`` this
+    many hours ahead. The gate's ``blackout`` check refuses entries while it is live; the
+    expiry releases it without anyone clearing it. It is structurally unable to cause an
+    exit or to stop one: ``RiskGate.check_exit`` is unconditional, ``flatten_pending``
+    never reads the flags file, and no flag severity carries a sell. Measured: entering
+    inside a 48h flag window buys 14-30% more variance for the same or lower expected
+    return, and the block costs zero in fees (crisis-policy.md section 2, Tier 1).
+    """
+
+    block_entries_hours: int = F(
+        48,
+        desc="Bounded expiry, in hours, of a crisis block_entries flag. 48h is the window "
+             "crisis-policy.md measured (10.4% of hours in-flag).",
+        group="risk.guards", unit="hours", protected=True, ge=1, le=168,
+    )
+
+
 class Risk(_Model):
     max_weight: dict[str, float] = F(
         ..., desc="Explicit per-asset weight cap as a fraction of sleeve NAV. No 'default'.",
@@ -927,8 +1015,20 @@ class Risk(_Model):
         unit="fraction", protected=True, ge=0, lt=1,
     )
     daily_loss_stop: float = F(
-        ..., desc="Daily loss that flattens the sleeve and locks entries.", group="risk.stops",
-        unit="fraction", protected=True, gt=0, lt=1,
+        ..., desc="Daily loss (from the Gulf-day NAV anchor) that fires the daily stop: "
+                  "daily_loss_response decides what the stop does to the book, and entries "
+                  "are locked for daily_stop_lock_hours either way.",
+        group="risk.stops", unit="fraction", protected=True, gt=0, lt=1,
+    )
+    daily_loss_response: Literal["hold", "halve", "flatten"] = F(
+        "hold",
+        desc="What the daily stop does to open positions. 'hold' sells nothing and locks "
+             "entries for daily_stop_lock_hours; 'halve' trims every position by half and "
+             "locks; 'flatten' sells everything and locks. Measured 2019-01 -> 2026-09, "
+             "costs on, at the same -3% trigger (docs/design/crisis-policy.md section 0): "
+             "hold-and-stop-buying +30.53% CAGR, halve +13.05%, flatten -5.23%. Selling "
+             "into the trigger is what does the damage, and the less of it the better.",
+        group="risk.stops", protected=True,
     )
     daily_stop_lock_hours: int = F(
         ..., desc="How long entries stay locked after the daily stop.", group="risk.stops",
@@ -983,12 +1083,17 @@ class Risk(_Model):
         group="risk.exposure", protected=True, ge=1,
     )
     max_satellite_positions: int = F(
-        4, desc="Concurrent satellite-tier positions per sleeve.", group="risk.exposure",
-        protected=True, ge=0,
+        2, desc="Concurrent satellite-tier positions per sleeve. Two, not four: satellite "
+                "count is monotonically harmful past ~4 and the dip study found no "
+                "satellite book that earned its place (docs/design/dip-strategy.md "
+                "section 8.1 item 2), so the sleeve is kept at the floor for observation.",
+        group="risk.exposure", protected=True, ge=0,
     )
     max_satellite_gross: float = F(
-        0.10, desc="Whole satellite sleeve as a fraction of NAV.", group="risk.exposure",
-        unit="fraction", protected=True, ge=0, le=1,
+        0.05, desc="Whole satellite sleeve as a fraction of NAV. One full-cap satellite or "
+                   "two at the min_position_pct_nav floor (dip-strategy.md section 8.1 "
+                   "item 2: satellites to the floor, core carries the book).",
+        group="risk.exposure", unit="fraction", protected=True, ge=0, le=1,
     )
     max_beta_to_btc: float = F(
         1.30, desc="Portfolio 60d realised beta to BTC the gate will let an entry create.",
@@ -1021,6 +1126,19 @@ class Risk(_Model):
     reconcile: Reconcile = F(
         default_factory=Reconcile, desc="Ledger-vs-exchange reconciliation policy.",
         group="risk.reconcile", protected=True,
+    )
+    min_edge: MinEdge = F(
+        default_factory=MinEdge,
+        desc="The minimum-edge gate: an entry whose smallest booked profit target does not "
+             "clear the round-trip cost by the configured multiple is refused "
+             "(docs/design/analogue-timing.md section 4).",
+        group="risk.mechanics", protected=True,
+    )
+    crisis: Crisis = F(
+        default_factory=Crisis,
+        desc="The crisis response the evidence supports: stop buying for a bounded window "
+             "(docs/design/crisis-policy.md Tier 1). It can never sell.",
+        group="risk.guards", protected=True,
     )
 
 
@@ -2707,10 +2825,59 @@ def _validate_trading(cfg: EarnConfig) -> None:
             raise ConfigError(
                 f"{where}.order_types.entry is 'market' but risk.market_entries_allowed is false"
             )
+        _validate_min_edge(cfg, sleeve)
     pb = cfg.trading.plan_bounds
     for name, mm in (("stop_pct", pb.stop_pct), ("take_profit_pct", pb.take_profit_pct)):
         if mm.min > mm.max:
             raise ConfigError(f"trading.plan_bounds.{name}: min must be <= max")
+
+
+def min_booked_target(take_profit: Any) -> float | None:
+    """The smallest profit the take-profit mechanics will book at, or None if never.
+
+    The lowest ladder rung and the lowest ROI level, whichever is smaller — that is the
+    exit the plan is most likely to take, and the one a cost floor has to be measured
+    against. ``None`` when the plan books nothing (an empty ladder and ROI ``10.0``
+    means "never", so 10.0 is still a target; it just clears any floor). Shared with the
+    gate's own stdlib mirror in ``strategies/riskgate.py``; the two must agree.
+    """
+    targets: list[float] = []
+    ladder = getattr(take_profit, "ladder", None)
+    if ladder is None and isinstance(take_profit, Mapping):
+        ladder = take_profit.get("ladder")
+    for rung in ladder or []:
+        at = getattr(rung, "at_profit_pct", None)
+        if at is None and isinstance(rung, Mapping):
+            at = rung.get("at_profit_pct")
+        if at is not None:
+            targets.append(float(at))
+    roi = getattr(take_profit, "roi_table", None)
+    if roi is None and isinstance(take_profit, Mapping):
+        roi = take_profit.get("roi_table")
+    for value in (roi or {}).values():
+        targets.append(float(value))
+    return min(targets) if targets else None
+
+
+def _validate_min_edge(cfg: EarnConfig, sleeve: str) -> None:
+    """Refuse at LOAD time a plan the gate would refuse on every entry.
+
+    The gate's ``min_edge`` check is the authority (a research patch reaches
+    ``riskgate.json`` without passing through here), but a bot that is refused on every
+    candle is a silent bot, and a load-time error is the loud version of the same rule.
+    """
+    edge = cfg.risk.min_edge
+    floor = edge.multiple * edge.round_trip_cost_pct
+    if floor <= 0:
+        return
+    target = min_booked_target(trading_for(cfg, sleeve).take_profit)
+    if target is not None and target + 1e-12 < floor:
+        raise ConfigError(
+            f"trading.sleeves.{sleeve}.take_profit books at {target:.4%}, which does not "
+            f"clear risk.min_edge ({edge.multiple:g} x {edge.round_trip_cost_pct:.4%} = "
+            f"{floor:.4%}): every entry would be refused by the gate's min_edge check. "
+            f"Raise the lowest rung/ROI level or lower risk.min_edge.multiple."
+        )
 
 
 def _validate_deadlines(cfg: EarnConfig) -> None:

@@ -66,6 +66,87 @@ export interface FillRow {
   quote_ask: number | null;
   mode: string | null;
   run_id: string | null;
+  /** The bot's own order id — the exact link to its exit reason and run database. */
+  ft_order_id?: string | null;
+  /**
+   * What the bot's database says this fill was: the enter tag on a buy (`dca`,
+   * `proposal`, `fast_breakout`) or the exit reason on a sell (`force_exit`,
+   * `target_zero`, `trailing_stop_loss`, `partial_exit`, `exit_signal`, `roi`).
+   * `null` when no bot database knows the order.
+   */
+  reason?: string | null;
+  /** `human:console` for a hand flatten, `bot` for the strategy, `unknown` when a
+   *  `force_exit` has no audit row behind it, `null` when the fill is unmatched. */
+  actor?: string | null;
+  /** `flatten` for a hand flatten; the `targets:*` refusal behind a `target_zero`. */
+  cause?: string | null;
+  /** The run database the order lives in (`tradesv3`, `test-a-000`). */
+  run?: string | null;
+}
+
+/** One run database: a boundary the pot counts across. */
+export interface PotRun {
+  run: string;
+  db: string;
+  strategy: string | null;
+  started_utc: string | null;
+  ended_utc: string | null;
+  /** The database the bot is running on now. */
+  current: boolean;
+  closed_trades: number;
+  open_trades: number;
+  /** Closed trades, net of fees. */
+  realised_usdt: number;
+  fees_usdt: number;
+  /** `realised + fees` — before fees. */
+  gross_usdt: number;
+  error: string | null;
+}
+
+export interface PotOpenTrade {
+  trade_id: number;
+  pair: string;
+  amount: number;
+  open_rate: number;
+  stake_usdt: number;
+  opened_utc: string | null;
+  mark: number | null;
+  /** `bot` | `candle` | `daily:<source>` | `unpriced`. */
+  mark_source: string;
+  unrealised_usdt: number | null;
+}
+
+/**
+ * One bot's cumulative pot (`console/services/pot_service.py`).
+ *
+ * Three numbers, three definitions: `cumulative_net_usdt` is what the seed is worth now
+ * counted across every restart; `realised_current_run_usdt` is closed trades since the bot
+ * started on its current database (the number that resets); `open_mark_usdt` is the open
+ * book marked to market. `ledger_nav_usdt` is the old 15-minute ledger beside it, and
+ * `ledger_gap_usdt` the distance between the two.
+ */
+export interface SleevePot {
+  sleeve: string;
+  seed_usdt: number | null;
+  seed_source: string;
+  cumulative_net_usdt: number | null;
+  gain_usdt: number | null;
+  realised_all_runs_usdt: number;
+  realised_current_run_usdt: number;
+  realised_earlier_runs_usdt: number;
+  open_mark_usdt: number;
+  open_value_usdt: number;
+  fees_usdt: number;
+  gross_usdt: number;
+  fully_priced: boolean;
+  unpriced: string[];
+  runs: PotRun[];
+  restarts: number;
+  current_run: string | null;
+  open: PotOpenTrade[];
+  ledger_nav_usdt: number | null;
+  ledger_as_of_utc: string | null;
+  ledger_gap_usdt: number | null;
 }
 
 export interface NavPoint {
@@ -98,6 +179,8 @@ export interface PortfolioPayload {
   orders: OrderRow[];
   fills: FillRow[];
   wallet: Wallet;
+  /** The cumulative pot; absent from a server that has not been restarted yet. */
+  pot?: SleevePot | null;
 }
 
 export function portfolioApi(client: ApiClient) {

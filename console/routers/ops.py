@@ -156,14 +156,20 @@ def get_systemd(actor: Actor, cfg: Cfg, settings: Settings) -> dict[str, Any]:
 
 
 @router.get("/host")
-def get_host(actor: Actor, cfg: Cfg, settings: Settings) -> dict[str, Any]:
-    """ext4, sleep policy, keep-alive task, timezone, docker, systemd, NTP, disk.
+def get_host(actor: Actor, cfg: Cfg, kdb: Kdb, settings: Settings) -> dict[str, Any]:
+    """ext4, sleep policy, keep-alive task, timezone, docker, systemd, NTP, disk — and
+    whether the host actually slept this week (``host_sleep``, from ``ops.hostcheck``).
 
     The live preflight consumes the same list; a ``blocking`` failure here is a blocking
     failure there.
     """
     checks = host_checks.collect(cfg, root=Path(settings.repo_root),
                                  state_root=Path(settings.state_root))
+    try:
+        checks.append(host_checks.check_host_sleep(kdb))
+    except Exception as e:  # noqa: BLE001 — a measurement failure is a fact, not a 500
+        checks.append(host_checks.HostCheck("host_sleep", host_checks.WARN,
+                                            f"could not measure host sleep: {e}"))
     return host_checks.summary(checks)
 
 

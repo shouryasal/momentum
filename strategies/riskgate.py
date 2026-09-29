@@ -27,6 +27,18 @@ The daily stop expires on its own ``locked_until`` timestamp (``daily_stop_lock_
 from the moment it fired), the re-entry cooldown on ``reentry_cooldown_hours``, and the
 freqtrade protections on candle counts — every lock in this file is bounded by the
 condition that set it.
+
+The daily stop's RESPONSE is ``risk.daily_loss_response`` (docs/design/crisis-policy.md
+§0; docs/design/risk-and-ladder-2026-09-29.md). ``halve`` — the shipped value — asks the
+adapter for one 50% trim of every open position (``LoopActions.reduce``,
+``RiskGate.reduce_pending``) and locks entries; ``flatten`` is the legacy shape
+(``LoopActions.flatten``, ``flatten_pending``). Measured at the identical -3% trigger over
+2019-2026 with costs on: flatten -5.23% CAGR, halve +13.05%. The monthly stop still
+flattens; only the daily response was measured and only it moves.
+
+``min_edge`` (``risk.min_edge``; analogue-timing.md §4.4-4.5) is a plan-shape check: the
+smallest profit a sleeve's take-profit mechanics will book at must clear the round trip by
+the configured multiple, or every entry of that plan is refused. It is never an exit check.
 """
 
 from __future__ import annotations
@@ -50,10 +62,21 @@ _EPS = 1e-9
 CHECK_ORDER = (
     "nav_valid", "kill", "monthly_lock", "daily_lock", "blackout", "staleness",
     "reconcile", "exit_only", "tier", "trades_per_day", "orders_per_day", "turnover_day",
-    "fee_budget", "min_notional", "step_size", "order_notional", "entries_per_trade",
-    "min_position", "max_positions", "satellite_count", "satellite_gross", "weight_cap",
-    "beta_cap", "corr_cap", "gross_cap", "usdt_floor",
+    "fee_budget", "min_edge", "min_notional", "step_size", "order_notional",
+    "entries_per_trade", "min_position", "max_positions", "satellite_count",
+    "satellite_gross", "weight_cap", "beta_cap", "corr_cap", "gross_cap", "usdt_floor",
 )
+
+#: What the daily stop does to the book once it has fired (``risk.daily_loss_response``).
+#: ``hold`` sells nothing and locks entries; ``halve`` trims every open position by
+#: :data:`DAILY_HALVE_FRACTION` and locks; ``flatten`` sells everything and locks.
+#: crisis-policy.md §0 measured all three at the same -3% trigger over 2019-2026, costs
+#: on: hold-and-stop-buying +30.53% CAGR, halve +13.05%, flatten -5.23%. The shipped value
+#: is ``hold`` — and it is the value that says what the book does, because the adapter
+#: that would trim positions on ``reduce`` was never built; a config that said ``halve``
+#: over a book that held was a lie the integration review caught on 2026-09-29.
+DAILY_RESPONSES = ("hold", "halve", "flatten")
+DAILY_HALVE_FRACTION = 0.5
 
 #: Tier names the universe snapshot may assign. ``core`` is BTC/ETH and is never rotated;
 #: ``major`` and ``satellite`` are the tradeable tiers (wide-universe.md §2.2). Anything
@@ -228,6 +251,16 @@ class GateConfig:
     reconcile_tolerance_pct: float = 0.005
     reconcile_dust_usdt: float = 10.0
     reconcile_block_on_mismatch: bool = True
+    # --- the daily stop's response (risk.daily_loss_response) -----------------------
+    #: ``flatten`` when the rendered config predates the key, so an old riskgate.json
+    #: keeps the behaviour it was rendered with; the generator always writes the key.
+    daily_loss_response: str = "flatten"
+    # --- the minimum-edge gate (risk.min_edge; analogue-timing.md §4.4-4.5) ---------
+    #: ``multiple`` 0.0 = the check is off, which is what a config without the block gets.
+    min_edge_round_trip_cost_pct: float = 0.0
+    min_edge_multiple: float = 0.0
+    # --- crisis-policy.md Tier 1 (risk.crisis) ---------------------------------------
+    crisis_block_entries_hours: int = 48
     entry_unfilled_timeout_min: int = 20
     exit_unfilled_timeout_min: int = 20
     exit_timeout_count: int = 3
@@ -298,6 +331,13 @@ class GateConfig:
         runtime = _load_runtime(runtime_path, sleeve_id)
         protections = (risk.get("protections") or {}).get("max_drawdown") or {}
         reconcile = risk.get("reconcile") or {}
+        min_edge = risk.get("min_edge") or {}
+        crisis = risk.get("crisis") or {}
+        response = str(risk.get("daily_loss_response") or "flatten").lower()
+        if response not in DAILY_RESPONSES:
+            raise ValueError(
+                f"risk.daily_loss_response {response!r} is not one of {DAILY_RESPONSES}"
+            )
         return cls(
             sleeve=sleeve_id,
             pairs=tuple(uni["pairs"]),
@@ -347,6 +387,10 @@ class GateConfig:
             reconcile_tolerance_pct=float(reconcile.get("tolerance_pct", 0.005)),
             reconcile_dust_usdt=float(reconcile.get("dust_usdt", 10.0)),
             reconcile_block_on_mismatch=bool(reconcile.get("block_on_mismatch", True)),
+            daily_loss_response=response,
+            min_edge_round_trip_cost_pct=float(min_edge.get("round_trip_cost_pct", 0.0) or 0.0),
+            min_edge_multiple=float(min_edge.get("multiple", 0.0) or 0.0),
+            crisis_block_entries_hours=int(crisis.get("block_entries_hours", 48) or 48),
             entry_unfilled_timeout_min=int(ex.get("entry_unfilled_timeout_min", 20)),
             exit_unfilled_timeout_min=int(ex.get("exit_unfilled_timeout_min", 20)),
             exit_timeout_count=int(ex.get("exit_timeout_count", 3)),
@@ -393,6 +437,44 @@ class GateConfig:
                 return default
             node = node[part]
         return node
+
+    # -- the minimum-edge gate -----------------------------------------------------
+
+    @property
+    def min_edge_floor(self) -> float:
+        """``multiple x round_trip_cost_pct``; 0.0 means the check is off."""
+        return max(self.min_edge_multiple, 0.0) * max(self.min_edge_round_trip_cost_pct, 0.0)
+
+    def min_booked_target(self) -> float | None:
+        """The smallest profit this sleeve's plan will book at, or ``None`` if never.
+
+        The lowest take-profit rung and the lowest ROI level, whichever is smaller: that
+        is the exit the plan takes most often and the one the cost floor has to be measured
+        against (analogue-timing.md §4.4: at a 0.33-day hold the fees *were* the loss).
+        Stdlib mirror of ``ops.config.min_booked_target``; the two must agree.
+        """
+        tp = self.mechanics("take_profit") or {}
+        targets: list[float] = []
+        for rung in (tp.get("ladder") or []) if isinstance(tp, dict) else []:
+            try:
+                targets.append(float(rung.get("at_profit_pct")))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        roi = tp.get("roi_table") if isinstance(tp, dict) else None
+        for value in (roi or {}).values():
+            try:
+                targets.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return min(targets) if targets else None
+
+    def min_edge_ok(self) -> bool:
+        """Does the plan's smallest booked target clear the configured cost multiple?"""
+        floor = self.min_edge_floor
+        if floor <= 0:
+            return True
+        target = self.min_booked_target()
+        return target is None or target + _EPS >= floor
 
 
 def asset_of(pair: str) -> str:
@@ -712,6 +794,24 @@ class PortfolioState:
     ledger_cash: float = 0.0
     reserved_usdt: float = 0.0
     entries_used: dict[str, int] = field(default_factory=dict)   # pair -> filled entries
+    #: pair -> USDT resting in that pair's UNFILLED entry orders. It is already inside
+    #: ``reserved_usdt`` (and therefore inside ``nav``); this breaks it down per pair so a
+    #: sizing rule can see money that is committed but not yet a position.
+    pending: dict[str, float] = field(default_factory=dict)      # pair -> resting USDT
+
+    def committed(self, pair: str) -> float:
+        """Position value PLUS anything resting in an unfilled entry order for ``pair``.
+
+        The number every "how much more of this do I want?" rule must use. Freqtrade 2026.8
+        creates a trade with ``amount=0`` and calls ``adjust_trade_position`` while the entry
+        order is still open, so ``positions[pair]`` is 0 for a fully-placed target: a gap of
+        ``target × NAV − position`` then reads as "nothing bought yet" and the rebalance,
+        DCA and top-up paths place the order a second time. On 2026-09-23 Sleeve B bought
+        BTC and ETH twice inside 68 ms, ended at 75% of NAV against a 25% target, and paid
+        the round trip twice (−27.56 USDT, 15.01 of it fees). The gate could not catch it:
+        ``weight_cap`` and ``gross_cap`` were reading the same position view.
+        """
+        return float(self.positions.get(pair, 0.0)) + float(self.pending.get(pair, 0.0))
 
     @property
     def gross(self) -> float:
@@ -735,6 +835,13 @@ class LoopActions:
     flatten: bool = False
     flatten_reason: str = ""
     lock_until: datetime | None = None
+    #: The daily stop fired under ``daily_loss_response: halve``: trim every open position
+    #: by ``reduce_fraction`` (a risk exit, ``reduce_reason``) and lock entries until
+    #: ``lock_until``. Never set together with ``flatten``. The adapter acts on it through
+    #: :meth:`RiskGate.reduce_pending`, one partial exit per trade per stop.
+    reduce: bool = False
+    reduce_fraction: float = 0.0
+    reduce_reason: str = ""
     monthly_lock: bool = False
     #: The Gulf month boundary released a monthly stop on this tick. The adapter
     #: journals it so the release is as visible in the record as the stop was.
@@ -855,6 +962,12 @@ class RiskGate:
         checks["fee_budget"] = (
             self.fees_this_month(ps.now) / nav <= cfg.max_fee_pct_per_month + _EPS
         )
+        # A plan-shape refusal (analogue-timing.md §4.5, §7.1): the smallest profit this
+        # sleeve will book at must clear the round trip by the configured multiple, or
+        # the trade is paying the venue to exist. Static per sleeve, so it refuses every
+        # entry of a plan that cannot pay for itself — which is the point. Never an exit
+        # check: a cost rule must not be able to veto a stop.
+        checks["min_edge"] = cfg.min_edge_ok()
         checks["min_notional"] = stake >= cfg.min_notional
         # The asset's OWN exchange filters, re-checked here because the gate is the
         # authority: below one LOT_SIZE step or the symbol's minNotional there is no order.
@@ -902,10 +1015,18 @@ class RiskGate:
                     "blackout": flag, "weight_cap": pair, "gross_cap": pair,
                     "entries_per_trade": pair, "nav_valid": ps.reason or None,
                     "exit_only": asset, "tier": asset, "step_size": pair,
+                    "min_edge": self._min_edge_qualifier(),
                 }.get(name)
                 reason = f"{name}:{qualifier}" if qualifier else name
                 break
         return GateDecision(allowed=(reason == "ok"), reason=reason, checks=checks)
+
+    def _min_edge_qualifier(self) -> str | None:
+        """``target<floor`` in percent, so the journalled reason carries the arithmetic."""
+        target = self.cfg.min_booked_target()
+        if target is None:
+            return None
+        return f"{target * 100:.2f}%<{self.cfg.min_edge_floor * 100:.2f}%"
 
     def cap_stake(self, pair: str, proposed: float, ps: PortfolioState) -> float:
         """Shrink a proposed stake to the tightest headroom; below the floor -> 0.
@@ -1007,6 +1128,21 @@ class RiskGate:
             lock_until = now + timedelta(hours=self.cfg.daily_lock_hours)
             self.store.set("daily_stop_fired_date", today)
             self.store.set("locked_until", lock_until.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            if self.cfg.daily_loss_response == "hold":
+                # crisis-policy.md §0: the best-measured response to the trigger is to
+                # sell NOTHING and stop buying. Fraction 0.0 is what flatten_pending and
+                # reduce_pending read back as "nothing owed": the lock is the whole action.
+                self.store.set("daily_stop_fraction", "0.0")
+                return LoopActions(lock_until=lock_until)
+            if self.cfg.daily_loss_response == "halve":
+                # crisis-policy.md §0: the same -3% trigger, halve instead of flatten,
+                # is +13.05% CAGR against -5.23%. The stop still locks entries for
+                # daily_lock_hours; what changes is that the book is trimmed by half,
+                # once, rather than sold.
+                self.store.set("daily_stop_fraction", repr(DAILY_HALVE_FRACTION))
+                return LoopActions(reduce=True, reduce_fraction=DAILY_HALVE_FRACTION,
+                                   reduce_reason="risk_stop_daily", lock_until=lock_until)
+            self.store.set("daily_stop_fraction", "1.0")
             return LoopActions(flatten=True, flatten_reason="risk_stop_daily",
                                lock_until=lock_until)
         return LoopActions(monthly_unlock=bool(unlocked_month),
@@ -1093,9 +1229,56 @@ class RiskGate:
         if self._monthly_lock_active(now):
             return "risk_stop_monthly"
         raw = self.store.get("daily_stop_fired_date")
-        if raw and self._daily_locked(now):
+        if raw and self._daily_locked(now) and self._daily_stop_is_flatten():
             return "risk_stop_daily"
         return None
+
+    def _daily_stop_is_flatten(self) -> bool:
+        """Did the daily stop that is in force ask for a flatten (not a halving)?
+
+        Read from what the stop WROTE, not from today's config: a stop that fired as a
+        flatten under one rendering must not turn into a halving because the config was
+        regenerated an hour later, and vice versa. A row without the fraction (written
+        before the key existed) is a flatten, which is what that gate did.
+        """
+        raw = self.store.get("daily_stop_fraction")
+        if not raw:
+            return True
+        return _fnum(raw, 1.0) >= 1.0 - _EPS
+
+    def reduce_pending(self, now: datetime) -> tuple[str, float] | None:
+        """``(reason, fraction)`` while a HALVING daily stop is in force, else ``None``.
+
+        The partial-exit twin of :meth:`flatten_pending`, and the read the adapter's
+        ``adjust_trade_position`` consults: while the daily lock is live and the stop
+        fired as a halving, every open trade owes one trim of ``fraction`` under
+        ``reason`` (a risk exit, so churn and fee checks never block it). The adapter
+        keeps the per-trade "already trimmed for this stop" mark; the gate only says
+        whether a stop is in force. Same clock discipline as ``flatten_pending``: the
+        caller's ``now``, never the wall clock.
+        """
+        if self._monthly_lock_active(now):
+            return None  # the monthly flatten owns the book
+        raw = self.store.get("daily_stop_fired_date")
+        if not raw or not self._daily_locked(now) or self._daily_stop_is_flatten():
+            return None
+        fraction = _fnum(self.store.get("daily_stop_fraction"), DAILY_HALVE_FRACTION)
+        if fraction <= _EPS:
+            return None  # a `hold` stop: entries are locked and no trade owes a trim
+        return "risk_stop_daily", min(max(fraction, 0.0), 1.0)
+
+    def daily_stop_status(self, now: datetime) -> dict[str, Any]:
+        """Read-only view for the console: is the daily stop in force, and as what."""
+        fired = self.store.get("daily_stop_fired_date") or ""
+        locked = bool(fired) and self._daily_locked(now)
+        return {
+            "locked": locked,
+            "fired_date": fired,
+            "locked_until": self.store.get("locked_until") or "",
+            "response": self.cfg.daily_loss_response,
+            "fraction": (_fnum(self.store.get("daily_stop_fraction"), 1.0)
+                         if locked else 0.0),
+        }
 
     def monthly_locked(self, now: datetime | None = None) -> bool:
         """The monthly stop as of ``now``. Without a clock this is the raw flag — the

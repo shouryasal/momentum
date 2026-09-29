@@ -46,7 +46,7 @@ def test_pinned_strings_are_exact():
     mc = router.load_models_cfg()
     assert set(mc["models"].values()) == {
         "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5",
-        "claude-haiku-4-5-20251001", "llama3.1:8b"}
+        "claude-haiku-4-5-20251001", "granite4.2:3b"}
 
 
 class TestV2ChainCompatibility:

@@ -62,6 +62,10 @@ class ScanReport:
     screen_ok: bool = False
     screen_provider: str | None = None
     screen_model: str | None = None
+    #: Which render the screener was handed (``lean``/``full``) and its estimated size —
+    #: the two numbers that say whether the local chain head could see it at all.
+    screen_prompt_mode: str | None = None
+    screen_prompt_tokens: int | None = None
     spawned: list[str] = field(default_factory=list)
     planned: list[str] = field(default_factory=list)
     expired: list[str] = field(default_factory=list)
@@ -227,6 +231,8 @@ def scan(cfg: EarnConfig, jdb: sqlite3.Connection, kdb: sqlite3.Connection, *,
         report.hallucinations = outcome.hallucinations
         report.screen_provider = outcome.provider
         report.screen_model = outcome.model
+        report.screen_prompt_mode = getattr(outcome, "prompt_mode", None)
+        report.screen_prompt_tokens = getattr(outcome, "prompt_est_tokens", None)
         for sid in to_screen:
             status, reason = _apply_score(cfg, jdb, sid, rows[sid], outcome, now)
             (report.screened if status == "screened" else report.screened_out).append(sid)
@@ -397,12 +403,26 @@ def mark_acted(jdb: sqlite3.Connection, signal_id: str, proposal_run_id: str, *,
 def on_ingest(cfg: EarnConfig, jdb: sqlite3.Connection, kdb: sqlite3.Connection, *,
               root: Path | None = None, now: datetime | None = None,
               spawn=None, models_cfg: Any | None = None) -> ScanReport | None:
-    """Ingest's hook. Returns ``None`` when the pipeline is off or not wired in."""
+    """Ingest's hook. Returns ``None`` when the pipeline is off, not wired in, or busy.
+
+    Takes the SCANNER lock, not ingest's. Both the cron line (``*/5``, under
+    ``flock cron-scanner.lock`` and ``locks.acquire("scanner")``) and this hook fire at
+    :00/:15/:30/:45, on the same freshly written candles, and each paid for its own
+    screening call while racing the non-atomic dedupe SELECT-then-INSERT on ``signals``.
+    Contending for the scanner's own lock makes the second one a no-op instead of a
+    duplicate: whichever process gets there first screens, the other returns ``None``.
+    """
     if not cfg.signals.enabled or cfg.signals.integration != "pipeline":
         return None
     if not cfg.signals.scanner.run_after_ingest:
         return None
-    return scan(cfg, jdb, kdb, root=root, now=now, spawn=spawn, models_cfg=models_cfg)
+    from ops.lib import locks
+
+    try:
+        with locks.acquire("scanner"):
+            return scan(cfg, jdb, kdb, root=root, now=now, spawn=spawn, models_cfg=models_cfg)
+    except locks.LockBusy:
+        return None      # the cron scanner is mid-cycle on these candles; one pass is enough
 
 
 def record_manual(cfg: EarnConfig, jdb: sqlite3.Connection, *, pair: str | None,

@@ -438,6 +438,108 @@ export function providerStatus(card: ProviderCard): CheckStatus {
   return 'ok';
 }
 
+/* ------------------------------------------------------------- profit & gap ledger */
+
+/** One ledger line: a number, its unit, and the query that produced it. */
+export interface ProfitGapsLine {
+  key: string;
+  label: string;
+  value: number | null;
+  unit: string;
+  query: string;
+  note: string | null;
+}
+
+/** One way the mechanism forwent or wasted money for a reason that is not the strategy. */
+export interface ProfitGapsGap {
+  key: string;
+  title: string;
+  /** USDT where realised, hours or a count where not — `unit` says which. */
+  size: number;
+  unit: string;
+  /** 0-100, comparable across gaps: how much of the window or the money this took. */
+  severity: number;
+  cause: string;
+  /** The sentence a non-engineer reads on Home; empty when the gap did not occur. */
+  sentence: string;
+  lines: ProfitGapsLine[];
+  detail: Record<string, unknown>;
+  error: string | null;
+  /** How much of the system the gap touches, 0-1; the ranking is `severity × weight`. */
+  weight: number;
+  score: number;
+}
+
+export interface ProfitGapsTop {
+  key: string;
+  title: string;
+  sentence: string;
+  size: number;
+  unit: string;
+  severity: number;
+  weight: number;
+  score: number;
+}
+
+export interface ProfitGapsExpected {
+  profile: string;
+  source: string;
+  expected_per_30d_pct: number | null;
+  expected_this_window_pct: number | null;
+  planned_max_drawdown_pct: number | null;
+  /** The sentence that says days of results cannot confirm or refute the expectation. */
+  note: string;
+  lines: ProfitGapsLine[];
+}
+
+export interface ProfitGapsRealised {
+  seed_total_usdt: number | null;
+  cumulative_net_usdt: number | null;
+  realised_net_usdt: number | null;
+  gross_usdt: number | null;
+  fees_usdt: number | null;
+  fee_gross_ratio: number | null;
+  trades: number;
+  wins: number;
+  win_rate: number | null;
+  exit_reasons: Record<string, { trades: number; net_usdt: number; wins: number }>;
+  open_mark_usdt: number | null;
+  benchmark: {
+    btc_hold_usdt: number | null;
+    btc_hold_pct: number | null;
+    basket_pairs: number;
+    basket_hold_usdt: number | null;
+    basket_hold_pct: number | null;
+    cost_per_side: number;
+    query: string;
+  };
+  per_sleeve: Record<string, Record<string, unknown>>;
+  /** The sentence beside each of the three numbers, keyed by field name. */
+  definitions: Record<string, string>;
+  lines: ProfitGapsLine[];
+}
+
+/** One window of the ledger, as `runs.profit_gaps.Ledger` serialises it. */
+export interface ProfitGapsLedger {
+  window: { key: string; since_utc: string; until_utc: string; hours: number };
+  expected: ProfitGapsExpected;
+  realised: ProfitGapsRealised;
+  gaps: ProfitGapsGap[];
+  top_three: ProfitGapsTop[];
+  errors: string[];
+}
+
+export type ProfitGapsWindowKey = 'last_24h' | 'since_start';
+
+/** `GET /profit-gaps` — mirrors `console.contracts.ProfitGapsResponse`. */
+export interface ProfitGapsResponse {
+  generated_utc: string;
+  profile: string | null;
+  windows: Partial<Record<ProfitGapsWindowKey, ProfitGapsLedger>>;
+  cached: boolean;
+  error: string | null;
+}
+
 /* ------------------------------------------------------------------ drift registry */
 
 /**
@@ -552,4 +654,5 @@ export const PY_CONTRACT_MODELS: Readonly<Record<string, readonly string[]>> = {
   RateLimitState: ['status', 'utilization', 'resets_at'],
   MonthTotals: ['month', 'total_usd', 'by_provider'],
   ProvidersResponse: ['auth_mode', 'providers', 'rate_limit', 'month'],
+  ProfitGapsResponse: ['generated_utc', 'profile', 'windows', 'cached', 'error'],
 } as const;

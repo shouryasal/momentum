@@ -1,0 +1,152 @@
+{
+  "audit_problems": [],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "refuted",
+  "closed_utc": "2026-09-29T14:26:25Z",
+  "costs_bps": 15.0,
+  "falsifier": "Refuted if the walk-forward out-of-sample CAGR gain over 2019-01-01..2026-09-24 is below 2.0 percentage points, or the max drawdown is more than 2.0 percentage points deeper, or the Spearman correlation between members' trailing-L Sharpe and their subsequent L-day Sharpe is below 0.10 (no persistence to exploit)",
+  "horizon": "1d",
+  "id": "2026-09-29-ta-sharpe-weighting",
+  "n_params": 2,
+  "opened_utc": "2026-09-29T14:17:50Z",
+  "outcome": "refuted",
+  "regimes": [
+    "2019-22",
+    "2023-24",
+    "2025-26"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": 0.809,
+      "btc_buy_and_hold_cagr": 49.7,
+      "btc_buy_and_hold_mdd": -76.63,
+      "note": "strategy_baseline is the plain BTC/ETH 15-member trend ensemble, OOS window 2019-01-01..2026-09-24, 15 bps/side",
+      "strategy_baseline": 1.189,
+      "strategy_baseline_cagr": 49.33,
+      "strategy_baseline_mdd": -45.62
+    },
+    "both_directions": {
+      "avoided": "nothing: every variant has a deeper drawdown than equal weight (-57.59% walk-forward vs -45.62%)",
+      "gave_up": "CAGR -4.87pp; fee drag 2.03%/yr vs 1.36%/yr; members' trailing-Sharpe rank persistence (Spearman) {'BTC': {'90': 0.142, '180': -0.008, '365': -0.112}, 'ETH': {'90': -0.007, '180': -0.083, '365': -0.206}}"
+    },
+    "costs_bps": 15.0,
+    "edge_audit": {
+      "deflated_hurdle": 2.426,
+      "effective_n": 577.9,
+      "embargo_bars": 30,
+      "n_selection_trials": 7910,
+      "note": "effective_n is BTC 1d triple-barrier (10-bar) from edge-audit labels; hurdle = BTC hold OOS Sharpe + expected_max_sharpe(N, 7.73)",
+      "purged": true,
+      "years": 7.73
+    },
+    "falsifier_triggered": true,
+    "falsifier_value": {
+      "cagr_gain_pp": -4.87,
+      "mdd_diff_pp": -11.97,
+      "persistence_spearman": {
+        "BTC": {
+          "180": -0.008,
+          "365": -0.112,
+          "90": 0.142
+        },
+        "ETH": {
+          "180": -0.083,
+          "365": -0.206,
+          "90": -0.007
+        }
+      }
+    },
+    "headline": 1.01,
+    "headline_is_in_sample": false,
+    "n_params": 2,
+    "out_of_sample": {
+      "cagr": 44.46,
+      "chosen": [
+        [
+          2019,
+          "L180_top5"
+        ],
+        [
+          2020,
+          "L365_linear"
+        ],
+        [
+          2021,
+          "L90_linear"
+        ],
+        [
+          2022,
+          "L90_linear"
+        ],
+        [
+          2023,
+          "L365_linear"
+        ],
+        [
+          2024,
+          "L365_top5"
+        ],
+        [
+          2025,
+          "L365_top5"
+        ],
+        [
+          2026,
+          "L365_top5"
+        ]
+      ],
+      "fee_yr": 2.03,
+      "gross": 0.532,
+      "mdd": -57.59,
+      "method": "expanding walk-forward, yearly OOS, 30d embargo",
+      "months_below_m10": 11,
+      "n": 2824,
+      "oos_2020_plus": {
+        "cagr": 41.45,
+        "fee_yr": 2.09,
+        "gross": 0.536,
+        "mdd": -57.59,
+        "months_below_m10": 10,
+        "n": 2459,
+        "sharpe": 0.968,
+        "sharpe_meanstd": 1.025,
+        "total": 933.99,
+        "turnover_yr": 13.9,
+        "vol": 42.82
+      },
+      "sharpe": 1.01,
+      "sharpe_meanstd": 1.056,
+      "total": 1621.92,
+      "turnover_yr": 13.55,
+      "vol": 44.02
+    },
+    "regimes": {
+      "2019-22": {
+        "cagr": 60.23,
+        "mdd": -57.57,
+        "n": 1461,
+        "sharpe": 1.159
+      },
+      "2023-24": {
+        "cagr": 51.61,
+        "mdd": -34.13,
+        "n": 731,
+        "sharpe": 1.322
+      },
+      "2025-26": {
+        "cagr": 7.52,
+        "mdd": -27.69,
+        "n": 632,
+        "sharpe": 0.295
+      }
+    }
+  },
+  "seal": "8b54eb009bde32dae210f53bd944e1bc3a5296ddab8e229c6db42a1619d63256",
+  "seal_ok": true,
+  "statement": "Weighting the 15 ensemble members by their trailing L-day Sharpe (L in 90/180/365; weights = positive part of the trailing Sharpe, normalised; equal weight when all are non-positive) predicts a higher out-of-sample CAGR than equal weight at a 1d horizon with no deeper max drawdown",
+  "status": "closed",
+  "surface": "local-candles (panel_1d.parquet BTC/ETH)"
+}

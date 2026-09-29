@@ -1,0 +1,119 @@
+{
+  "audit_problems": [],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "refuted",
+  "closed_utc": "2026-09-29T14:22:38Z",
+  "costs_bps": 15.0,
+  "falsifier": "Over 2019-09-13..2026-09-22 at 15 bps per side the primary rule (level 40% ann, multiplier 0.5, per-asset, lagged one day) improves the BTC/ETH ensemble book's MaxDD by less than 2.0pp, OR gives up more pp of CAGR than it gains in MaxDD (drawdown-per-return ratio below 1.0), OR fails to raise Sharpe in at least 2 of the 3 regimes 2019-22 / 2023-24 / 2025-26, OR the purged (7d) expanding walk-forward pick over the (level, multiplier) grid has an OOS Sharpe below the unfiltered ensemble on the same OOS days",
+  "horizon": "7d",
+  "id": "2026-09-29-clo-funding-riskoff",
+  "n_params": 2,
+  "opened_utc": "2026-09-29T14:14:48Z",
+  "outcome": "refuted",
+  "regimes": [
+    "2019-22",
+    "2023-24",
+    "2025-26"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": 0.5835331656021546,
+      "strategy_baseline": 1.1174565116989332
+    },
+    "both_directions": {
+      "BTC": {
+        "asset_ret_on_flagged_days_ann_pct": 119.38,
+        "asset_ret_on_other_days_ann_pct": 43.78,
+        "book_pnl_change_on_flagged_days_pct": -51.639,
+        "book_pnl_change_when_asset_fell_pct": 90.047,
+        "book_pnl_change_when_asset_rose_pct": -141.686,
+        "days_flagged": 169,
+        "n_effective_flagged": 24,
+        "p_7d_dd_lt_-8_flagged": 0.4142,
+        "p_7d_dd_lt_-8_unflagged": 0.2199,
+        "share_flagged": 0.0659,
+        "tail_ratio": 1.883
+      },
+      "ETH": {
+        "asset_ret_on_flagged_days_ann_pct": 256.28,
+        "asset_ret_on_other_days_ann_pct": 54.58,
+        "book_pnl_change_on_flagged_days_pct": -51.902,
+        "book_pnl_change_when_asset_fell_pct": 119.732,
+        "book_pnl_change_when_asset_rose_pct": -171.634,
+        "days_flagged": 211,
+        "n_effective_flagged": 30,
+        "p_7d_dd_lt_-8_flagged": 0.5545,
+        "p_7d_dd_lt_-8_unflagged": 0.3292,
+        "share_flagged": 0.0823,
+        "tail_ratio": 1.684
+      },
+      "book_total_change_pct": -52.742,
+      "days_total": 2565
+    },
+    "costs_bps": 15.0,
+    "edge_audit": {
+      "deflated_hurdle": 2.2796,
+      "deflated_hurdle_family": 1.7016,
+      "effective_n": 523.9
+    },
+    "falsifier_triggered": true,
+    "falsifier_value": {
+      "cagr_cost_pp": 7.937,
+      "dd_per_return_ratio": 0.197,
+      "mdd_gain_pp": 1.563,
+      "regimes_sharpe_better": 1,
+      "triggered": true,
+      "wf_oos_sharpe_filtered": 0.7678831733099271,
+      "wf_oos_sharpe_unfiltered": 0.9032030471376854
+    },
+    "headline": 0.7678831733099271,
+    "headline_is_in_sample": false,
+    "in_sample_primary": {
+      "cagr": 36.6925618715108,
+      "days": 2565,
+      "fee_drag_per_year": 1.8193079922027289,
+      "gross": 0.45677063027940223,
+      "mdd": -38.78540399373851,
+      "n": 2565,
+      "sharpe": 1.0486718816506206,
+      "total": 799.3592781389528,
+      "turnover_per_year": 12.128719948018194,
+      "vol": 34.98955441978316
+    },
+    "n_params": 2,
+    "out_of_sample": {
+      "folds": 6,
+      "purge_days": 7,
+      "sharpe": 0.7678831733099271,
+      "unfiltered_sharpe_same_days": 0.9032030471376854
+    },
+    "regimes": {
+      "2019-22": {
+        "cagr": 40.408080971294865,
+        "mdd": -38.767847438490364,
+        "n": 1204,
+        "sharpe": 1.0274761711994518
+      },
+      "2023-24": {
+        "cagr": 54.29675843387231,
+        "mdd": -23.32342998022815,
+        "n": 731,
+        "sharpe": 1.5395228218903954
+      },
+      "2025-26": {
+        "cagr": 12.833801939724609,
+        "mdd": -25.978138750091073,
+        "n": 630,
+        "sharpe": 0.5313104077237091
+      }
+    }
+  },
+  "seal": "bd1d54ac72a01b6e639686a4c7832575fa776fb04a5606334535475d41df22c3",
+  "seal_ok": true,
+  "statement": "Trailing 3-day annualised perp funding at or above an extreme ABSOLUTE level (40% ann, the growth-audit s1.6 plateau) on an asset predicts a 7-day drawdown on that leg of the BTC/ETH trend-ensemble book, so halving that leg's ensemble weight while the flag is on reduces the book's maximum drawdown by more than it reduces CAGR, net of 15 bps per side",
+  "status": "closed",
+  "surface": "wired-features: fapi/v1/fundingRate cache (cache/derivatives/funding-BTCUSDT|ETHUSDT.feather, 2019-09-10+) joined to local 1d spot candles; ensemble from runs.features.trend"
+}

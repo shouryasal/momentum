@@ -1,0 +1,141 @@
+{
+  "audit_problems": [],
+  "baselines": [
+    "btc_buy_and_hold",
+    "strategy_baseline"
+  ],
+  "claimed_outcome": "refuted",
+  "closed_utc": "2026-09-29T14:26:24Z",
+  "costs_bps": 15.0,
+  "falsifier": "Refuted if the purged walk-forward out-of-sample CAGR over 2019-01-01..2026-09-24 is less than 2.0 percentage points above the plain BTC/ETH ensemble on the same window, or if its max drawdown is more than 2.0 percentage points deeper than the plain ensemble's",
+  "horizon": "1d",
+  "id": "2026-09-29-ta-vol-target",
+  "n_params": 2,
+  "opened_utc": "2026-09-29T14:17:49Z",
+  "outcome": "refuted",
+  "regimes": [
+    "2019-22",
+    "2023-24",
+    "2025-26"
+  ],
+  "result": {
+    "baselines": {
+      "btc_buy_and_hold": 0.809,
+      "btc_buy_and_hold_cagr": 49.7,
+      "btc_buy_and_hold_mdd": -76.63,
+      "note": "strategy_baseline is the plain BTC/ETH 15-member trend ensemble, OOS window 2019-01-01..2026-09-24, 15 bps/side",
+      "strategy_baseline": 1.189,
+      "strategy_baseline_cagr": 49.33,
+      "strategy_baseline_mdd": -45.62
+    },
+    "both_directions": {
+      "avoided": "max drawdown -37.06% vs plain -45.62% (+8.56pp); months below -10%: 4 vs 7",
+      "gave_up": "CAGR 40.89% vs plain 49.33% (-8.44pp); fee drag 2.14%/yr vs 1.36%/yr"
+    },
+    "costs_bps": 15.0,
+    "edge_audit": {
+      "deflated_hurdle": 2.426,
+      "effective_n": 577.9,
+      "embargo_bars": 30,
+      "n_selection_trials": 7910,
+      "note": "effective_n is BTC 1d triple-barrier (10-bar) from edge-audit labels; hurdle = BTC hold OOS Sharpe + expected_max_sharpe(N, 7.73)",
+      "purged": true,
+      "years": 7.73
+    },
+    "falsifier_triggered": true,
+    "falsifier_value": {
+      "cagr_gain_pp": -8.44,
+      "mdd_diff_pp": 8.56
+    },
+    "headline": 1.216,
+    "headline_is_in_sample": false,
+    "n_params": 2,
+    "out_of_sample": {
+      "cagr": 40.89,
+      "chosen": [
+        [
+          2019,
+          "t20_cap1"
+        ],
+        [
+          2020,
+          "t60_cap2"
+        ],
+        [
+          2021,
+          "t60_cap2"
+        ],
+        [
+          2022,
+          "t80_cap1"
+        ],
+        [
+          2023,
+          "t80_cap1"
+        ],
+        [
+          2024,
+          "t60_cap2"
+        ],
+        [
+          2025,
+          "t60_cap2"
+        ],
+        [
+          2026,
+          "t60_cap2"
+        ]
+      ],
+      "fee_yr": 2.14,
+      "gross": 0.462,
+      "mdd": -37.06,
+      "method": "expanding walk-forward, yearly OOS 2019-2026, 30d embargo, selection = max in-sample CAGR s.t. MDD within 2pp of plain",
+      "months_below_m10": 4,
+      "n": 2824,
+      "oos_2020_plus": {
+        "cagr": 43.94,
+        "fee_yr": 2.3,
+        "gross": 0.51,
+        "mdd": -37.06,
+        "months_below_m10": 4,
+        "n": 2459,
+        "sharpe": 1.232,
+        "sharpe_meanstd": 1.2,
+        "total": 1063.13,
+        "turnover_yr": 15.33,
+        "vol": 35.67
+      },
+      "sharpe": 1.216,
+      "sharpe_meanstd": 1.188,
+      "total": 1318.94,
+      "turnover_yr": 14.28,
+      "vol": 33.62
+    },
+    "regimes": {
+      "2019-22": {
+        "cagr": 48.84,
+        "mdd": -37.04,
+        "n": 1461,
+        "sharpe": 1.421
+      },
+      "2023-24": {
+        "cagr": 52.3,
+        "mdd": -32.17,
+        "n": 731,
+        "sharpe": 1.41
+      },
+      "2025-26": {
+        "cagr": 13.41,
+        "mdd": -27.71,
+        "n": 632,
+        "sharpe": 0.498
+      }
+    },
+    "surface_note": "every target 20..80 at cap 1 or 2 scores Sharpe 1.22-1.31 vs plain 1.19; CAGR rises monotonically with the target and drawdown deepens with it"
+  },
+  "seal": "5b8b6c3c23a9a09acf875961a793d3d60ff4172a3b4e8d11f2cc4de1633dad5c",
+  "seal_ok": true,
+  "statement": "Scaling each leg of the BTC/ETH trend ensemble by clip(target_vol / sigma_hat, 0, cap), with the shipped HAR+DVOL sigma_hat (7-day forward vol forecast) and the book gross capped at 1, predicts a higher out-of-sample CAGR than the equal-exposure ensemble at a 1d horizon with no deeper max drawdown",
+  "status": "closed",
+  "surface": "local-candles (panel_1d.parquet, BTC/ETH 4h feathers) + cached Deribit DVOL"
+}

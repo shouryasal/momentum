@@ -157,6 +157,45 @@ class TestVerdicts:
         row = jdb.execute("SELECT status FROM signals WHERE signal_id='sig-1'").fetchone()
         assert row["status"] == "error"
 
+    def test_a_path_that_exists_in_the_pack_is_a_legitimate_citation(self, env, provider):
+        """11 of the 15 validations ever run on the runtime (2026-09-23..29) were thrown
+        away for citing ``market_state.data_fresh``, ``limits.max_weight`` or
+        ``signal.detector_detail.pct`` — verbatim paths INTO the pack the model was told
+        is "the complete, authoritative picture". The rule is "no number that is not in
+        the pack", and those are in the pack. No thesis was ever stored because of this,
+        which is why the holdings watcher had nothing to watch against."""
+        cfg, jdb, kdb, root = env
+        _insert_signal(jdb)
+        provider.script([scripted(text=json.dumps(_verdict(cited_feature_keys=[
+            "BTC/USDT.close", "limits.max_gross_exposure", "signal.detector_score",
+            "signal.detector_detail.level"])))])
+        out = validatorlib.validate_signal(cfg, jdb, kdb, "sig-1", root=root, now=NOW)
+        assert out.ok, out.reason
+        row = jdb.execute("SELECT thesis, error FROM signal_validations").fetchone()
+        assert row["thesis"].startswith("The breakout") and row["error"] is None
+
+    def test_a_path_the_pack_does_not_have_is_still_an_invention(self, env, provider):
+        cfg, jdb, kdb, root = env
+        _insert_signal(jdb)
+        provider.script([scripted(text=json.dumps(
+            _verdict(cited_feature_keys=["market_state.made_up", "limits.max_gross_exposure"])))])
+        out = validatorlib.validate_signal(cfg, jdb, kdb, "sig-1", root=root, now=NOW)
+        assert out.ok is False and "market_state.made_up" in (out.reason or "")
+
+    def test_citable_keys_are_the_features_plus_every_pack_path(self):
+        from runs.signals.features import Features
+
+        features = Features(ts_utc="t", pairs={"BTC/USDT": {"close": 1.0}},
+                            globals={"regime": "bull"})
+        pack = {"features": features.flat(), "market_state": {"data_fresh": False,
+                "portfolio": {"modules": {"trend_signal": "flat"}}},
+                "news": [{"news_hash": "abc", "title": "x"}], "limits": {"max_weight": {"BTC": 0.4}}}
+        keys = validatorlib.citable_keys(pack, features)
+        assert {"BTC/USDT.close", "global.regime"} <= keys           # the feature keys
+        assert {"market_state.data_fresh", "market_state.portfolio.modules.trend_signal",
+                "news.0.title", "limits.max_weight.BTC"} <= keys     # the pack's own paths
+        assert "market_state.newest_data_age_min" not in keys       # not in THIS pack
+
     def test_a_provider_failure_writes_a_row_and_marks_error(self, env, provider):
         cfg, jdb, kdb, root = env
         _insert_signal(jdb)
@@ -190,6 +229,28 @@ class TestCaps:
         out = validatorlib.validate_signal(cfg, jdb, kdb, "sig-1", root=root, now=NOW)
         assert out.ok is False and out.reason == "cap:max_per_day"
         assert provider.calls == 0
+
+    def test_failed_attempts_do_not_consume_the_daily_cap(self, env, provider):
+        """Money already spent on a failure must not also buy the right to stop trying.
+
+        Every attempt writes a ``signal_validations`` row, host rejections included
+        (verdict ``uncertain``, confidence 0, ``error`` set). Counting those against
+        ``max_per_day`` meant that while a citation-check bug was discarding every answer,
+        six errors filled the cap and validation stopped for the day — and the refused
+        signals kept status ``screened`` and expired, leaving no trace of why.
+        """
+        cfg, jdb, kdb, root = env
+        _insert_signal(jdb)
+        for i in range(cfg.signals.validator.max_per_day + 2):
+            jdb.execute(
+                "INSERT INTO signal_validations(signal_id, ts_utc, provider, model,"
+                " verdict, confidence, error) VALUES ('sig-1',?, 'p','m','uncertain',0.0,"
+                " 'unknown feature_key BTC/USDT.high_30d')",
+                (iso(NOW - timedelta(minutes=i + 1)),))
+        jdb.commit()
+        out = validatorlib.validate_signal(cfg, jdb, kdb, "sig-1", root=root, now=NOW)
+        assert out.reason != "cap:max_per_day", "failures filled the cap"
+        assert provider.calls == 1, "the validator never got to ask"
 
     def test_per_asset_cooldown_refuses(self, env, provider):
         cfg, jdb, kdb, root = env
