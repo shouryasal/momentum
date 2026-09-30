@@ -322,11 +322,11 @@ class TestScript:
             "announcements": {"delist_hits_24h": []},
         }
         moved = venue_state.apply_flags(tmp_path, state, now)
-        assert "set:depeg" in moved and "set:symbol_halted" in moved
+        assert "set:depeg" in moved and "set:symbol_halted:ETH/USDT" in moved
 
         blocked, why = flagslib.entries_blocked(fpath, "BTC/USDT", now)
         assert blocked is True
-        assert why in ("depeg", "symbol_halted")
+        assert why == "depeg", "the depeg is the portfolio-wide hazard, and it must be the one"
         active = flagslib.active_flags(fpath, now)
         assert active["depeg"]["severity"] == "block_entries"
         assert active["depeg"]["set_by"] == "venue-guard"
@@ -335,8 +335,62 @@ class TestScript:
         clear = {"peg": {"depeg_flag": False, "reason": "ok"}, "symbols_not_tradable": [],
                  "announcements": {"delist_hits_24h": []}}
         moved2 = venue_state.apply_flags(tmp_path, clear, now)
-        assert "clear:depeg" in moved2 and "clear:symbol_halted" in moved2
+        assert "clear:depeg" in moved2 and "clear:symbol_halted:ETH/USDT" in moved2
         assert flagslib.entries_blocked(fpath, "BTC/USDT", now)[0] is False
+
+    def test_a_halted_symbol_blocks_only_itself(self, tmp_path):
+        """One delisted satellite must not stop BTC. Binance delists something most months.
+
+        The halt flag used to be raised once at the default scope ``ALL``, so any symbol
+        leaving ``TRADING`` would have refused every entry on both sleeves. Scoping it to its
+        own pair is what makes this check safe to run unattended.
+        """
+        from ops.config import load_config
+        from ops.lib import flags as flagslib
+
+        now = datetime(2026, 9, 30, tzinfo=UTC)
+        fpath = tmp_path / load_config().paths.flags_file
+        state = {"peg": {"depeg_flag": False, "reason": "ok"},
+                 "symbols_not_tradable": ["WLDUSDT", "SUIUSDT"],
+                 "announcements": {"delist_hits_24h": []}}
+        venue_state.apply_flags(tmp_path, state, now)
+
+        for halted in ("WLD/USDT", "SUI/USDT"):
+            blocked, why = flagslib.entries_blocked(fpath, halted, now)
+            assert blocked is True, f"{halted} halted on the venue and was not refused"
+            assert why == f"symbol_halted:{halted}"
+        for healthy in ("BTC/USDT", "ETH/USDT", "SOL/USDT"):
+            assert flagslib.entries_blocked(fpath, healthy, now)[0] is False, \
+                f"{healthy} was blocked by an unrelated symbol's halt"
+
+    def test_one_symbol_recovering_does_not_unblock_the_other(self, tmp_path):
+        """Per-symbol flags have to clear per symbol, or the first recovery clears them all."""
+        from ops.config import load_config
+        from ops.lib import flags as flagslib
+
+        now = datetime(2026, 9, 30, tzinfo=UTC)
+        fpath = tmp_path / load_config().paths.flags_file
+        both = {"peg": {"depeg_flag": False, "reason": "ok"},
+                "symbols_not_tradable": ["WLDUSDT", "SUIUSDT"],
+                "announcements": {"delist_hits_24h": []}}
+        venue_state.apply_flags(tmp_path, both, now)
+        one = dict(both, symbols_not_tradable=["SUIUSDT"])
+        moved = venue_state.apply_flags(tmp_path, one, now)
+        assert "clear:symbol_halted:WLD/USDT" in moved
+        assert "clear:symbol_halted:SUI/USDT" not in moved
+        assert flagslib.entries_blocked(fpath, "WLD/USDT", now)[0] is False
+        assert flagslib.entries_blocked(fpath, "SUI/USDT", now)[0] is True
+
+    def test_the_scope_string_is_the_one_the_gate_matches(self):
+        """A scope the gate never matches blocks nothing while still looking set. Worst case."""
+        from ops.config import load_config
+
+        cfg = load_config()
+        assert venue_state._as_pair("BTCUSDT", cfg) == "BTC/USDT"
+        assert venue_state._as_pair("1000SATSUSDT", cfg) == "1000SATS/USDT"
+        assert venue_state._as_pair("ETH/USDT", cfg) == "ETH/USDT"   # already a pair
+        assert venue_state._as_pair("USDT", cfg) == "USDT"           # never an empty base
+        assert venue_state._as_pair("", cfg) == ""
 
     def test_delist_notice_is_info_and_never_blocks(self, tmp_path):
         """Its source is undocumented, so it may warn and may not stop an order."""

@@ -105,6 +105,24 @@ def test_schedules_present(cfg):
         assert cfg.ops.schedules[job].deadline_s > 0
 
 
+def test_a_schedule_can_state_its_own_cadence(cfg):
+    """So a writer declares its refresh period instead of a reader hard-coding it.
+
+    ``runs/ingest.py`` stamps this as the ``book_snapshots`` freshness grace. If the ingest
+    cron ever moves, the grace moves with it — which is the whole reason the number is read
+    from here and not written down beside the check.
+    """
+    assert cfg.ops.schedules["ingest"].period_minutes() == 15.0
+    assert cfg.ops.schedules["scanner"].period_minutes() == 5.0
+
+
+def test_a_schedule_that_does_not_state_a_cadence_says_so(cfg):
+    """``None``, never a guess — a wrong cadence would silently widen a safety allowance."""
+    assert cfg.ops.schedules["tca_job"].period_minutes() is None      # "5 * * * *", hourly
+    assert cfg.ops.schedules["backup"].period_minutes() is None       # daily
+    assert cfg.ops.schedules["review_run"].period_minutes() is None   # weekly
+
+
 # --------------------------------------------------------------------------- v2 sections
 
 

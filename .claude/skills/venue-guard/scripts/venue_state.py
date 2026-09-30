@@ -50,6 +50,25 @@ SELFTEST_CASES = (
 )
 
 
+#: Flag-name prefix for a per-symbol trading halt. One flag per symbol, each scoped to its
+#: own pair — see :func:`apply_flags` for why this is not one flag at scope ``ALL``.
+HALT_PREFIX = "symbol_halted:"
+
+
+def _as_pair(symbol: str, cfg) -> str:
+    """``"BTCUSDT"`` → ``"BTC/USDT"``: the form ``ops.lib.flags`` matches a scope against.
+
+    ``exchangeInfo`` speaks exchange symbols and the gate speaks pairs, and a scope that does
+    not match the gate's pair string silently blocks nothing at all — which is the worst
+    failure available here, because the flag would still *look* set on the console.
+    """
+    s = (symbol or "").strip().upper()
+    quote = (getattr(getattr(cfg, "universe", None), "quote", "USDT") or "USDT").upper()
+    if "/" in s:
+        return s
+    return f"{s[: -len(quote)]}/{quote}" if s.endswith(quote) and len(s) > len(quote) else s
+
+
 def load_fixture(path: Path) -> list[V.PegSeries]:
     doc = json.loads(path.read_text())
     return [V.PegSeries(s["source"], s["group"], [(t, float(c)) for t, c in s["bars"]])
@@ -76,6 +95,14 @@ def apply_flags(root: Path, state: dict, now: datetime) -> list[str]:
     because its source is undocumented and may only warn. A flag this skill set is cleared
     by this skill when its condition lifts; a human-set flag is never touched (``ops.lib.flags``
     refuses that on its own).
+
+    **A halt is scoped to the symbol that halted.** ``depeg`` is genuinely portfolio-wide —
+    if the quote currency is not worth a dollar, no USDT pair can be priced — but a symbol
+    leaving ``TRADING`` says nothing about the other thirty. This used to raise one
+    ``symbol_halted`` at the default scope ``ALL``, so a single delisted satellite would have
+    stopped BTC and ETH entries on both sleeves; Binance delists something most months, so
+    that is not a corner case. One flag per symbol, named ``symbol_halted:<PAIR>``, keeps the
+    refusal where the hazard is.
     """
     from ops.config import load_config
     from ops.lib import flags as flagslib
@@ -84,25 +111,27 @@ def apply_flags(root: Path, state: dict, now: datetime) -> list[str]:
     fpath = root / cfg.paths.flags_file
     moved: list[str] = []
     peg = state["peg"]
-    wanted = {}
+    wanted: dict[str, tuple[str, str, str]] = {}      # name -> (severity, reason, scope)
     if peg["depeg_flag"]:
-        wanted["depeg"] = ("block_entries", peg["reason"])
-    if state["symbols_not_tradable"]:
-        wanted["symbol_halted"] = ("block_entries",
-                                   "not TRADING: " + ",".join(state["symbols_not_tradable"]))
+        wanted["depeg"] = ("block_entries", peg["reason"], "ALL")
+    for sym in state["symbols_not_tradable"]:
+        pair = _as_pair(sym, cfg)
+        wanted[f"{HALT_PREFIX}{pair}"] = ("block_entries", f"not TRADING: {sym}", pair)
     hits = state["announcements"]["delist_hits_24h"]
     if hits:
-        wanted["delist_notice"] = ("info", "; ".join(h["title"][:120] for h in hits[:3]))
+        wanted["delist_notice"] = ("info", "; ".join(h["title"][:120] for h in hits[:3]), "ALL")
 
     try:
         current = flagslib.active_flags(fpath, now)
     except flagslib.FlagsError:
         current = {}
-    for name, (severity, reason) in wanted.items():
-        flagslib.set_flag(fpath, name, severity=severity, reason=reason,
+    for name, (severity, reason, scope) in wanted.items():
+        flagslib.set_flag(fpath, name, severity=severity, reason=reason, scope=scope,
                           set_by="venue-guard", now=now)
         moved.append(f"set:{name}")
-    for name in ("depeg", "symbol_halted", "delist_notice"):
+    ours = [n for n in current
+            if n in ("depeg", "delist_notice") or n.startswith(HALT_PREFIX)]
+    for name in ours:
         f = current.get(name)
         if name not in wanted and f and f.get("set_by") == "venue-guard":
             flagslib.clear_flag(fpath, name, by="venue-guard", now=now)

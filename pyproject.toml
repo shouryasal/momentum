@@ -67,6 +67,13 @@ packages = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# `evals/research/<study>/` holds the one-shot measurement scripts a study was actually run
+# with. They are kept so a number can be reproduced, which means they must NOT be tidied
+# after the fact — an edit to a script after its result was quoted makes the result
+# unreproducible. They are not imported by anything shipped. Excluding them keeps
+# `ruff check .` (the documented lint gate in CLAUDE.md) a signal about shipped code instead
+# of 120 errors nobody may fix.
+extend-exclude = ["evals/research"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]

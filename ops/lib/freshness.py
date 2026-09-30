@@ -78,6 +78,12 @@ BLOCKING_SOURCES = frozenset({SOURCE_BOOKS})
 #: Feeds that inform a decision but never price one. Stale ⇒ degrade and say so.
 ADVISORY_SOURCES = frozenset({SOURCE_NEWS, SOURCE_FUNDING})
 
+#: Ceiling on a writer-stamped grace, matching the largest allowance already granted
+#: anywhere here (one ``1d`` candle). A non-finite or larger value would let a corrupt or
+#: mistaken stamp switch the staleness check off entirely, which is the one direction this
+#: file must never fail in. Mirrored in ``strategies/riskgate.py``.
+MAX_GRACE_MINUTES = 1440.0
+
 
 def candles_source(timeframe: str) -> str:
     """``"1h"`` → ``"candles_1h"`` — the name the gate's timeframe allowance keys off."""
@@ -203,14 +209,18 @@ def write(data: dict[str, Any], *, path: Path | str | None = None) -> Path:
 
 
 def record(source: str, *, at: datetime | None = None, detail: str | None = None,
+           grace_minutes: float | None = None,
            path: Path | str | None = None, root: Path | str | None = None) -> dict[str, Any]:
     """Stamp one source as seen at ``at``. Atomic; a reader never sees a partial file."""
     return record_many({source: (at or datetime.now(UTC))}, detail={source: detail},
+                       grace_minutes=(None if grace_minutes is None
+                                      else {source: grace_minutes}),
                        path=path, root=root)
 
 
 def record_many(sources: Mapping[str, datetime], *,
                 detail: Mapping[str, str | None] | None = None,
+                grace_minutes: Mapping[str, float | None] | None = None,
                 now: datetime | None = None,
                 path: Path | str | None = None,
                 root: Path | str | None = None) -> dict[str, Any]:
@@ -221,6 +231,13 @@ def record_many(sources: Mapping[str, datetime], *,
     migration matters operationally: until it happens the gate's own stdlib reader still
     counts a stale news feed as a stale price feed, so the first write after this lands is
     what actually unblocks a system a quiet RSS wire was holding down.
+
+    ``grace_minutes`` is how long after its newest datum this feed is still considered
+    current — the writer's own refresh cadence, declared by the writer, because only the
+    writer knows it. See :func:`grace_of`: a feed that is refreshed every 15 minutes is not
+    stale at minute 16, and treating it as stale is what blocked entries for hours twice in
+    September 2026. Omit it and nothing changes: the ``candles_<tf>`` family keeps its
+    computed one-timeframe allowance and everything else keeps a grace of zero.
     """
     p = Path(path) if path is not None else freshness_path(root)
     ts = now or datetime.now(UTC)
@@ -236,6 +253,14 @@ def record_many(sources: Mapping[str, datetime], *,
         extra = (detail or {}).get(name)
         if extra:
             entry["detail"] = extra
+        grace = (grace_minutes or {}).get(name)
+        if grace is not None:
+            try:
+                g = float(grace)
+            except (TypeError, ValueError):
+                g = 0.0
+            if g > 0:
+                entry["grace_minutes"] = g
         bucket = blocking if is_blocking(name) else advisory
         bucket[name] = entry
         (advisory if bucket is blocking else blocking).pop(name, None)
@@ -293,24 +318,52 @@ def source_age_minutes(source: str, *, path: Path | str | None = None,
     return ages(path=path, now=now).get(source, math.inf)
 
 
+def grace_of(source: str, entry: Any = None) -> float:
+    """Minutes this feed may sit unrefreshed before its age counts against the gate.
+
+    In precedence order: the ``grace_minutes`` the writer stamped on the entry; else one
+    whole timeframe for a ``candles_<tf>`` member, because a 1h candle's ``open_time`` is
+    legitimately up to 60 minutes old; else zero.
+
+    Why a stamped grace rather than a constant here: ``book_snapshots`` is written by the
+    15-minute ingest cron and checked against a 30-minute limit, which is **two cron slots**
+    of headroom for the one feed with no allowance at all. One slow or missed run and every
+    entry is refused — both multi-hour entry blackouts in September 2026 were this pipeline,
+    against market data that was genuinely stale on 0.049% of decision moments. The cadence
+    belongs to the writer, and `CLAUDE.md` forbids restating a limit by hand, so the writer
+    declares it and this function honours it.
+    """
+    if isinstance(entry, Mapping):
+        raw = entry.get("grace_minutes")
+        if raw is not None:
+            try:
+                g = float(raw)
+            except (TypeError, ValueError):
+                g = 0.0
+            if math.isfinite(g) and g > 0:
+                return min(g, MAX_GRACE_MINUTES)
+    if source.startswith(CANDLES_PREFIX):
+        return _tf_minutes(source.split("_", 1)[1])
+    return 0.0
+
+
 def data_age_minutes(path: Path | str | None = None, now: datetime | None = None) -> float:
     """The staleness number the gate uses, with the same rule as the in-container copy.
 
-    ``max(age of every BLOCKING source, with candles_<tf> allowed to be one <tf> old, 0)``.
+    ``max(age of every BLOCKING source, less that source's grace, 0)`` — see :func:`grace_of`.
     Advisory feeds are excluded by construction: they are not in ``sources``.
 
     ``inf`` when the sidecar is missing, corrupt, or carries no blocking source at all —
     fail closed. A stale *price* feed still stops every entry; that behaviour is the point
     and is unchanged.
     """
-    current = blocking_ages(path=path, now=now)
+    entries = _bucket(read(path), "sources")
+    current = _ages_of(entries, now or datetime.now(UTC))
     if not current:
         return math.inf
     adjusted: list[float] = []
     for source, age in current.items():
         if age == math.inf:
             return math.inf
-        if source.startswith(CANDLES_PREFIX):
-            age -= _tf_minutes(source.split("_", 1)[1])
-        adjusted.append(age)
+        adjusted.append(age - grace_of(source, entries.get(source)))
     return max(max(adjusted), 0.0)

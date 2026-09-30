@@ -453,6 +453,76 @@ def costed_backtest(weights: pd.DataFrame | pd.Series, returns: pd.DataFrame | p
     )
 
 
+def costed_backtest_open_fill(weights: pd.DataFrame | pd.Series,
+                              opens: pd.DataFrame | pd.Series,
+                              closes: pd.DataFrame | pd.Series, *,
+                              cost_bps: float = COST_BPS_PER_SIDE,
+                              periods_per_year: float = 365.0,
+                              name: str = "book") -> BacktestResult:
+    """Decide at the close of ``t``, **fill at the open of** ``t+1``. Use this for breakouts.
+
+    :func:`costed_backtest` assumes a fill at the same close that produced the signal, which is
+    the right convention for a daily rebalance and the wrong one for any rule that reacts to a
+    bar it has just watched close. A study that means "fill at the next open" and reaches for
+    :func:`costed_backtest` with close-to-close returns credits the new position with the
+    **close-to-open gap it did not own**, and breakout rules gap up almost by construction —
+    that is what a breakout is. Measured on the 777-series panel on 2026-09-30, the error was
+    worth about **1.3 Sharpe**: a 144-cell surface went from median 0.258 to 1.616 and from
+    0 cells beating BTC-hold to 144 of 144. It is one line of arithmetic and it inverts the
+    conclusion of a whole family of studies, so the primitive lives here rather than in each
+    harness.
+
+    The accounting, over the interval ``close[t] -> close[t+1]``, is a two-piece decomposition
+    because ownership changes in the middle of it::
+
+        w[t-1] * (open[t+1]/close[t]  - 1)     # the gap, owned by the OLD position
+      + w[t]   * (close[t+1]/open[t+1] - 1)    # the bar, owned by the NEW position
+
+    Turnover is ``|w[t] - w[t-1]|`` charged at the open of ``t+1``, where it is transacted.
+    A fresh entry therefore has ``w[t-1] = 0`` and collects none of the gap, which is the whole
+    point; a position held unchanged has ``w[t-1] = w[t]`` and the two pieces compose back into
+    the plain close-to-close return, so the two functions agree exactly on a static book.
+
+    ``opens`` and ``closes`` are prices, not returns, and must share an index and columns with
+    ``weights``. Do **not** pre-shift anything — like :func:`costed_backtest`, this function
+    owns the one shift.
+    """
+    def _frame(x) -> pd.DataFrame:
+        return x.to_frame(name="_a") if isinstance(x, pd.Series) else x.copy()
+
+    w, o, c = _frame(weights), _frame(opens), _frame(closes)
+    cols = [col for col in w.columns if col in o.columns and col in c.columns]
+    if not cols:
+        raise ValueError("weights, opens and closes share no columns")
+    w = w[cols].fillna(0.0).sort_index()
+    o = o[cols].reindex(w.index).astype(float)
+    c = c[cols].reindex(w.index).astype(float)
+
+    # The one shift. Decided at t, filled at open[t+1], earns open[t+1] -> close[t+1].
+    gap = (o.shift(-1) / c - 1.0)          # close[t]   -> open[t+1]
+    bar = (c.shift(-1) / o.shift(-1) - 1.0)  # open[t+1] -> close[t+1]
+    prev = w.shift(1).fillna(0.0)
+    gross = (prev * gap.fillna(0.0) + w * bar.fillna(0.0)).sum(axis=1)
+    turn = (w - prev).abs().sum(axis=1)
+    cost = turn * (cost_bps / 10_000.0)
+    net = (gross - cost).iloc[:-1] if len(gross) > 1 else gross
+
+    eq = (1.0 + net).cumprod()
+    n = int(len(net))
+    years = n / periods_per_year if periods_per_year > 0 else float("nan")
+    total = float(eq.iloc[-1] - 1.0) if n else float("nan")
+    cagr = float(eq.iloc[-1] ** (1.0 / years) - 1.0) if n and years > 0 and eq.iloc[-1] > 0 \
+        else float("nan")
+    vol = float(net.std(ddof=1) * math.sqrt(periods_per_year)) if n > 1 else float("nan")
+    dd = float((eq / eq.cummax() - 1.0).min()) if n else float("nan")
+    return BacktestResult(
+        name=name, cagr=cagr, vol=vol, sharpe=sharpe(net, periods_per_year=periods_per_year),
+        max_dd=dd, turnover=float(turn.iloc[:n].mean() * periods_per_year) if n else 0.0,
+        cost_drag=float(cost.iloc[:n].mean() * periods_per_year) if n else 0.0,
+        total_return=total, n_periods=n, years=years, cost_bps=cost_bps, equity=eq,
+    )
+
+
 # --------------------------------------------------------------------------- the hurdle
 
 

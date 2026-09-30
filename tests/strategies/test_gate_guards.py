@@ -148,7 +148,7 @@ class TestFreshnessMatchesTheWriter:
     contract is asserted here the same way the flags mirror is.
     """
 
-    def _write(self, tmp_path, *, book_age, candle_age, name="freshness.json"):
+    def _write(self, tmp_path, *, book_age, candle_age, name="freshness.json", grace=None):
         from ops.lib import freshness
 
         path = pathlib.Path(tmp_path) / name
@@ -159,6 +159,7 @@ class TestFreshnessMatchesTheWriter:
             },
             path=path,
             now=NOW,
+            grace_minutes=(None if grace is None else {freshness.SOURCE_BOOKS: grace}),
         )
         return path
 
@@ -169,6 +170,66 @@ class TestFreshnessMatchesTheWriter:
             path = self._write(tmp_path, book_age=book, candle_age=candle)
             assert riskgate.data_age_minutes(path, NOW) == pytest.approx(
                 freshness.data_age_minutes(path, NOW)), (book, candle)
+
+    def test_the_two_implementations_agree_on_a_stamped_grace(self, tmp_path):
+        """The grace is the newest thing in the file, so parity is asserted on it too.
+
+        A drift here is not a cosmetic disagreement: the gate would refuse entries the
+        console reports as fine, or — worse in the other direction — allow entries on data
+        the writer knows is stale.
+        """
+        from ops.lib import freshness
+
+        for book, candle, grace in ((5, 20, 15), (20, 40, 15), (90, 95, 15), (16, 30, 15),
+                                    (10, 20, 0), (10, 20, None)):
+            path = self._write(tmp_path, book_age=book, candle_age=candle, grace=grace,
+                               name=f"g{book}-{candle}-{grace}.json")
+            assert riskgate.data_age_minutes(path, NOW) == pytest.approx(
+                freshness.data_age_minutes(path, NOW)), (book, candle, grace)
+
+    def test_one_missed_ingest_slot_no_longer_blocks_every_entry(self, tmp_path):
+        """The September 2026 blackouts, as a test.
+
+        ``book_snapshots`` is written by the 15-minute ingest cron and checked against a
+        30-minute limit, and before the writer stamped its cadence it had no allowance at
+        all — two slots of headroom for the one blocking feed that starts ageing the instant
+        it is captured. A single late run took the whole book out of the market for hours.
+        With one cadence of grace a 16-minute-old book reads as 1 minute old.
+        """
+        from ops.lib import freshness
+
+        late = self._write(tmp_path, book_age=16, candle_age=30, grace=15, name="late.json")
+        assert freshness.data_age_minutes(late, NOW) == pytest.approx(1.0)
+        assert riskgate.data_age_minutes(late, NOW) == pytest.approx(1.0)
+
+        ungraced = self._write(tmp_path, book_age=16, candle_age=30, name="ungraced.json")
+        assert freshness.data_age_minutes(ungraced, NOW) == pytest.approx(16.0), \
+            "an unstamped feed must keep the old, unforgiving behaviour"
+
+    def test_a_dead_feed_still_blocks_however_generous_the_grace(self, tmp_path):
+        """Grace forgives a late writer, never a dead one. This is the safety half."""
+        from ops.lib import freshness
+
+        dead = self._write(tmp_path, book_age=300, candle_age=300, grace=15, name="dead.json")
+        assert freshness.data_age_minutes(dead, NOW) == pytest.approx(285.0)
+        assert riskgate.data_age_minutes(dead, NOW) == pytest.approx(285.0)
+
+    def test_a_corrupt_grace_cannot_widen_the_allowance(self, tmp_path):
+        """A bad stamp has to fail closed — it may not buy the book extra minutes."""
+        import json as _json
+
+        from ops.lib import freshness
+
+        stamp = (NOW - timedelta(minutes=45)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for bad in ("lots", None, -1000, float("inf")):
+            path = pathlib.Path(tmp_path) / f"bad-{bad}.json"
+            path.write_text(_json.dumps({
+                "version": 1,
+                "sources": {"book_snapshots": {"latest_utc": stamp, "grace_minutes": bad}},
+            }))
+            a, b = riskgate.data_age_minutes(path, NOW), freshness.data_age_minutes(path, NOW)
+            assert a == pytest.approx(b), bad
+            assert a in (pytest.approx(45.0), float("inf")), f"{bad} bought {45 - a} minutes"
 
     def test_a_written_file_unblocks_entries(self, gate_cfg, tmp_path):
         # the fixture already points the gate's sidecar at this path

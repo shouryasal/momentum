@@ -156,6 +156,47 @@ class TestEntryDecisionReachesTheJournal:
         rows = _rows(db, "SELECT * FROM gate_decisions WHERE callback='custom_stake_amount'")
         assert rows and rows[0]["side"] == "buy"
 
+    def test_the_entry_that_was_sized_to_zero_leaves_a_row(self, real_journal, monkeypatch):
+        """The refusal that used to be invisible. A log line is not an audit trail.
+
+        A zero out of ``custom_stake_amount`` means Freqtrade never calls
+        ``confirm_trade_entry``, so the 17-check gate never runs and nothing was written
+        anywhere durable. That is why the 2026-09-30 missed-rally study had to *replay the
+        rules over a panel* to discover the satellite sleeve deleting 292 of 430 sized
+        positions (67.9%) — the journal could not see its own biggest finding.
+        """
+        strat, db = real_journal
+        monkeypatch.setattr(type(strat), "_desired_stake",
+                            lambda self, pair, ps, proposed, tag: 0.0)
+        assert strat.custom_stake_amount(PAIR, NOW, PRICE, proposed_stake=250.0,
+                                         min_stake=10.0, max_stake=9_000.0, leverage=1.0,
+                                         entry_tag=None, side="long") == 0.0
+        rows = _rows(db, "SELECT * FROM gate_decisions WHERE callback='custom_stake_amount'")
+        assert len(rows) == 1, "the wanted-and-refused entry left no row"
+        row = rows[0]
+        assert row["allowed"] == 0 and row["action"] == "size_zero"
+        assert row["severity"] == "reject"
+        assert row["reason"].startswith("desired_zero"), row["reason"]
+        assert row["side"] == "buy"
+        assert row["proposed_stake"] == pytest.approx(250.0), "the size it wanted is the evidence"
+        assert int(_journal.stats()["failed"]) == 0
+
+    def test_a_size_zero_row_is_not_a_gate_breach(self, real_journal, monkeypatch):
+        """It must never alert. The gate did not refuse this — the gate never got a turn.
+
+        ``ops/healthcheck.py`` pages on ``severity='breach'`` only, and these rows are
+        ``reject``. If they ever became breaches, one flat afternoon would page all night.
+        """
+        strat, db = real_journal
+        monkeypatch.setattr(type(strat), "_desired_stake",
+                            lambda self, pair, ps, proposed, tag: 0.0)
+        for _ in range(4):
+            strat.custom_stake_amount(PAIR, NOW, PRICE, proposed_stake=250.0, min_stake=10.0,
+                                      max_stake=9_000.0, leverage=1.0, entry_tag=None,
+                                      side="long")
+        assert not _rows(db, "SELECT * FROM gate_decisions WHERE severity='breach'")
+        assert len(_rows(db, "SELECT * FROM gate_decisions WHERE action='size_zero'")) == 4
+
     def test_an_unknown_side_still_lands_the_row_and_raises_an_incident(self, real_journal):
         """Fail loud, not silent: NULL side beats no audit row at all."""
         strat, db = real_journal

@@ -21,6 +21,7 @@ from ml.metrics import (
     binomial_ci,
     brier,
     costed_backtest,
+    costed_backtest_open_fill,
     default_cost_bps,
     deflated_sharpe_hurdle,
     directional_accuracy,
@@ -282,6 +283,89 @@ def test_buy_and_hold_has_essentially_no_cost_drag():
     res = costed_backtest(pd.Series(np.ones(365)), r, cost_bps=15.0)
     assert res.cost_drag < 0.002
     assert res.turnover < 2.0
+
+
+# ------------------------------------------------------ the open-fill book (the gap it owns)
+
+
+def _gap_up_series(n: int, gap: float) -> tuple[pd.Series, pd.Series]:
+    """A series whose every move happens between one close and the next open.
+
+    ``open[t] == close[t]``, and the price steps up by ``gap`` from each close to the next
+    open. So the bar itself is flat, and the entire return of the series lives in the gaps —
+    which makes the gap term the only thing a book here can be right or wrong about.
+    """
+    closes, opens, px = [], [], 100.0
+    for _ in range(n):
+        px *= 1.0 + gap
+        opens.append(px)
+        closes.append(px)          # flat from the open to the close
+    return pd.Series(opens), pd.Series(closes)
+
+
+def test_an_open_fill_entry_never_collects_the_gap_it_did_not_own():
+    """The 1.3-Sharpe bug, as a test. A breakout gaps up; the buyer at the open misses it.
+
+    On 2026-09-30 a wide-universe study credited each *fresh* position with the close-to-open
+    gap that preceded it, on a rule whose entries gap up by construction. Its 144-cell surface
+    went from a median Sharpe of 0.258 to 1.616 and from beating BTC-hold in 0 cells to all 144.
+
+    The error is worth exactly ``(w[t] - w[t-1]) x gap[t]`` — the weight it did not yet hold,
+    times the move it was not yet exposed to. So: a book that enters once, into a series where
+    every move is a gap, must come out short of the naive close-to-close book by precisely the
+    one gap it bought through, and by nothing else.
+    """
+    n, k, g = 60, 20, 0.01
+    o, c = _gap_up_series(n, g)
+    w = pd.Series([0.0] * k + [1.0] * (n - k))          # decided at k, filled at open[k+1]
+
+    honest = costed_backtest_open_fill(w, o, c, cost_bps=0.0)
+    naive = costed_backtest(w, c.pct_change().fillna(0.0), cost_bps=0.0)
+
+    assert naive.total_return > honest.total_return, "the naive book did not collect the gap"
+    # One gap, compounded out of the whole path: (1+naive) / (1+honest) == 1 + g.
+    assert (1.0 + naive.total_return) / (1.0 + honest.total_return) == pytest.approx(1.0 + g)
+
+
+def test_open_fill_and_close_fill_agree_when_there_is_no_gap_to_argue_about():
+    """With no gaps the two-piece decomposition must compose back into close-to-close, exactly.
+
+    This is the other half of the proof: the open-fill accounting is not merely *pessimistic*,
+    it is arithmetic. Remove the gap — open the bar where the last one closed — and the gap
+    term is identically zero, so the two instruments must agree to the last bit. If they do
+    not, the decomposition is dropping return rather than reassigning it.
+    """
+    rng = np.random.default_rng(7)
+    c = pd.Series(100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.02, 400))))
+    o = c.shift(1).fillna(100.0)                        # every bar opens at the last close
+    w = pd.Series(rng.integers(0, 2, 400).astype(float))   # and it trades, so turnover is live
+    a = costed_backtest_open_fill(w, o, c, cost_bps=15.0)
+    b = costed_backtest(w, c.pct_change().fillna(0.0), cost_bps=15.0)
+    assert a.total_return == pytest.approx(b.total_return, rel=1e-12)
+    assert a.cost_drag == pytest.approx(b.cost_drag, rel=1e-12)
+
+
+def test_the_gap_belongs_to_the_position_that_was_already_open():
+    """The reassignment has a direction, and it is not "nobody gets the gap".
+
+    A book that is already long through a gap earns it; only the bar it *enters* on is
+    forfeited. Getting this backwards would make every held position leak return, which is
+    the mirror-image bug and just as wrong.
+    """
+    o, c = _gap_up_series(40, 0.01)
+    held = pd.Series(np.ones(40))
+    res = costed_backtest_open_fill(held, o, c, cost_bps=0.0)
+    assert res.total_return > 0.30, "a continuously held book forfeited gaps it did own"
+
+
+def test_open_fill_charges_turnover_at_the_open_it_transacted():
+    o, c = _gap_up_series(200, 0.0)          # no gap, no drift: costs are the only term
+    flip = pd.Series([1.0, 0.0] * 100)
+    free = costed_backtest_open_fill(flip, o, c, cost_bps=0.0)
+    costed = costed_backtest_open_fill(flip, o, c, cost_bps=15.0)
+    assert free.total_return == pytest.approx(0.0, abs=1e-12)
+    assert costed.total_return < -0.10, "a book flipping every bar paid nothing"
+    assert costed.cost_drag > 0.20
 
 
 def test_max_dd_is_on_the_equity_curve():

@@ -2239,6 +2239,25 @@ class Schedule(_Model):
     artifact: str = F(..., desc="Artifact the healthcheck expects, or 'none'.",
                       group="ops.schedules")
 
+    def period_minutes(self) -> float | None:
+        """How often this job runs, in minutes, or ``None`` when the cron does not say.
+
+        Only the ``*/N`` minute-step form is answered, which is every sub-hourly job we have.
+        A job that names its minutes (``5 * * * *``), runs daily, or is ``derived`` returns
+        ``None`` — the caller must then have its own answer rather than a wrong one.
+
+        This exists so a *writer* can declare its own refresh cadence to
+        ``ops.lib.freshness`` instead of a reader hard-coding it, which `CLAUDE.md` forbids.
+        """
+        parts = (self.cron or "").split()
+        if len(parts) < 5 or not parts[0].startswith("*/") or parts[1:5] != ["*", "*", "*", "*"]:
+            return None
+        try:
+            n = float(parts[0][2:])
+        except ValueError:
+            return None
+        return n if n > 0 else None
+
 
 class OpsCfg(_Model):
     staleness_min: int = F(..., desc="Data age the healthcheck treats as stale.", group="ops",

@@ -44,6 +44,7 @@ the configured multiple, or every entry of that plan is refused. It is never an 
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from dataclasses import dataclass, field
@@ -649,10 +650,12 @@ def data_age_minutes(freshness_path: str | Path, now: datetime) -> float:
                  "candles_1h":     "2026-09-22T07:00:00Z"}}
     ```
 
-    A source value may also be an object carrying ``latest_utc``. Age is
-    ``max(book age, 1h-candle age - 60min, 0)`` — a 1h candle's open_time is
-    legitimately up to 60 minutes old. Missing, unparseable or empty ⇒ ``+inf``
-    (fail-closed: no entries until data flows).
+    A source value may also be an object carrying ``latest_utc``, and optionally the
+    ``grace_minutes`` its writer stamped: how long after its newest datum that feed is still
+    current, which only the writer knows. Age is ``max(age - grace, 0)`` over every source,
+    where grace is the stamped value, else one whole timeframe for a ``candles_<tf>`` member,
+    else zero. Missing, unparseable or empty ⇒ ``+inf`` (fail-closed: no entries until data
+    flows). This mirrors ``ops.lib.freshness.grace_of`` and the two must not drift.
     """
     try:
         data = json.loads(Path(freshness_path).read_text())
@@ -671,12 +674,37 @@ def data_age_minutes(freshness_path: str | Path, now: datetime) -> float:
         if seen.tzinfo is None:
             seen = seen.replace(tzinfo=UTC)
         age = (now - seen).total_seconds() / 60.0
-        if name.startswith("candles_"):
-            age -= _tf_minutes(name.split("_", 1)[1])
-        ages.append(age)
+        ages.append(age - _grace_minutes(name, value))
     if not ages:
         return float("inf")
     return max(max(ages), 0.0)
+
+
+#: Ceiling on a writer-stamped grace. Mirrors ``ops.lib.freshness.MAX_GRACE_MINUTES``.
+MAX_GRACE_MINUTES = 1440.0
+
+
+def _grace_minutes(name: str, value: object) -> float:
+    """The in-container half of ``ops.lib.freshness.grace_of``. Keep the two identical.
+
+    A writer-stamped ``grace_minutes`` wins; otherwise a ``candles_<tf>`` member is allowed
+    one whole timeframe; otherwise zero. A non-positive, non-finite or unparseable stamp is
+    zero and anything larger than ``MAX_GRACE_MINUTES`` is clamped to it, so a corrupt file
+    cannot *widen* the allowance — an ``Infinity`` here would switch the staleness check off
+    altogether, and that direction has to fail closed.
+    """
+    if isinstance(value, dict):
+        raw = value.get("grace_minutes")
+        if raw is not None:
+            try:
+                g = float(raw)
+            except (TypeError, ValueError):
+                g = 0.0
+            if math.isfinite(g) and g > 0:
+                return min(g, MAX_GRACE_MINUTES)
+    if name.startswith("candles_"):
+        return _tf_minutes(name.split("_", 1)[1])
+    return 0.0
 
 
 def _tf_minutes(tf: str) -> float:

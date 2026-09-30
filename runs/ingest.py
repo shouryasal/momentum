@@ -430,6 +430,27 @@ class Ingest:
                 pass
         return out
 
+    def freshness_grace(self) -> dict[str, float]:
+        """How long each feed *this job writes* stays current — its own cron cadence.
+
+        Only ``book_snapshots`` needs it. It is the one blocking feed with no natural
+        allowance: the ``candles_<tf>`` family is allowed one whole timeframe because a
+        candle's ``open_time`` is legitimately that old, while a book snapshot is stamped at
+        capture and so starts ageing immediately. Checked against ``ops.staleness_min`` (30)
+        and written every 15 minutes, that left **two cron slots** of headroom, and both
+        multi-hour entry blackouts in September 2026 came through it — not from stale prices,
+        which were genuinely stale on 0.049% of decision moments, but from this job being
+        late. One cadence of grace makes a single missed slot survivable and leaves a
+        genuinely dead feed blocking exactly as before.
+
+        The number comes from the schedule, never from a constant here: if the cron moves,
+        this moves with it. A cron the parser cannot read yields no grace, which is the old
+        behaviour and fails closed.
+        """
+        sched = self.cfg.ops.schedules.get("ingest")
+        period = sched.period_minutes() if sched else None
+        return {freshlib.SOURCE_BOOKS: period} if period else {}
+
     def write_freshness(self) -> None:
         """Refresh ``knowledge/state/freshness.json`` after every phase.
 
@@ -445,7 +466,8 @@ class Ingest:
                 return
             from ops.lib import freshness as fresh
 
-            fresh.record_many(sources, now=self.now, root=self.root)
+            fresh.record_many(sources, now=self.now, root=self.root,
+                              grace_minutes=self.freshness_grace())
         except Exception as e:  # noqa: BLE001 — telemetry only
             print(f"freshness write failed: {e}", file=sys.stderr)
 

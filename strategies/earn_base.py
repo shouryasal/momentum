@@ -946,6 +946,40 @@ class EarnBaseStrategy(IStrategy):
             )
         return d.allowed
 
+    def _journal_sized_out(self, pair: str, ps: PortfolioState, reason: str,
+                           wanted: float | None, side: str, entry_tag: str | None) -> None:
+        """Record the entry that was wanted and never reached the gate. Never raises.
+
+        A stake of zero out of :meth:`custom_stake_amount` means Freqtrade never calls
+        ``confirm_trade_entry``, so the 17-check gate never runs and — until this existed —
+        nothing was written anywhere durable. The refusal left one ``instrument`` log line and
+        no row, which made a whole class of behaviour invisible in production: the
+        missed-rally study of 2026-09-30 measured the satellite sleeve **deleting the position
+        it had just sized on 292 of 430 asset-days (67.9%)**, and could only find that by
+        replaying the rules over a panel, because the journal has never been able to see it.
+
+        These rows are ``allowed=False, action="size_zero"``. They are not gate rejections and
+        must not be counted as such — the gate did not get a turn. ``reason`` names which exit
+        fired, so the split between "the strategy wanted nothing" (``desired_zero``) and "the
+        strategy wanted something it could not have" (``cap_stake`` — the sizing contradiction)
+        is recoverable. The trend gate is deliberately absent: :meth:`_journal_trend_gate`
+        already writes it, latched to one row per state change.
+        """
+        if not self._journal_on:
+            return
+        try:
+            _journal.record_gate_decision(
+                self.gate_cfg.sleeve, pair, "custom_stake_amount", "entry", False,
+                f"{reason}:{entry_tag or ''}",
+                side=self._order_side(side, is_entry=True, where="custom_stake_amount"),
+                severity="reject", checks={reason: False},
+                proposed_stake=(float(wanted) if wanted else None),
+                nav=ps.nav, strategy_version=STRATEGY_VERSION,
+                run_id=self.gate_cfg.run_id or None, action="size_zero",
+            )
+        except Exception:  # noqa: BLE001 — journalling never vetoes or approves an order
+            pass
+
     def custom_stake_amount(self, pair: str, current_time: datetime, current_rate: float,
                             proposed_stake: float, min_stake: float | None,
                             max_stake: float, leverage: float, entry_tag: str | None,
@@ -958,12 +992,16 @@ class EarnBaseStrategy(IStrategy):
         if desired <= 0:
             instrument("sized_out", pair, current_time,
                        f"desired_zero:{entry_tag or ''}", 0.0)
+            self._journal_sized_out(pair, ps, "desired_zero", proposed_stake, side, entry_tag)
             return 0.0
         # The trend ensemble is the ENTRY GATE and POSITION SCALE for a core pair: no
         # entry at weight zero (or without a fresh signal), the stake scaled otherwise.
         desired = self._trend_scaled(pair, desired, ps, where="custom_stake_amount",
                                      intent="entry", tag=entry_tag or "")
         if desired <= 0:
+            # No row here: _trend_scaled -> _journal_trend_gate already wrote one, latched to
+            # one row per state change. A second row per call would both duplicate it and
+            # break that contract (tests/strategies/test_trend_gate.py).
             instrument("sized_out", pair, current_time,
                        f"trend_gate:{entry_tag or ''}", 0.0)
             return 0.0
@@ -975,6 +1013,9 @@ class EarnBaseStrategy(IStrategy):
             instrument("sized" if capped > 0 else "sized_out", pair, current_time,
                        f"cap_stake:{entry_tag or ''}" if capped <= 0 else (entry_tag or ""),
                        capped)
+        if capped <= 0:
+            self._journal_sized_out(pair, ps, "cap_stake", desired, side, entry_tag)
+            return capped
         if self._journal_on and 0 < capped < desired:
             _journal.record_gate_decision(
                 self.gate_cfg.sleeve, pair, "custom_stake_amount", "entry", True,
