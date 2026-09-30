@@ -12,14 +12,15 @@ from .conftest import NOW
 
 
 def _fill(jdb, *, sleeve="a", pair="BTC/USDT", side="buy", amount=0.01, price=100.1,
-          fee=0.01, fee_ccy="USDT", quote=(100.0, 100.2), ts=None):
+          fee=0.01, fee_ccy="USDT", quote=(100.0, 100.2), ts=None, mode="live"):
     ts = ts or NOW.strftime("%Y-%m-%dT%H:%M:%SZ")
     qb, qa = quote if quote else (None, None)
     cur = jdb.execute(
         "INSERT INTO fills(ts_utc, sleeve, pair, side, fill_amount, fill_price,"
-        " fee_amount, fee_currency, quote_bid, quote_ask, quote_ts)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (ts, sleeve, pair, side, amount, price, fee, fee_ccy, qb, qa, ts if quote else None))
+        " fee_amount, fee_currency, quote_bid, quote_ask, quote_ts, mode)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (ts, sleeve, pair, side, amount, price, fee, fee_ccy, qb, qa,
+         ts if quote else None, mode))
     jdb.commit()
     return cur.lastrowid
 
@@ -94,6 +95,45 @@ def test_calibration_writes_only_costs_block(cfg, dbs, tmp_path):
     assert "measured_month: 2026-08" in text
     # second run same month: no-op
     assert tca_job.calibrate_monthly(jdb, cfg, by, NOW) is False
+
+
+def test_paper_fills_never_calibrate_the_cost_model(cfg, dbs, tmp_path):
+    """A dry-run fill pays no spread, so it must never become the cost assumption.
+
+    Freqtrade books a paper fill at the touch: measured paper slippage is near zero by
+    construction. On 2026-10-01 this job was about to rewrite `costs.slippage_bps` from 5.0
+    to about 2.3 from a week of paper trading on a system that has never traded real money,
+    and every strategy measured afterwards would have cleared its cost floor more easily
+    than reality allows. `fills.mode` has recorded test/live all along; nothing read it.
+    """
+    _, jdb, kdb = dbs
+    by = tmp_path / "backtest.yaml"
+    by.write_text("costs:\n  fee_bps: 10.0\n  slippage_bps: 5.0\n  measured_month: null\n"
+                  "  n_fills: 0\n")
+    prior = (NOW.replace(day=1) - timedelta(days=1)).replace(day=15)
+    for _ in range(40):                       # twice the floor, all of it paper
+        _fill(jdb, ts=prior.strftime("%Y-%m-%dT%H:%M:%SZ"), price=100.0,
+              quote=(100.0, 100.2), amount=1.0, fee=0.1, mode="test")
+    tca_job.reconcile_fills(jdb, kdb, cfg, NOW)
+    assert tca_job.calibrate_monthly(jdb, cfg, by, NOW) is False
+    text = by.read_text()
+    assert "slippage_bps: 5.0" in text and "fee_bps: 10.0" in text, "paper fills moved the costs"
+    assert "measured_month: null" in text
+    row = jdb.execute("SELECT n_fills, applied FROM tca_calibrations").fetchone()
+    assert row["applied"] == 0 and row["n_fills"] == 0, "paper fills were counted"
+
+
+def test_a_fill_of_unknown_mode_does_not_calibrate(cfg, dbs, tmp_path):
+    """Fail closed: a NULL mode is not evidence about real execution."""
+    _, jdb, kdb = dbs
+    by = tmp_path / "backtest.yaml"
+    by.write_text("costs:\n  fee_bps: 10.0\n  slippage_bps: 5.0\n  measured_month: null\n")
+    prior = (NOW.replace(day=1) - timedelta(days=1)).replace(day=15)
+    for _ in range(25):
+        _fill(jdb, ts=prior.strftime("%Y-%m-%dT%H:%M:%SZ"), amount=1.0, fee=0.1, mode=None)
+    tca_job.reconcile_fills(jdb, kdb, cfg, NOW)
+    assert tca_job.calibrate_monthly(jdb, cfg, by, NOW) is False
+    assert "slippage_bps: 5.0" in by.read_text()
 
 
 def test_calibration_skips_below_min_fills(cfg, dbs, tmp_path):

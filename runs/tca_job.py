@@ -126,7 +126,17 @@ def update_rolling(jdb, now: datetime) -> None:
 
 def calibrate_monthly(jdb, cfg: EarnConfig, backtest_yaml: Path, now: datetime) -> bool:
     """First run of a new month: write prior-month measured medians into backtest.yaml
-    (ruamel round-trip preserves the rest of the file). Below the fill floor: skip."""
+    (ruamel round-trip preserves the rest of the file). Below the fill floor: skip.
+
+    LIVE FILLS ONLY. A dry-run fill is booked at the touch and pays no spread, so paper
+    slippage is near zero by construction — calibrating from it would replace a measured
+    assumption with an artefact and make every future backtest optimistic in the one
+    direction that matters. This system has never traded real money, so on 2026-10-01 this
+    job was about to rewrite ``costs.slippage_bps`` from 5.0 to about 2.3 on the strength of
+    a week of paper trading, silently, and every strategy measured afterwards would have
+    cleared its cost floor more easily than reality allows. ``fills.mode`` has always
+    recorded ``test`` or ``live``; nothing was reading it.
+    """
     month_first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     prior_start = (month_first - timedelta(days=1)).replace(day=1)
     prior = prior_start.strftime("%Y-%m")
@@ -136,7 +146,7 @@ def calibrate_monthly(jdb, cfg: EarnConfig, backtest_yaml: Path, now: datetime) 
     rows = jdb.execute(
         "SELECT t.fee_bps, t.slippage_bps FROM tca_fill_costs t JOIN fills f ON f.id=t.fill_id"
         " WHERE f.ts_utc >= ? AND f.ts_utc < ? AND t.status != 'unreconciled'"
-        " AND t.fee_bps IS NOT NULL",
+        " AND t.fee_bps IS NOT NULL AND f.mode = 'live'",
         (_iso(prior_start), _iso(month_first))).fetchall()
     if len(rows) < cfg.tca.calibration_min_fills:
         jdb.execute(
