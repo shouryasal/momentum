@@ -1,0 +1,29 @@
+{
+  "id": "2026-09-30-track6-missed-rally-forensics",
+  "sealed_before_any_number": true,
+  "workspace": "im6",
+  "statement": "Every >=+30%/20d rally in the currently-listed Binance USDT spot universe over the last 24 months can be assigned to exactly ONE named cause explaining why Earn did not own it, by replaying the shipped universe funnel, the shipped SleeveA entry rule and the shipped risk-gate checks over the survivorship-free daily panel; and the modal cause is a MANDATE cause (universe membership, satellite eligibility, or seat/gross capacity) rather than a DETECTION cause (no detector fired, screener dropped it, validation expired, proposal abstained).",
+  "falsifiers": {
+    "F1_attribution_completeness": "If more than 10% of rallies land in an 'unattributable/other' bucket, the forensics loop is not a working instrument and H6a is refuted.",
+    "F2_mandate_vs_detection": "If a DETECTION-or-later cause (no_detector_fired, screened_out, expired, abstained, gate_refused, sized_to_zero) is the single most common cause, then the gap is fixable in software and H6b is REFUTED — the system is missing rallies for reasons engineering can close.",
+    "F3_materiality": "If the total forgone return of the top three causes, valued at the SHIPPED satellite position size (max_satellite_gross 0.05, max_satellite_positions 2, tier cap 0.05), exceeds 10% of NAV per year, the misses are economically material and H6c is refuted."
+  },
+  "free_parameters": 3,
+  "free_parameter_names": ["rally_threshold_pct=30", "rally_window_days=20", "episode_dedupe_days=20"],
+  "plateau_reported_at": ["20%/20d", "30%/20d", "50%/20d", "30%/10d", "30%/60d"],
+  "regimes": ["btc_uptrend (BTC>200dMA)", "btc_downtrend (BTC<200dMA)", "2024_h2", "2025", "2026_ytd"],
+  "horizon": "20d forward, 24 months 2024-09-25 -> 2026-09-24",
+  "costs_bps": 30,
+  "costs_note": "0.30% round trip always on (10bps fee + 5bps slippage per side). Every forgone-return number is NET.",
+  "baselines": ["btc_buy_and_hold over the same 24 months", "the shipped SleeveA book over the same 24 months"],
+  "surface": "~/earn-panels/panel_1d.parquet (747 symbols, survivorship-free), ~/earn-run/data/binance/*.feather (read-only), public Binance /api/v3/exchangeInfo (fetched 2026-09-30). NO live DB read.",
+  "selection_trials_added": 0,
+  "trials_note": "This is a CENSUS with a pre-declared definition, not a search for a return-improving rule. No book is optimised, no parameter is tuned to a Sharpe. The plateau table is reported for robustness, not selected from. Trials added to the 8,144 counter: 0.",
+  "what_cannot_be_replayed": [
+    "the LLM screener's per-candidate keep/drop (no recorded per-candidate scores outside the live journal)",
+    "the LLM validator's verdict and confidence",
+    "SleeveB's proposal abstention",
+    "intra-day 5-minute scanner cadence (panel is daily; detectors are modelled at daily resolution)"
+  ],
+  "how_those_are_handled": "They are modelled as CAPACITY constraints using the shipped configured limits (scanner.max_candidates_per_cycle=5, validator.max_per_day=6, planner.max_per_day=3) and reported as a single named cause each, with the exact journal query a live version would run stated in the report."
+}

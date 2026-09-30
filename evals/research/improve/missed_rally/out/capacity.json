@@ -1,0 +1,90 @@
+[
+ {
+  "cause": "C03_watchlist_only_no_tier",
+  "n_rallies": 951,
+  "naive_forgone_pct": 953.6,
+  "n_that_fit_2_seats": 111,
+  "capacity_bounded_ceiling_pct": 112.67,
+  "per_year_pct": 56.33
+ },
+ {
+  "cause": "C02_not_in_watchlist",
+  "n_rallies": 668,
+  "naive_forgone_pct": 676.6,
+  "n_that_fit_2_seats": 81,
+  "capacity_bounded_ceiling_pct": 86.01,
+  "per_year_pct": 43.0
+ },
+ {
+  "cause": "C01_not_listed_long_enough",
+  "n_rallies": 439,
+  "naive_forgone_pct": 480.6,
+  "n_that_fit_2_seats": 107,
+  "capacity_bounded_ceiling_pct": 130.4,
+  "per_year_pct": 65.2
+ },
+ {
+  "cause": "C05_satellite_exit_only",
+  "n_rallies": 394,
+  "naive_forgone_pct": 381.0,
+  "n_that_fit_2_seats": 74,
+  "capacity_bounded_ceiling_pct": 72.38,
+  "per_year_pct": 36.19
+ },
+ {
+  "cause": "C04_major_structurally_unreachable",
+  "n_rallies": 96,
+  "naive_forgone_pct": 90.3,
+  "n_that_fit_2_seats": 42,
+  "capacity_bounded_ceiling_pct": 38.99,
+  "per_year_pct": 19.49
+ },
+ {
+  "cause": "C10_own_regime_gate_off",
+  "n_rallies": 26,
+  "naive_forgone_pct": 25.5,
+  "n_that_fit_2_seats": 11,
+  "capacity_bounded_ceiling_pct": 12.74,
+  "per_year_pct": 6.37
+ },
+ {
+  "cause": "C09_regime_gate_off",
+  "n_rallies": 23,
+  "naive_forgone_pct": 19.1,
+  "n_that_fit_2_seats": 12,
+  "capacity_bounded_ceiling_pct": 9.83,
+  "per_year_pct": 4.91
+ },
+ {
+  "cause": "C11_below_seat_cutoff",
+  "n_rallies": 3,
+  "naive_forgone_pct": 2.8,
+  "n_that_fit_2_seats": 2,
+  "capacity_bounded_ceiling_pct": 2.09,
+  "per_year_pct": 1.04
+ },
+ {
+  "cause": "C12_sized_to_zero",
+  "n_rallies": 2,
+  "naive_forgone_pct": 1.7,
+  "n_that_fit_2_seats": 2,
+  "capacity_bounded_ceiling_pct": 1.68,
+  "per_year_pct": 0.84
+ },
+ {
+  "cause": "C15_captured",
+  "n_rallies": 2,
+  "naive_forgone_pct": 1.7,
+  "n_that_fit_2_seats": 2,
+  "capacity_bounded_ceiling_pct": 1.68,
+  "per_year_pct": 0.84
+ },
+ {
+  "cause": "C14_owned_exited_before_peak",
+  "n_rallies": 1,
+  "naive_forgone_pct": 0.9,
+  "n_that_fit_2_seats": 1,
+  "capacity_bounded_ceiling_pct": 0.93,
+  "per_year_pct": 0.47
+ }
+]

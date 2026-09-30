@@ -1,0 +1,24 @@
+label,n_days,sharpe_arith,cagr,max_dd,total_x,cost_bps_side,round_trips,mean_names_held,mean_members,median_adv_of_held_musd
+PIT satellite book (what Earn trades),2824,0.688,0.1397,-0.4708,2.75,15.0,1386.0,5.02,69.9,47.65
+"PIT excluded, all reasons",2824,1.118,0.2435,-0.3493,5.399,15.0,1888.0,5.76,127.8,3.03
+"PIT excluded ONLY by age<180d (liquid, real, young)",2824,0.65,0.0822,-0.1766,1.842,15.0,309.0,1.3,16.8,4.21
+"PIT excluded ONLY by ADV<$1M (illiquid, old enough)",2824,0.761,0.141,-0.4622,2.775,15.0,1743.0,3.91,69.3,0.82
+PIT excluded ONLY by vol120<0.20 (the pegs),2824,-0.772,-0.0047,-0.0367,0.964,15.0,190.0,1.0,5.0,15.38
+PIT excluded ONLY by weekend ratio (not 24/7),2824,0.12,0.0,-0.0004,1.0,15.0,1.0,0.0,0.0,63.14
+PIT excluded ONLY by the name rules (lev/equity/RWA),2824,0.525,0.0468,-0.2272,1.424,15.0,230.0,1.39,9.7,23.55
+PIT excluded but ADV>=$1M anyway,2824,0.704,0.1058,-0.2808,2.177,15.0,817.0,3.67,40.0,10.67
+PIT everything listed (union),2824,1.006,0.2526,-0.4777,5.713,15.0,2158.0,6.84,293.0,34.22
+COST STRESS | PIT excluded @ 15bps/side,2824,1.118,0.2435,-0.3493,5.399,15.0,1888.0,5.76,127.8,3.03
+COST STRESS | PIT satellite @ 15bps/side,2824,0.688,0.1397,-0.4708,2.75,15.0,1386.0,5.02,69.9,47.65
+COST STRESS | excluded-young-only @ 15bps/side,2824,0.65,0.0822,-0.1766,1.842,15.0,309.0,1.3,16.8,4.21
+COST STRESS | PIT excluded @ 30bps/side,2824,0.948,0.1989,-0.3932,4.07,30.0,1888.0,5.76,127.8,3.03
+COST STRESS | PIT satellite @ 30bps/side,2824,0.57,0.1095,-0.5493,2.234,30.0,1386.0,5.02,69.9,47.65
+COST STRESS | excluded-young-only @ 30bps/side,2824,0.606,0.0757,-0.1825,1.759,30.0,309.0,1.3,16.8,4.21
+COST STRESS | PIT excluded @ 50bps/side,2824,0.722,0.1419,-0.4839,2.792,50.0,1888.0,5.76,127.8,3.03
+COST STRESS | PIT satellite @ 50bps/side,2824,0.413,0.0705,-0.6361,1.694,50.0,1386.0,5.02,69.9,47.65
+COST STRESS | excluded-young-only @ 50bps/side,2824,0.547,0.0672,-0.1902,1.654,50.0,309.0,1.3,16.8,4.21
+COST STRESS | PIT excluded @ 100bps/side,2824,0.157,0.0109,-0.7439,1.088,100.0,1888.0,5.76,127.8,3.03
+COST STRESS | PIT satellite @ 100bps/side,2824,0.021,-0.0211,-0.787,0.848,100.0,1386.0,5.02,69.9,47.65
+COST STRESS | excluded-young-only @ 100bps/side,2824,0.399,0.0461,-0.2208,1.417,100.0,309.0,1.3,16.8,4.21
+BASELINE|BTC_HOLD_100pct,2824,0.969,0.497,-0.7663,22.679,,,,,
+BASELINE|BTC_HOLD_at_40pct_cap,2824,0.969,0.2309,-0.4089,4.988,,,,,

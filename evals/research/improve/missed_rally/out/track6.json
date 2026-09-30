@@ -1,0 +1,453 @@
+{
+ "window": [
+  "2024-09-25",
+  "2026-09-24"
+ ],
+ "prereg_seal": "ffda34182aa214d8e160607a4dc83983 (2026-09-30T13:54:54Z)",
+ "funnel_validation": {
+  "snapshot_date": "2026-09-20",
+  "considered": 493,
+  "watchlist": 106,
+  "excluded": 387,
+  "excluded_by_filter": {
+   "liquidity": 280,
+   "not_24_7": 62,
+   "real_world_asset": 18,
+   "listing_age": 9,
+   "tick_size": 2,
+   "pegged": 15,
+   "data_only": 1
+  },
+  "tier_counts": {
+   "satellite": 23,
+   "watchlist": 75,
+   "core": 2,
+   "major": 6
+  },
+  "tradeable": 31,
+  "enterable": 10,
+  "shipped_for_comparison": {
+   "watchlist": 107,
+   "tradeable": 31,
+   "enterable": 16
+  }
+ },
+ "seat_holders_by_month": {
+  "2024-11": [
+   "SUNUSDT"
+  ],
+  "2024-12": [
+   "CKBUSDT",
+   "OGUSDT"
+  ],
+  "2025-01": [
+   "OGUSDT"
+  ],
+  "2025-02": [
+   "ENSUSDT"
+  ],
+  "2025-05": [
+   "BCHUSDT"
+  ],
+  "2025-06": [
+   "BCHUSDT"
+  ],
+  "2025-07": [
+   "BCHUSDT",
+   "XLMUSDT"
+  ],
+  "2025-09": [
+   "CAKEUSDT",
+   "CRVUSDT",
+   "SHIBUSDT"
+  ],
+  "2025-10": [
+   "BCHUSDT",
+   "CAKEUSDT"
+  ],
+  "2025-11": [
+   "BCHUSDT"
+  ]
+ },
+ "rally_rule": {
+  "thresh_pct": 30.0,
+  "window_days": 20,
+  "dedupe_days": 20
+ },
+ "universe": {
+  "binance_usdt_spot_TRADING": 503,
+  "with_panel_history": 493,
+  "no_panel_history": [
+   "ADBEBUSDT",
+   "FWDIBUSDT",
+   "HPEBUSDT",
+   "HYPEUSDT",
+   "PDDBUSDT",
+   "SHAZBUSDT",
+   "WENBUSDT",
+   "ZMBUSDT",
+   "\u5e01\u5b89\u4eba\u751fUSDT",
+   "\u725b\u6765USDT"
+  ]
+ },
+ "n_rallies": 2605,
+ "n_symbols_with_a_rally": 436,
+ "shipped_satellite_weight": 0.025,
+ "distribution": [
+  {
+   "cause": "C03_watchlist_only_no_tier",
+   "n": 951,
+   "median_gain": 0.3416583417,
+   "mean_gain": 0.4040955225,
+   "forgone_peak_nav_pct": 953.6046047811,
+   "forgone_shipped_exit_nav_pct": 80.3307340549,
+   "share_pct": 36.5
+  },
+  {
+   "cause": "C02_not_in_watchlist",
+   "n": 668,
+   "median_gain": 0.3381161754,
+   "mean_gain": 0.4081367669,
+   "forgone_peak_nav_pct": 676.578400655,
+   "forgone_shipped_exit_nav_pct": 45.2890518037,
+   "share_pct": 25.6
+  },
+  {
+   "cause": "C01_not_listed_long_enough",
+   "n": 439,
+   "median_gain": 0.3480897514,
+   "mean_gain": 0.4408624905,
+   "forgone_peak_nav_pct": 480.5540833256,
+   "forgone_shipped_exit_nav_pct": 21.1438393989,
+   "share_pct": 16.9
+  },
+  {
+   "cause": "C05_satellite_exit_only",
+   "n": 394,
+   "median_gain": 0.3486384245,
+   "mean_gain": 0.3898056145,
+   "forgone_peak_nav_pct": 381.0035302749,
+   "forgone_shipped_exit_nav_pct": 20.1230886179,
+   "share_pct": 15.1
+  },
+  {
+   "cause": "C04_major_structurally_unreachable",
+   "n": 96,
+   "median_gain": 0.3372802179,
+   "mean_gain": 0.3792665842,
+   "forgone_peak_nav_pct": 90.3039802033,
+   "forgone_shipped_exit_nav_pct": 20.8304428452,
+   "share_pct": 3.7
+  },
+  {
+   "cause": "C10_own_regime_gate_off",
+   "n": 26,
+   "median_gain": 0.3391491679,
+   "mean_gain": 0.395366404,
+   "forgone_peak_nav_pct": 25.5038162594,
+   "forgone_shipped_exit_nav_pct": 0.1634071988,
+   "share_pct": 1.0
+  },
+  {
+   "cause": "C09_regime_gate_off",
+   "n": 23,
+   "median_gain": 0.3243937691,
+   "mean_gain": 0.3345437171,
+   "forgone_peak_nav_pct": 19.0637637325,
+   "forgone_shipped_exit_nav_pct": 1.3664131593,
+   "share_pct": 0.9
+  },
+  {
+   "cause": "C11_below_seat_cutoff",
+   "n": 3,
+   "median_gain": 0.3039795114,
+   "mean_gain": 0.3813860418,
+   "forgone_peak_nav_pct": 2.8378953135,
+   "forgone_shipped_exit_nav_pct": 1.8881998698,
+   "share_pct": 0.1
+  },
+  {
+   "cause": "C12_sized_to_zero",
+   "n": 2,
+   "median_gain": 0.3390635551,
+   "mean_gain": 0.3390635551,
+   "forgone_peak_nav_pct": 1.6803177753,
+   "forgone_shipped_exit_nav_pct": 0.8098872115,
+   "share_pct": 0.1
+  },
+  {
+   "cause": "C15_captured",
+   "n": 2,
+   "median_gain": 0.3381390372,
+   "mean_gain": 0.3381390372,
+   "forgone_peak_nav_pct": 0.0,
+   "forgone_shipped_exit_nav_pct": 0.0,
+   "share_pct": 0.1
+  },
+  {
+   "cause": "C14_owned_exited_before_peak",
+   "n": 1,
+   "median_gain": 0.3761329305,
+   "mean_gain": 0.3761329305,
+   "forgone_peak_nav_pct": 0.9328323263,
+   "forgone_shipped_exit_nav_pct": 0.348429003,
+   "share_pct": 0.0
+  }
+ ],
+ "unattributable_share_pct": 0.0,
+ "baselines": {
+  "btc_buy_and_hold_ret": 0.32977572685334944,
+  "btc_buy_and_hold_sharpe": 0.542373128173679,
+  "shipped_book_ret": 0.12472621640656256,
+  "shipped_book_sharpe": 0.5147085505286002
+ },
+ "counterfactual_books": {
+  "B0_shipped": {
+   "ret": 0.12472621640656256,
+   "sharpe": 0.5147085505286002,
+   "mdd": -0.11875569082730919,
+   "cagr": 0.060616601426386474
+  },
+  "B1_relax_C05_eligibility_off": {
+   "ret": 0.12004735456795013,
+   "sharpe": 0.5183682112462142,
+   "mdd": -0.11813468184479625,
+   "cagr": 0.0584051932468852
+  },
+  "B2_relax_C04_majors_get_seats": {
+   "ret": 0.1246992293325766,
+   "sharpe": 0.5224737686978959,
+   "mdd": -0.11757608143172704,
+   "cagr": 0.060603859492720735
+  },
+  "B3_relax_C03_whole_watchlist": {
+   "ret": 0.12035658709655084,
+   "sharpe": 0.507869432081733,
+   "mdd": -0.11820948078658122,
+   "cagr": 0.058551490493841785
+  },
+  "B4_more_seats_6_at_15pct": {
+   "ret": 0.1120836023521865,
+   "sharpe": 0.4834733256185392,
+   "mdd": -0.113077403910537,
+   "cagr": 0.05463058715657554
+  },
+  "B5_whole_watchlist_6_seats_15pct": {
+   "ret": 0.11799282546488721,
+   "sharpe": 0.5702775634213474,
+   "mdd": -0.10355936771301133,
+   "cagr": 0.05743268737088836
+  },
+  "B6_min_position_floor_removed": {
+   "ret": 0.16230798181744688,
+   "sharpe": 0.6176535136649688,
+   "mdd": -0.11875569082730841,
+   "cagr": 0.07821510588522385
+  }
+ },
+ "counterfactual_held_sets": {
+  "B0_shipped": {
+   "distinct_satellites_ever_held": 9,
+   "names": [
+    "BCHUSDT",
+    "CAKEUSDT",
+    "CKBUSDT",
+    "CRVUSDT",
+    "ENSUSDT",
+    "OGUSDT",
+    "SHIBUSDT",
+    "SUNUSDT",
+    "XLMUSDT"
+   ],
+   "asset_days_held": 138,
+   "min_position_zeroed_asset_days": 292
+  },
+  "B1_relax_C05_eligibility_off": {
+   "distinct_satellites_ever_held": 9,
+   "names": [
+    "BCHUSDT",
+    "BONKUSDT",
+    "ENAUSDT",
+    "ENSUSDT",
+    "ETHFIUSDT",
+    "PEPEUSDT",
+    "SUIUSDT",
+    "TAOUSDT",
+    "WBTCUSDT"
+   ],
+   "asset_days_held": 125,
+   "min_position_zeroed_asset_days": 553
+  },
+  "B2_relax_C04_majors_get_seats": {
+   "distinct_satellites_ever_held": 9,
+   "names": [
+    "AAVEUSDT",
+    "BCHUSDT",
+    "CRVUSDT",
+    "DOGEUSDT",
+    "PEOPLEUSDT",
+    "SOLUSDT",
+    "SUIUSDT",
+    "TRXUSDT",
+    "XRPUSDT"
+   ],
+   "asset_days_held": 110,
+   "min_position_zeroed_asset_days": 622
+  },
+  "B3_relax_C03_whole_watchlist": {
+   "distinct_satellites_ever_held": 10,
+   "names": [
+    "AAVEUSDT",
+    "BCHUSDT",
+    "CRVUSDT",
+    "DOGEUSDT",
+    "ENAUSDT",
+    "PEOPLEUSDT",
+    "SOLUSDT",
+    "SUIUSDT",
+    "TRXUSDT",
+    "XRPUSDT"
+   ],
+   "asset_days_held": 105,
+   "min_position_zeroed_asset_days": 616
+  },
+  "B4_more_seats_6_at_15pct": {
+   "distinct_satellites_ever_held": 17,
+   "names": [
+    "BCHUSDT",
+    "CAKEUSDT",
+    "CFXUSDT",
+    "CKBUSDT",
+    "CRVUSDT",
+    "DOTUSDT",
+    "ENSUSDT",
+    "ETCUSDT",
+    "FETUSDT",
+    "GALAUSDT",
+    "INJUSDT",
+    "LTCUSDT",
+    "OGUSDT",
+    "RAYUSDT",
+    "SHIBUSDT",
+    "UNIUSDT",
+    "XLMUSDT"
+   ],
+   "asset_days_held": 394,
+   "min_position_zeroed_asset_days": 463
+  },
+  "B5_whole_watchlist_6_seats_15pct": {
+   "distinct_satellites_ever_held": 23,
+   "names": [
+    "AAVEUSDT",
+    "ADAUSDT",
+    "BCHUSDT",
+    "CAKEUSDT",
+    "CRVUSDT",
+    "DOGEUSDT",
+    "ENAUSDT",
+    "HBARUSDT",
+    "LINKUSDT",
+    "LTCUSDT",
+    "PENDLEUSDT",
+    "PEOPLEUSDT",
+    "PEPEUSDT",
+    "RUNEUSDT",
+    "SEIUSDT",
+    "SOLUSDT",
+    "SUIUSDT",
+    "TAOUSDT",
+    "TRXUSDT",
+    "TWTUSDT",
+    "WBTCUSDT",
+    "XLMUSDT",
+    "XRPUSDT"
+   ],
+   "asset_days_held": 289,
+   "min_position_zeroed_asset_days": 1812
+  },
+  "B6_min_position_floor_removed": {
+   "distinct_satellites_ever_held": 17,
+   "names": [
+    "BCHUSDT",
+    "CAKEUSDT",
+    "CKBUSDT",
+    "CRVUSDT",
+    "ENSUSDT",
+    "HBARUSDT",
+    "ICPUSDT",
+    "INJUSDT",
+    "LINKUSDT",
+    "LTCUSDT",
+    "NEARUSDT",
+    "OGUSDT",
+    "SHIBUSDT",
+    "STXUSDT",
+    "SUNUSDT",
+    "UNIUSDT",
+    "XLMUSDT"
+   ],
+   "asset_days_held": 430,
+   "min_position_zeroed_asset_days": 0
+  }
+ },
+ "detector_coverage": {
+  "n_rallies": 2605,
+  "at_least_one_detector_fired_in_5d_before": 2434,
+  "share_pct": 93.4,
+  "by_detector": {
+   "move_24h": 1056,
+   "breakout": 235,
+   "volume_spike": 188,
+   "rsi_extreme": 316,
+   "dip_from_high": 2257
+  },
+  "ma_cross": "shipped enabled: false -- not evaluated",
+  "silent_on_enterable_rallies": 11
+ },
+ "min_position_zeroed_days": 292,
+ "conditional_on_reaching_the_enterable_universe": {
+  "n": 57,
+  "share_of_all_rallies_pct": 2.19,
+  "by_cause": {
+   "C10_own_regime_gate_off": 26,
+   "C09_regime_gate_off": 23,
+   "C11_below_seat_cutoff": 3,
+   "C15_captured": 2,
+   "C12_sized_to_zero": 2,
+   "C14_owned_exited_before_peak": 1
+  },
+  "forgone_shipped_exit_nav_pct": 4.576
+ },
+ "trials_added": 6,
+ "regime_split": [
+  {
+   "regime": "btc_uptrend",
+   "n": 1249,
+   "top_cause": "C03_watchlist_only_no_tier",
+   "top_n": 485,
+   "top_share_pct": 38.8
+  },
+  {
+   "regime": "btc_downtrend",
+   "n": 1356,
+   "top_cause": "C03_watchlist_only_no_tier",
+   "top_n": 466,
+   "top_share_pct": 34.4
+  }
+ ],
+ "captured": 2,
+ "owned_exited_early": 1,
+ "seats_ever_held": [
+  "BCHUSDT",
+  "CAKEUSDT",
+  "CKBUSDT",
+  "CRVUSDT",
+  "ENSUSDT",
+  "OGUSDT",
+  "SHIBUSDT",
+  "SUNUSDT",
+  "XLMUSDT"
+ ],
+ "days_risk_on": 392,
+ "days_total": 730
+}

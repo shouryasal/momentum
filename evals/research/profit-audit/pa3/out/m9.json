@@ -1,0 +1,303 @@
+{
+ "universe_census": {
+  "panel_tickers_ever": 747,
+  "dead_not_trading_today": 254,
+  "alive": 493,
+  "note": "254 = 253 exchangeInfo status BREAK + 1 removed from exchangeInfo entirely"
+ },
+ "membership_of_the_dead": {
+  "dead_that_passed_the_WATCHLIST_funnel_at_the_end": 88,
+  "dead_that_were_SATELLITE_members_at_the_end": 24,
+  "dead_that_were_ENTERABLE_at_the_end": 1,
+  "enterable_dead_names": [
+   "MATICUSDT"
+  ]
+ },
+ "split": {
+  "rename_or_merge": 11,
+  "forced_exit": 13,
+  "rename_names": [
+   "BCCUSDT",
+   "BCHABCUSDT",
+   "ERDUSDT",
+   "BTTUSDT",
+   "AGIXUSDT",
+   "OCEANUSDT",
+   "RNDRUSDT",
+   "MATICUSDT",
+   "FTMUSDT",
+   "EOSUSDT",
+   "MKRUSDT"
+  ],
+  "forced_names": [
+   "NPXSUSDT",
+   "BZRXUSDT",
+   "KEEPUSDT",
+   "NUUSDT",
+   "GXSUSDT",
+   "EPSUSDT",
+   "HNTUSDT",
+   "COCOSUSDT",
+   "AUDUSDT",
+   "TOMOUSDT",
+   "XMRUSDT",
+   "WAVESUSDT",
+   "TONUSDT"
+  ],
+  "enterable_forced_exits": []
+ },
+ "cost_of_a_forced_exit": {
+  "events": 13,
+  "events_per_year": 1.6,
+  "median_ret_last30": -0.0731,
+  "mean_ret_last30": 0.0829,
+  "worst_ret_last30": -0.5728,
+  "worst_name": "WAVESUSDT",
+  "pct_of_forced_exits_that_rose_in_final_30d": 38.5,
+  "nav_hit_median_at_5pct_stake": -0.00366,
+  "nav_hit_worst_at_5pct_stake": -0.02864,
+  "annual_nav_drag_median": -0.00587
+ },
+ "table": [
+  {
+   "symbol": "BCCUSDT",
+   "last": "2018-11-20",
+   "adv90_musd": 21.2,
+   "was_enterable": false,
+   "ret_last30": -0.029,
+   "ret_last90": -0.1909,
+   "successor": "BCH",
+   "kind": "rename/merge"
+  },
+  {
+   "symbol": "BCHABCUSDT",
+   "last": "2019-11-28",
+   "adv90_musd": 15.2,
+   "was_enterable": false,
+   "ret_last30": -0.2391,
+   "ret_last90": -0.211,
+   "successor": "BCH",
+   "kind": "rename/merge"
+  },
+  {
+   "symbol": "ERDUSDT",
+   "last": "2020-08-31",
+   "adv90_musd": 6.8,
+   "was_enterable": false,
+   "ret_last30": -0.0566,
+   "ret_last90": 6.1882,
+   "successor": "EGLD",
+   "kind": "rename/merge"
+  },
+  {
+   "symbol": "NPXSUSDT",
+   "last": "2021-04-05",
+   "adv90_musd": 11.3,
+   "was_enterable": false,
+   "ret_last30": 2.4652,
+   "ret_last90": 38.2086,
+   "successor": NaN,
+   "kind": "forced exit"
+  },
+  {
+   "symbol": "BZRXUSDT",
+   "last": "2021-12-20",
+   "adv90_musd": 8.2,
+   "was_enterable": false,
+   "ret_last30": -0.2483,
+   "ret_last90": -0.065,
+   "successor": NaN,
+   "kind": "forced exit"
+  },
+  {
+   "symbol": "BTTUSDT",
+   "last": "2022-01-17",
+   "adv90_musd": 44.2,
+   "was_enterable": false,
+   "ret_last30": 0.035,
+   "ret_last90": -0.2275,
+   "successor": "BTTC",
+   "kind": "rename/merge"
+  },
+  {
+   "symbol": "KEEPUSDT",
+   "last": "2022-02-16",
+   "adv90_musd": 7.5,
+   "was_enterable": false,
+   "ret_last30": 0.0133,
+   "ret_last90": -0.0293,
+   "successor": NaN,
+   "kind": "forced exit"
+  },
+  {
+   "symbol": "NUUSDT",
+   "last": "2022-02-16",
+   "adv90_musd": 6.0,
+   "was_enterable": false,
+   "ret_last30": -0.1182,
+   "ret_last90": -0.3291,
+   "successor": NaN,
+   "kind": "forced exit"
+  },
+  {
+   "symbol": "GXSUSDT",
+   "last": "2022-04-25",
+   "adv90_musd": 6.5,
+   "was_enterable": false,
+   "ret_last30": 0.1145,
+   "ret_last90": 0.2764,
+   "successor": NaN,
+   "kind": "forced exit"
+  },
+  {
+   "symbol": "EPSUSDT",
+   "last": "2022-05-09",
+   "adv90_musd": 6.2,
+   "was_enterable": false,
+   "ret_last30": -0.2613,
+   "ret_last90": -0.0939,
+   "successor": NaN,
+   "kind": "forced exit"
+  },
+  {
+   "symbol": "HNTUSDT",
+   "last": "2022-10-14",
+   "adv90_musd": 5.1,
+   "was_enterable": false,
+   "ret_last30": 0.1066,
+   "ret_last90": -0.4788,
+   "successor": NaN,
+   "kind": "forced exit"
+  },
+  {
+   "symbol": "COCOSUSDT",
+   "last": "2023-05-29",
+   "adv90_musd": 12.1,
+   "was_enterable": false,
+   "ret_last30": -0.0332,
+   "ret_last90": -0.1758,
+   "successor": NaN,
+   "kind": "forced exit"
+  },
+  {
+   "symbol": "AUDUSDT",
+   "last": "2023-06-01",
+   "adv90_musd": 8.4,
+   "was_enterable": false,
+   "ret_last30": 0.0881,
+   "ret_last90": 0.0707,
+   "successor": NaN,
+   "kind": "forced exit"
+  },
+  {
+   "symbol": "TOMOUSDT",
+   "last": "2023-11-20",
+   "adv90_musd": 5.7,
+   "was_enterable": false,
+   "ret_last30": -0.0731,
+   "ret_last90": -0.0798,
+   "successor": NaN,
+   "kind": "forced exit"
+  },
+  {
+   "symbol": "XMRUSDT",
+   "last": "2024-02-20",
+   "adv90_musd": 12.8,
+   "was_enterable": false,
+   "ret_last30": -0.2468,
+   "ret_last90": -0.2722,
+   "successor": NaN,
+   "kind": "forced exit"
+  },
+  {
+   "symbol": "WAVESUSDT",
+   "last": "2024-06-17",
+   "adv90_musd": 6.9,
+   "was_enterable": false,
+   "ret_last30": -0.5728,
+   "ret_last90": -0.6648,
+   "successor": NaN,
+   "kind": "forced exit"
+  },
+  {
+   "symbol": "AGIXUSDT",
+   "last": "2024-07-01",
+   "adv90_musd": 22.5,
+   "was_enterable": false,
+   "ret_last30": -0.3113,
+   "ret_last90": -0.4331,
+   "successor": "FET",
+   "kind": "rename/merge"
+  },
+  {
+   "symbol": "OCEANUSDT",
+   "last": "2024-07-01",
+   "adv90_musd": 7.7,
+   "was_enterable": false,
+   "ret_last30": -0.3156,
+   "ret_last90": -0.4562,
+   "successor": "FET",
+   "kind": "rename/merge"
+  },
+  {
+   "symbol": "RNDRUSDT",
+   "last": "2024-07-22",
+   "adv90_musd": 51.6,
+   "was_enterable": false,
+   "ret_last30": -0.0424,
+   "ret_last90": -0.2171,
+   "successor": "RENDER",
+   "kind": "rename/merge"
+  },
+  {
+   "symbol": "MATICUSDT",
+   "last": "2024-09-10",
+   "adv90_musd": 25.4,
+   "was_enterable": true,
+   "ret_last30": -0.0586,
+   "ret_last90": -0.4115,
+   "successor": "POL",
+   "kind": "rename/merge"
+  },
+  {
+   "symbol": "FTMUSDT",
+   "last": "2025-01-13",
+   "adv90_musd": 72.8,
+   "was_enterable": false,
+   "ret_last30": -0.4292,
+   "ret_last90": -0.0794,
+   "successor": "S",
+   "kind": "rename/merge"
+  },
+  {
+   "symbol": "EOSUSDT",
+   "last": "2025-05-26",
+   "adv90_musd": 21.2,
+   "was_enterable": false,
+   "ret_last30": 0.1446,
+   "ret_last90": 0.3838,
+   "successor": "A",
+   "kind": "rename/merge"
+  },
+  {
+   "symbol": "MKRUSDT",
+   "last": "2025-09-15",
+   "adv90_musd": 8.2,
+   "was_enterable": false,
+   "ret_last30": 0.0151,
+   "ret_last90": -0.1035,
+   "successor": "SKY",
+   "kind": "rename/merge"
+  },
+  {
+   "symbol": "TONUSDT",
+   "last": "2026-06-30",
+   "adv90_musd": 19.7,
+   "was_enterable": false,
+   "ret_last30": -0.1557,
+   "ret_last90": 0.2935,
+   "successor": NaN,
+   "kind": "forced exit"
+  }
+ ]
+}

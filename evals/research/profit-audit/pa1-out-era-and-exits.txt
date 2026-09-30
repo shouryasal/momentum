@@ -1,0 +1,43 @@
+=== exposure by era ===
+  legacy-4h   window=   9.99h  avg exposure= 11.28%  peak=  9982.74 (49.91%)  trades=4
+  fast-1h     window= 150.21h  avg exposure=  1.47%  peak=  1002.54 ( 5.01%)  trades=18
+
+=== per-pair contribution, strategy trades only (both bots) ===
+pair        trades       net   notional    net %
+AVAX/USDT        2     48.04    1000.27    4.803
+NEAR/USDT        4     19.74    1999.51    0.987
+ONDO/USDT        2      9.50     999.53    0.951
+INJ/USDT         1      4.44     499.94    0.889
+BTC/USDT         2     -6.01     997.21   -0.603
+TRX/USDT         2    -10.44     999.90   -1.044
+SOL/USDT         5    -23.52    2504.23   -0.939
+TOTAL           18     41.75
+
+strategy net WITHOUT the one AVAX trade (taken by both bots): -6.29 USDT
+AVAX alone: +48.04 USDT = 115% of all the profit
+
+=== BTC/ETH (the coins the ensemble gate governs) vs satellites ===
+  BTC/ETH      trades=  2  notional=    997.21 ( 11.1% of money put to work)  net=   -6.01
+  satellites   trades= 16  notional=   8003.39 ( 88.9% of money put to work)  net=  +47.76
+
+=== exit-reason split: mechanical profit-takes vs discretionary sells ===
+  mechanical (rungs/ROI/trail)   n= 10 net=  +85.27 won=10/10
+  discretionary (exit_signal)    n=  6 net=  -43.52 won=0/6
+
+=== how much upside was left on the table (max_rate vs exit) ===
+  a TRX/USDT  exit_signal          best seen +  0.20%  exited at  -0.84%  captured -414.3% of the move
+  a NEAR/USDT trailing_stop_loss   best seen +  1.55%  exited at  +0.95%  captured   61.1% of the move
+  a BTC/USDT  exit_signal          best seen +  0.44%  exited at  -0.40%  captured  -90.9% of the move
+  a ONDO/USDT trailing_stop_loss   best seen +  1.93%  exited at  +1.27%  captured   65.7% of the move
+  a INJ/USDT  trailing_stop_loss   best seen +  1.84%  exited at  +1.10%  captured   59.9% of the move
+  a AVAX/USDT roi                  best seen + 10.50%  exited at +10.38%  captured   98.8% of the move
+  a SOL/USDT  exit_signal          best seen +  0.50%  exited at  -2.50%  captured -496.7% of the move
+  a NEAR/USDT trailing_stop_loss   best seen +  1.79%  exited at  +1.16%  captured   64.8% of the move
+  b TRX/USDT  exit_signal          best seen +  0.20%  exited at  -0.84%  captured -414.3% of the move
+  b NEAR/USDT trailing_stop_loss   best seen +  1.55%  exited at  +0.95%  captured   61.1% of the move
+  b BTC/USDT  exit_signal          best seen +  0.44%  exited at  -0.40%  captured  -91.0% of the move
+  b ONDO/USDT trailing_stop_loss   best seen +  1.96%  exited at  +1.25%  captured   63.6% of the move
+  b SOL/USDT  roi                  best seen +  0.95%  exited at  +0.91%  captured   95.7% of the move
+  b AVAX/USDT roi                  best seen + 10.39%  exited at +10.34%  captured   99.5% of the move
+  b SOL/USDT  exit_signal          best seen +  0.50%  exited at  -2.50%  captured -505.0% of the move
+  b NEAR/USDT trailing_stop_loss   best seen +  1.81%  exited at  +1.16%  captured   64.1% of the move

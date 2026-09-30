@@ -1,0 +1,27 @@
+[
+ {
+  "thresh": 0.2,
+  "window": 20,
+  "n_rallies": 4240
+ },
+ {
+  "thresh": 0.3,
+  "window": 10,
+  "n_rallies": 2189
+ },
+ {
+  "thresh": 0.3,
+  "window": 20,
+  "n_rallies": 2605
+ },
+ {
+  "thresh": 0.3,
+  "window": 60,
+  "n_rallies": 2475
+ },
+ {
+  "thresh": 0.5,
+  "window": 20,
+  "n_rallies": 1186
+ }
+]

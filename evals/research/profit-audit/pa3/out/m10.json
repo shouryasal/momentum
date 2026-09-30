@@ -1,0 +1,146 @@
+{
+ "funnel_today": {
+  "binance_usdt_spot_TRADING": 496,
+  "earn_watchlist": 107,
+  "earn_screened_cheap_tier": 107,
+  "earn_screened_rich_tier": 20,
+  "earn_gate_authorised": 31,
+  "earn_enterable_now": 16,
+  "pct_of_venue_looked_at": 21.6,
+  "pct_of_venue_buyable": 3.2
+ },
+ "not_looked_at": 383,
+ "pass_the_exclusion_filter": 5,
+ "passers": [
+  {
+   "symbol": "USDCUSDT",
+   "vol60": 0.004,
+   "age_days": 2840,
+   "adv90_musd": 1820.6,
+   "removed_by": "pegged:ann_vol=0.0039"
+  },
+  {
+   "symbol": "BNBUSDT",
+   "vol60": 0.392,
+   "age_days": 3244,
+   "adv90_musd": 62.0,
+   "removed_by": "data_only:BNB"
+  },
+  {
+   "symbol": "FDUSDUSDT",
+   "vol60": 0.007,
+   "age_days": 1156,
+   "adv90_musd": 17.8,
+   "removed_by": "pegged:ann_vol=0.0075"
+  },
+  {
+   "symbol": "EURUSDT",
+   "vol60": 0.078,
+   "age_days": 2456,
+   "adv90_musd": 13.7,
+   "removed_by": "pegged:ann_vol=0.0632"
+  },
+  {
+   "symbol": "PAXGUSDT",
+   "vol60": 0.251,
+   "age_days": 2218,
+   "adv90_musd": 11.8,
+   "removed_by": "not_24_7:weekend_ratio=0.288"
+  }
+ ],
+ "wider_net_any_vol_any_age": {
+  "n_with_adv_ge_10musd": 11,
+  "names": [
+   {
+    "symbol": "USDCUSDT",
+    "vol60": 0.004,
+    "age_days": 2840,
+    "adv90_musd": 1820.6,
+    "removed_by": "pegged:ann_vol=0.0039"
+   },
+   {
+    "symbol": "USD1USDT",
+    "vol60": 0.003,
+    "age_days": 490,
+    "adv90_musd": 131.0,
+    "removed_by": "pegged:ann_vol=0.0039"
+   },
+   {
+    "symbol": "BNBUSDT",
+    "vol60": 0.392,
+    "age_days": 3244,
+    "adv90_musd": 62.0,
+    "removed_by": "data_only:BNB"
+   },
+   {
+    "symbol": "RLUSDUSDT",
+    "vol60": 0.004,
+    "age_days": 245,
+    "adv90_musd": 40.2,
+    "removed_by": "pegged:ann_vol=0.0045"
+   },
+   {
+    "symbol": "UUSDT",
+    "vol60": 0.004,
+    "age_days": 254,
+    "adv90_musd": 18.5,
+    "removed_by": "pegged:ann_vol=0.0037"
+   },
+   {
+    "symbol": "XAUTUSDT",
+    "vol60": 0.249,
+    "age_days": 182,
+    "adv90_musd": 18.2,
+    "removed_by": "real_world_asset:XAUT"
+   },
+   {
+    "symbol": "SNDKBUSDT",
+    "vol60": 1.408,
+    "age_days": 105,
+    "adv90_musd": 17.9,
+    "removed_by": "not_24_7:weekend_ratio=0.102"
+   },
+   {
+    "symbol": "FDUSDUSDT",
+    "vol60": 0.007,
+    "age_days": 1156,
+    "adv90_musd": 17.8,
+    "removed_by": "pegged:ann_vol=0.0075"
+   },
+   {
+    "symbol": "SPCXBUSDT",
+    "vol60": 0.681,
+    "age_days": 104,
+    "adv90_musd": 14.8,
+    "removed_by": "not_24_7:weekend_ratio=0.175"
+   },
+   {
+    "symbol": "EURUSDT",
+    "vol60": 0.078,
+    "age_days": 2456,
+    "adv90_musd": 13.7,
+    "removed_by": "pegged:ann_vol=0.0632"
+   },
+   {
+    "symbol": "PAXGUSDT",
+    "vol60": 0.251,
+    "age_days": 2218,
+    "adv90_musd": 11.8,
+    "removed_by": "not_24_7:weekend_ratio=0.288"
+   }
+  ]
+ },
+ "included_that_pass_the_filter": {
+  "of_107_watchlist": 13,
+  "of_31_authorised": 13,
+  "of_16_enterable": 13
+ },
+ "venue_symbols_with_no_panel_history": [
+  "AGPUBUSDT",
+  "AMCBUSDT",
+  "CYPHBUSDT",
+  "HYPEUSDT",
+  "\u5e01\u5b89\u4eba\u751fUSDT",
+  "\u725b\u6765USDT"
+ ]
+}

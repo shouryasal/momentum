@@ -1,0 +1,12 @@
+{
+ "all_perp_symbols": 653,
+ "median_annualised_funding_all_rows": 0.0548,
+ "pct_of_8h_intervals_positive": 80.3,
+ "n_of_31_with_a_perp": 30,
+ "median_of_per_symbol_medians_31": 0.1071,
+ "btc_median_ann": 0.1048,
+ "eth_median_ann": 0.1095,
+ "btc_carry_cagr_2019_2026_gross_of_costs": 0.1224,
+ "btc_carry_worst_dd": -0.0148,
+ "btc_carry_sharpe_arith": 10.597
+}

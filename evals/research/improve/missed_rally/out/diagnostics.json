@@ -1,0 +1,72 @@
+{
+ "min_position_squeeze": {
+  "asset_days_the_book_wanted_a_satellite": 430,
+  "days_the_book_wanted_a_satellite": 273,
+  "raw_target_before_vol_scaling": 0.025,
+  "min_position_pct_nav": 0.02,
+  "vol_scaled_target_median": 0.01634649077841717,
+  "vol_scaled_target_mean": 0.019935366621125522,
+  "vol_scaled_target_p10": 0.01047936579836741,
+  "vol_scaled_target_p90": 0.0376613522818952,
+  "vol_scaled_target_max": 0.047373056440776336,
+  "asset_days_zeroed_by_min_position": 292,
+  "asset_days_that_survived": 138,
+  "pct_zeroed": 67.9,
+  "scale_needed_to_survive": 0.8
+ },
+ "seat_contention": {
+  "risk_on_days": 392,
+  "days_more_eligible_regime_up_names_than_seats": 142,
+  "pct_of_risk_on_days_contested": 36.2,
+  "eligible_and_regime_up_count_median": 2.0,
+  "eligible_and_regime_up_count_max": 10,
+  "seats": 2
+ },
+ "threshold_sensitivity": [
+  {
+   "thresh_pct": 20.0,
+   "n_rallies": 4240,
+   "mandate_n": 4142,
+   "mandate_share_pct": 97.7,
+   "reached_enterable_n": 98,
+   "by_cause": {
+    "C01": 622,
+    "C03": 1525,
+    "C02": 1162,
+    "C05": 657,
+    "C04": 176,
+    "reached_enterable": 98
+   }
+  },
+  {
+   "thresh_pct": 30.0,
+   "n_rallies": 2605,
+   "mandate_n": 2548,
+   "mandate_share_pct": 97.8,
+   "reached_enterable_n": 57,
+   "by_cause": {
+    "C01": 439,
+    "C03": 951,
+    "C02": 668,
+    "C05": 394,
+    "C04": 96,
+    "reached_enterable": 57
+   }
+  },
+  {
+   "thresh_pct": 50.0,
+   "n_rallies": 1186,
+   "mandate_n": 1157,
+   "mandate_share_pct": 97.6,
+   "reached_enterable_n": 29,
+   "by_cause": {
+    "C01": 205,
+    "C02": 283,
+    "C03": 440,
+    "C05": 184,
+    "C04": 45,
+    "reached_enterable": 29
+   }
+  }
+ ]
+}

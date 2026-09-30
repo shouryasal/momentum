@@ -1,0 +1,14 @@
+{
+ "watchlist_size_median": 220.0,
+ "rich_pairs_budget": 20,
+ "n_rallies": 2605,
+ "in_watchlist_at_rally_start": 1498,
+ "in_watchlist_pct": 57.5,
+ "in_rich_20_in_5d_before": 434,
+ "in_rich_20_pct": 16.7,
+ "in_rich_20_given_in_watchlist_pct": 28.9,
+ "detectable_in_theory_pct": 93.4,
+ "detectable_in_practice_pct": 90.1,
+ "rich_only_detector_fires_lost_to_the_tier_split": 478,
+ "note": "in_rich_20 is an UPPER bound: news_count_24h is 0 offline, which the live attention score would add for any name in the news."
+}

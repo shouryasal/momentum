@@ -1,0 +1,43 @@
+================= HOW MUCH OF THE POT WAS EVER IN THE MARKET =================
+calendar hours of the record        : 160.20
+dollar-hours the book held risk     : 66,650 USDT-hours
+seed-hours available                : 3,204,050 USDT-hours
+AVERAGE EXPOSURE over the record    : 2.08% of the pot
+  strategy trades only              : 1.38% of the pot
+hours with at least one seat open   : 58.42 (36.5% of the record)
+peak money at risk at any one moment: 9,982.74 USDT (49.91% of the pot)
+
+================= EXPOSURE-MATCHED BENCHMARK =================
+BTC over the record, costed  : -3.30% = -660.07 USDT at full exposure
+the same at OUR exposure (2.08%): -13.73 USDT
+what the bots actually made  : -28.02 USDT (all), +41.75 USDT (strategy only)
+Read: at the exposure the book actually ran, holding BTC instead would have lost 13.73 USDT, so the strategy's +41.75 is +55.48 against it.
+
+================= PER-TRADE EDGE AGAINST THE COST FLOOR =================
+closed strategy trades         : 16
+mean notional a trade          : 499.93 USDT
+mean net per trade             : +2.609 USDT = +0.522% of the money put in
+median net per trade           : +0.866%
+fees the paper run charged     : 0.200% a round trip (0.10% a side)
+the repo cost floor            : 0.300% a round trip (0.15% a side)
+mean net per trade at the FLOOR: +0.422% (the extra 0.10% of slippage the dry run never charged)
+drop the single best trade (AVAX ROI, +24 in both bots) and the mean becomes -0.089%
+
+================= HONEST POWER =================
+independent market bets        : 9 (both bots on the same pair in the same hour is ONE bet - they run identical rules under this profile)
+mean per bet                   : +2.763 USDT, sd 10.198, se 3.399
+95% interval on the mean       : [-5.276, +10.803] USDT (t, 8 df) - straddles zero
+t                              : 0.813
+bets for 80% power at 95% IF the true mean equals today's estimate: 107
+the same at the BOTTOM of today's interval (-5.276): no sample size shows a profit, the interval includes losses
+independent bets per awake day : 4.28
+awake days to reach 107 bets   : 25 (0.07 awake years)
+at the 31.5% uptime measured, that is 79 calendar days (0.22 calendar years)
+
+The prior that matters more than 9 bets: the SAME profile's own costed backtest over 2,199 trades is net -26.45% (config/profiles/fast-test.yaml), and the 9.11-year deployed book scores 0.83 against BTC-hold 0.83 (exit-and-horizon-2026-09-29.md).
+
+================= WORST POINT OF THE POT =================
+15-minute ledger ticks with both sleeves: 170
+first ('2026-09-23T21:45:00Z', 19931.46470162)  last ('2026-09-30T05:45:00Z', 20037.90802844)
+worst peak-to-trough on the ledger: -0.134% at 2026-09-30T05:15:00Z
+(the ledger restarted from the seed twice, so this understates the true dip; the cumulative pot low is the day-one -69.77 event)

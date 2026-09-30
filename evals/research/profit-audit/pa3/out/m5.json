@@ -1,0 +1,28 @@
+{
+ "panel": {
+  "first_date": "2017-08-17",
+  "last_date": "2026-09-24",
+  "distinct_symbols_no_filter": 747,
+  "symbols_with_ge30_candles": 731,
+  "symbols_with_ge220_candles": 630
+ },
+ "venue": {
+  "usdt_any_status": 749,
+  "usdt_TRADING": 496,
+  "usdt_BREAK": 253
+ },
+ "dead": {
+  "not_trading_today": 254,
+  "in_exchangeinfo_but_BREAK": 253,
+  "absent_from_exchangeinfo_entirely": 1,
+  "tape_stale_gt7d": 253
+ },
+ "coverage": {
+  "trading_today_with_no_panel_row": [
+   "HYPEUSDT",
+   "\u5e01\u5b89\u4eba\u751fUSDT",
+   "\u725b\u6765USDT"
+  ],
+  "panel_rows_not_usdt_quoted": 0
+ }
+}

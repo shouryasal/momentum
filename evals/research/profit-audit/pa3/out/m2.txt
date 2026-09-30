@@ -1,0 +1,27 @@
+=== A. PER-SYMBOL, rule vs hold on each coin own life ===
+           params                   universe    n  med_rule_cagr  med_hold_cagr  mean_rule_cagr  pct_rule_beats_hold  pct_rule_beats_btc  pct_rule_positive  med_per_trade_pct  med_trades_per_yr  med_exposure
+0  shipped_6_18_3      included_31_whitelist   31         0.1840         0.1082          0.1925                 67.7                35.5               67.7             4.8185               5.63         0.272
+1  shipped_6_18_3      included_16_enterable   16         0.1951         0.2520          0.2900                 56.2                31.2               87.5             5.6870               5.89         0.344
+2  shipped_6_18_3     included_107_watchlist  104         0.0659        -0.3470          0.1315                 83.7                37.5               56.7             1.3866               4.33         0.217
+3  shipped_6_18_3  excluded_383_listed_today  292        -0.0326        -0.5031         -0.0176                 92.5                26.7               40.1            -0.7196               4.36         0.195
+4  shipped_6_18_3    excluded_ever_incl_dead  525        -0.0193        -0.5455          0.0247                 90.3                21.7               37.9            -0.7098               3.80         0.180
+5      alt_9_21_6      included_31_whitelist   31         0.3699         0.1082          0.3667                 83.9                48.4               87.1            14.6292               5.56         0.379
+6      alt_9_21_6      included_16_enterable   16         0.4680         0.2520          0.4715                 75.0                50.0              100.0            23.8812               5.63         0.419
+7      alt_9_21_6     included_107_watchlist  104         0.0608        -0.3470          0.0553                 85.6                32.7               53.8             1.2908               5.60         0.333
+8      alt_9_21_6  excluded_383_listed_today  292        -0.1468        -0.5031         -0.1148                 91.4                16.1               28.4            -2.3161               4.82         0.286
+9      alt_9_21_6    excluded_ever_incl_dead  525        -0.1556        -0.5455         -0.0723                 89.1                15.8               29.0            -2.5656               4.73         0.290
+
+=== B. IMPLEMENTABLE 8-SLOT BOOK, 5% stakes, costed ===
+                                             label  n_days  sharpe_arith    cagr  max_dd  total_x  n_symbols  round_trips  mean_names_held  mean_gross_exposure
+0       shipped_6_18_3|included_31_whitelist|BOOK8    2824         1.154  0.1707 -0.2202    3.386       31.0        392.0             2.86                0.143
+1       shipped_6_18_3|included_16_enterable|BOOK8    2824         1.112  0.1706 -0.2129    3.383       16.0        415.0             2.99                0.149
+2      shipped_6_18_3|included_107_watchlist|BOOK8    2824         1.100  0.1555 -0.2043    3.059      104.0        385.0             2.74                0.137
+3   shipped_6_18_3|excluded_383_listed_today|BOOK8    2824         0.747  0.0568 -0.1149    1.533      292.0        248.0             1.54                0.077
+4     shipped_6_18_3|excluded_ever_incl_dead|BOOK8    2824         0.847  0.0644 -0.1094    1.620      525.0        260.0             1.51                0.076
+5           alt_9_21_6|included_31_whitelist|BOOK8    2824         1.142  0.2126 -0.2483    4.443       31.0        390.0             3.50                0.175
+6           alt_9_21_6|included_16_enterable|BOOK8    2824         1.204  0.2266 -0.2508    4.855       16.0        383.0             3.54                0.177
+7          alt_9_21_6|included_107_watchlist|BOOK8    2824         1.022  0.1865 -0.2547    3.754      104.0        404.0             3.46                0.173
+8       alt_9_21_6|excluded_383_listed_today|BOOK8    2824         0.770  0.1016 -0.3434    2.115      292.0        375.0             2.65                0.132
+9         alt_9_21_6|excluded_ever_incl_dead|BOOK8    2824         0.776  0.1009 -0.2930    2.104      525.0        392.0             2.61                0.131
+10                        BASELINE|BTC_HOLD_100pct    2824         0.969  0.4970 -0.7663   22.679        NaN          NaN              NaN                  NaN
+11                  BASELINE|BTC_HOLD_at_40pct_cap    2824         0.969  0.2309 -0.4089    4.988        NaN          NaN              NaN                  NaN

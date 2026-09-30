@@ -1,0 +1,85 @@
+1h-candle pairs: 32; data_only excluded: ['BNB/USDT']; basket used: 31
+
+calendar span of the record: 2026-09-23T13:37Z -> 2026-09-30T05:49Z = 160.20 h
+awake hours inside it: 50.49 (31.5%)  spans: 10
+
+================= (c) THE BENCHMARK, TWO WAYS =================
+Definition 1 - CALENDAR: buy at the first fill, hold through the outages, sell now.
+Definition 2 - AWAKE ONLY: the same holding compounded across the 13 awake spans only, i.e. what the market offered while a bot was actually watching. Entry cost charged once.
+
+benchmark                                         calendar %  calendar USDT  awake-only %   awake USDT
+BTC buy-and-hold                                       -3.30        -660.07         -2.36      -472.31
+equal-weight hold, 31 whitelisted pairs                 2.58         516.81         -0.77      -154.21
+USDT doing nothing (0% APR as configured)               0.00           0.00          0.00         0.00
+
+(all figures net: 15 bps each side charged once on the entry and the exit)
+
+per-pair calendar return of the basket, costed:
+   PUMP/USDT      35.85%
+   ONDO/USDT      16.19%
+   ENA/USDT       15.89%
+   SUI/USDT       14.35%
+   LINK/USDT      12.51%
+   WLD/USDT       10.33%
+   HBAR/USDT      10.06%
+   AAVE/USDT       9.78%
+   FET/USDT        7.41%
+   LTC/USDT        6.63%
+   DOT/USDT        4.46%
+   AVAX/USDT       4.39%
+   FIL/USDT        4.15%
+   XLM/USDT        3.97%
+   NEAR/USDT       3.82%
+   XPL/USDT        1.82%
+   SOL/USDT        1.39%
+   TRX/USDT       -1.85%
+   ETH/USDT       -1.99%
+   ADA/USDT       -2.10%
+   TAO/USDT       -2.74%
+   BTC/USDT       -3.30%
+   PENGU/USDT     -4.34%
+   TRUMP/USDT     -4.44%
+   INJ/USDT       -5.36%
+   XRP/USDT       -5.49%
+   DOGE/USDT      -6.34%
+   UNI/USDT       -7.73%
+   PEPE/USDT      -9.61%
+   BCH/USDT      -13.65%
+   ZEC/USDT      -13.95%
+   median          1.82%   pairs up: 17/31
+
+equal-weight hold of only the 7 pairs the bots actually traded: 2.18% = +436.63 USDT
+
+================= (a) CROSS-CHECK AGAINST THE JOURNAL =================
+journal fills rows: 65  first=2026-09-23T13:37:42Z  last=2026-09-30T03:00:06Z
+
+key           journal n   bot n   journal notional   bot notional  journal fee   bot fee
+('a', 'buy')         14      14            6973.55        6973.55         6.97      6.97
+('a', 'sell')         20      20            6464.75        6464.75         6.46      6.46
+('b', 'buy')         13      13           12009.80       12009.80        12.01     12.01
+('b', 'sell')         18      18           11524.78       11524.78        11.52     11.52
+
+total notional traded: journal 36,972.87 USDT, bot databases 36,972.87 USDT  (difference +0.00)
+fees actually charged in the paper run (0.10% a side): 36.97 USDT
+the repo cost floor is 0.15% a side; the SAME volume at that rate would cost 55.46 USDT, i.e. 18.49 USDT of slippage the paper run never charged
+
+-- tca_fill_costs --
+cols: ['fill_id', 'sleeve', 'pair', 'side', 'notional_usdt', 'fill_vwap', 'ref_mid', 'quote_source', 'fee_bps', 'slippage_bps', 'total_bps', 'reconciled_at', 'status']
+rows: 65
+    {'fill_id': 1, 'sleeve': 'a', 'pair': 'ETH/USDT', 'side': 'buy', 'notional_usdt': 494.80704, 'fill_vwap': 2718.72, 'ref_mid': 2718.725, 'quote_source': 'fill_row', 'fee_bps': 10.0, 'slippage_bps': -0.018390973710504518, 'total_bps': 9.981609026289496, 'reconciled_at': '2026-09-23T22:05:02Z', 'status': 'ok'}
+    {'fill_id': 2, 'sleeve': 'b', 'pair': 'BTC/USDT', 'side': 'buy', 'notional_usdt': 1979.9407156, 'fill_vwap': 85748.84, 'ref_mid': 85748.845, 'quote_source': 'fill_row', 'fee_bps': 10.0, 'slippage_bps': -0.0005830982335279983, 'total_bps': 9.999416901766471, 'reconciled_at': '2026-09-23T22:05:02Z', 'status': 'ok'}
+    {'fill_id': 3, 'sleeve': 'a', 'pair': 'BTC/USDT', 'side': 'buy', 'notional_usdt': 494.7708068, 'fill_vwap': 85748.84, 'ref_mid': 85748.845, 'quote_source': 'fill_row', 'fee_bps': 10.0, 'slippage_bps': -0.0005830982335279983, 'total_bps': 9.999416901766471, 'reconciled_at': '2026-09-23T22:05:02Z', 'status': 'ok'}
+    {'fill_id': 4, 'sleeve': 'a', 'pair': 'BTC/USDT', 'side': 'buy', 'notional_usdt': 494.7592091, 'fill_vwap': 85746.83, 'ref_mid': 85727.435, 'quote_source': 'book_snapshot', 'fee_bps': 10.0, 'slippage_bps': 2.2624029285378797, 'total_bps': 12.26240292853788, 'reconciled_at': '2026-09-23T22:05:02Z', 'status': 'fallback'}
+  tca_fill_costs: OperationalError no such column: total_cost_bps
+
+-- nav_points, last tick per sleeve --
+    {'sleeve': 'a', 'ts': '2026-09-30T05:45:00Z', 'n': 170}
+    {'sleeve': 'b', 'ts': '2026-09-30T05:45:00Z', 'n': 170}
+    {'ts_utc': '2026-09-30T05:45:00Z', 'sleeve': 'a', 'nav_usdt': 10019.43660972, 'realized_pnl': 21.3572775, 'unrealized_pnl': -1.92066778, 'open_trades': 1}
+    {'ts_utc': '2026-09-30T05:45:00Z', 'sleeve': 'b', 'nav_usdt': 10018.47141872, 'realized_pnl': 20.3920865, 'unrealized_pnl': -1.92066778, 'open_trades': 1}
+
+-- nav_daily --
+    {'date_utc': '2026-09-24', 'sleeve': 'a', 'nav_usdt': 9994.78105769, 'cash_usdt': 9994.78105769, 'positions_json': '{}', 'drawdown_pct': None, 'trades_today': 2, 'run_id': None}
+    {'date_utc': '2026-09-24', 'sleeve': 'b', 'nav_usdt': 9994.78105769, 'cash_usdt': 9994.78105769, 'positions_json': '{}', 'drawdown_pct': None, 'trades_today': 2, 'run_id': None}
+    {'date_utc': '2026-09-29', 'sleeve': 'a', 'nav_usdt': 10021.3572775, 'cash_usdt': 10021.3572775, 'positions_json': '{}', 'drawdown_pct': 0.0, 'trades_today': 10, 'run_id': None}
+    {'date_utc': '2026-09-29', 'sleeve': 'b', 'nav_usdt': 10020.3920865, 'cash_usdt': 10020.3920865, 'positions_json': '{}', 'drawdown_pct': 0.0, 'trades_today': 10, 'run_id': None}

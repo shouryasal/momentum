@@ -1,0 +1,11 @@
+params,universe,n,med_rule_cagr,med_hold_cagr,mean_rule_cagr,pct_rule_beats_hold,pct_rule_beats_btc,pct_rule_positive,med_per_trade_pct,med_trades_per_yr,med_exposure
+shipped_6_18_3,included_31_whitelist,31,0.184,0.1082,0.1925,67.7,35.5,67.7,4.8185,5.63,0.272
+shipped_6_18_3,included_16_enterable,16,0.1951,0.252,0.29,56.2,31.2,87.5,5.687,5.89,0.344
+shipped_6_18_3,included_107_watchlist,104,0.0659,-0.347,0.1315,83.7,37.5,56.7,1.3866,4.33,0.217
+shipped_6_18_3,excluded_383_listed_today,292,-0.0326,-0.5031,-0.0176,92.5,26.7,40.1,-0.7196,4.36,0.195
+shipped_6_18_3,excluded_ever_incl_dead,525,-0.0193,-0.5455,0.0247,90.3,21.7,37.9,-0.7098,3.8,0.18
+alt_9_21_6,included_31_whitelist,31,0.3699,0.1082,0.3667,83.9,48.4,87.1,14.6292,5.56,0.379
+alt_9_21_6,included_16_enterable,16,0.468,0.252,0.4715,75.0,50.0,100.0,23.8812,5.63,0.419
+alt_9_21_6,included_107_watchlist,104,0.0608,-0.347,0.0553,85.6,32.7,53.8,1.2908,5.6,0.333
+alt_9_21_6,excluded_383_listed_today,292,-0.1468,-0.5031,-0.1148,91.4,16.1,28.4,-2.3161,4.82,0.286
+alt_9_21_6,excluded_ever_incl_dead,525,-0.1556,-0.5455,-0.0723,89.1,15.8,29.0,-2.5656,4.73,0.29

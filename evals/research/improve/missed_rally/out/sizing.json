@@ -1,0 +1,42 @@
+{
+ "B0_shipped_2seats_5pct": {
+  "ret": 0.1247,
+  "cagr": 0.0606,
+  "sharpe": 0.5147,
+  "mdd": -0.1188,
+  "asset_days_held": 138,
+  "zeroed_asset_days": 292,
+  "distinct_names": 9,
+  "months_with_a_position": 10
+ },
+ "B7_ONE_seat_5pct": {
+  "ret": 0.1826,
+  "cagr": 0.0876,
+  "sharpe": 0.6819,
+  "mdd": -0.1226,
+  "asset_days_held": 245,
+  "zeroed_asset_days": 13,
+  "distinct_names": 9,
+  "months_with_a_position": 13
+ },
+ "B8_2seats_10pct": {
+  "ret": 0.1737,
+  "cagr": 0.0835,
+  "sharpe": 0.6602,
+  "mdd": -0.1161,
+  "asset_days_held": 394,
+  "zeroed_asset_days": 36,
+  "distinct_names": 16,
+  "months_with_a_position": 13
+ },
+ "B9_2seats_5pct_floor_removed": {
+  "ret": 0.1623,
+  "cagr": 0.0782,
+  "sharpe": 0.6177,
+  "mdd": -0.1188,
+  "asset_days_held": 430,
+  "zeroed_asset_days": 0,
+  "distinct_names": 17,
+  "months_with_a_position": 13
+ }
+}

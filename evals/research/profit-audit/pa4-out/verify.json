@@ -1,0 +1,300 @@
+{
+ "check_1_btc_hold_sharpe": {
+  "full_panel": {
+   "start": "2017-08-17",
+   "end": "2026-09-24",
+   "days": 3326,
+   "cagr": 0.3865911186130502,
+   "sharpe_arith": 0.8268411349036079,
+   "max_drawdown": -0.8318705353076483
+  },
+  "2019_2026": {
+   "start": "2019-01-01",
+   "end": "2026-09-24",
+   "days": 2824,
+   "cagr": 0.4927371238279237,
+   "sharpe_arith": 0.9637864087691063,
+   "max_drawdown": -0.7662925431645935
+  }
+ },
+ "check_2_ceiling_identity": {
+  "n_rallies": 21,
+  "median_pinned_capture": 0.25132529133202025,
+  "max_abs_gap_vs_closed_form": 0.2048844678954461,
+  "note": "a daily-rebalanced constant-w long-only book beats the static w*R slightly in a trending rally (it compounds on a rising base); the identity holds to within the figure above, so the cap IS the capture ceiling",
+  "rallies": [
+   {
+    "asset": "BTC",
+    "trough": "2019-01-01",
+    "peak": "2019-06-26",
+    "gain": 2.448332165787935,
+    "cap": 0.4,
+    "pinned_book_return": 0.677282890864114,
+    "pinned_capture": 0.27663031198470867,
+    "closed_form_capture": 0.4
+   },
+   {
+    "asset": "BTC",
+    "trough": "2019-12-17",
+    "peak": "2020-02-14",
+    "gain": 0.561690987979746,
+    "cap": 0.4,
+    "pinned_book_return": 0.20082003874427667,
+    "pinned_capture": 0.3575276140117064,
+    "closed_form_capture": 0.4
+   },
+   {
+    "asset": "BTC",
+    "trough": "2020-03-12",
+    "peak": "2021-01-08",
+    "gain": 7.454752083333332,
+    "cap": 0.4,
+    "pinned_book_return": 1.454537919447115,
+    "pinned_capture": 0.19511553210455393,
+    "closed_form_capture": 0.4
+   },
+   {
+    "asset": "BTC",
+    "trough": "2021-01-27",
+    "peak": "2021-04-13",
+    "gain": 1.0936141064968723,
+    "cap": 0.4,
+    "pinned_book_return": 0.3654696916980784,
+    "pinned_capture": 0.3341852391322676,
+    "closed_form_capture": 0.4
+   },
+   {
+    "asset": "BTC",
+    "trough": "2021-07-20",
+    "peak": "2021-11-08",
+    "gain": 1.2667014654074222,
+    "cap": 0.4,
+    "pinned_book_return": 0.41036611187440464,
+    "pinned_capture": 0.3239643460445626,
+    "closed_form_capture": 0.4
+   },
+   {
+    "asset": "BTC",
+    "trough": "2022-11-21",
+    "peak": "2024-03-13",
+    "gain": 3.630319194438478,
+    "cap": 0.4,
+    "pinned_book_return": 0.9042245679669707,
+    "pinned_capture": 0.24907577530708902,
+    "closed_form_capture": 0.4
+   },
+   {
+    "asset": "BTC",
+    "trough": "2024-09-06",
+    "peak": "2025-01-21",
+    "gain": 0.9669751312798389,
+    "cap": 0.4,
+    "pinned_book_return": 0.32258611449421903,
+    "pinned_capture": 0.3336033203535033,
+    "closed_form_capture": 0.4
+   },
+   {
+    "asset": "BTC",
+    "trough": "2025-04-08",
+    "peak": "2025-10-06",
+    "gain": 0.6333148241368656,
+    "cap": 0.4,
+    "pinned_book_return": 0.22430104296052544,
+    "pinned_capture": 0.3541698921483824,
+    "closed_form_capture": 0.4
+   },
+   {
+    "asset": "ETH",
+    "trough": "2019-01-29",
+    "peak": "2019-06-26",
+    "gain": 2.2493058879846815,
+    "cap": 0.3,
+    "pinned_book_return": 0.4637530382785864,
+    "pinned_capture": 0.20617606558354623,
+    "closed_form_capture": 0.3
+   },
+   {
+    "asset": "ETH",
+    "trough": "2019-12-17",
+    "peak": "2020-02-14",
+    "gain": 1.339596324253364,
+    "cap": 0.3,
+    "pinned_book_return": 0.30255384558711995,
+    "pinned_capture": 0.2258544907218606,
+    "closed_form_capture": 0.3
+   },
+   {
+    "asset": "ETH",
+    "trough": "2020-03-12",
+    "peak": "2020-09-01",
+    "gain": 3.409200519384159,
+    "cap": 0.3,
+    "pinned_book_return": 0.6233165357852011,
+    "pinned_capture": 0.1828336386320267,
+    "closed_form_capture": 0.3
+   },
+   {
+    "asset": "ETH",
+    "trough": "2020-09-23",
+    "peak": "2021-02-19",
+    "gain": 5.095659765527563,
+    "cap": 0.3,
+    "pinned_book_return": 0.7950794199580109,
+    "pinned_capture": 0.15603071173173097,
+    "closed_form_capture": 0.3
+   },
+   {
+    "asset": "ETH",
+    "trough": "2021-02-28",
+    "peak": "2021-05-11",
+    "gain": 1.9407474738933748,
+    "cap": 0.3,
+    "pinned_book_return": 0.4072572808670618,
+    "pinned_capture": 0.20984558081121926,
+    "closed_form_capture": 0.3
+   },
+   {
+    "asset": "ETH",
+    "trough": "2021-06-25",
+    "peak": "2021-09-05",
+    "gain": 1.1839044238785505,
+    "cap": 0.3,
+    "pinned_book_return": 0.28121371723099164,
+    "pinned_capture": 0.23753075971260973,
+    "closed_form_capture": 0.3
+   },
+   {
+    "asset": "ETH",
+    "trough": "2021-09-21",
+    "peak": "2021-11-08",
+    "gain": 0.7383057955819081,
+    "cap": 0.3,
+    "pinned_book_return": 0.18913108816349244,
+    "pinned_capture": 0.256169041737544,
+    "closed_form_capture": 0.3
+   },
+   {
+    "asset": "ETH",
+    "trough": "2022-06-18",
+    "peak": "2022-08-13",
+    "gain": 0.9932571623807944,
+    "cap": 0.3,
+    "pinned_book_return": 0.2496306457029689,
+    "pinned_capture": 0.25132529133202025,
+    "closed_form_capture": 0.3
+   },
+   {
+    "asset": "ETH",
+    "trough": "2022-11-09",
+    "peak": "2023-04-16",
+    "gain": 0.9212953306793141,
+    "cap": 0.3,
+    "pinned_book_return": 0.23465371282471303,
+    "pinned_capture": 0.2546997743402128,
+    "closed_form_capture": 0.3
+   },
+   {
+    "asset": "ETH",
+    "trough": "2023-10-12",
+    "peak": "2024-03-11",
+    "gain": 1.6401491286754442,
+    "cap": 0.3,
+    "pinned_book_return": 0.3533402319845931,
+    "pinned_capture": 0.21543177129871385,
+    "closed_form_capture": 0.3
+   },
+   {
+    "asset": "ETH",
+    "trough": "2024-09-06",
+    "peak": "2024-12-08",
+    "gain": 0.7994319688301883,
+    "cap": 0.3,
+    "pinned_book_return": 0.20361479797989257,
+    "pinned_capture": 0.2546993439327212,
+    "closed_form_capture": 0.3
+   },
+   {
+    "asset": "ETH",
+    "trough": "2025-04-08",
+    "peak": "2025-08-22",
+    "gain": 2.279514866873443,
+    "cap": 0.3,
+    "pinned_book_return": 0.46212235671103885,
+    "pinned_capture": 0.20272838024736406,
+    "closed_form_capture": 0.3
+   },
+   {
+    "asset": "ETH",
+    "trough": "2026-06-25",
+    "peak": "2026-09-21",
+    "gain": 0.7707100214307583,
+    "cap": 0.3,
+    "pinned_book_return": 0.19526423598409992,
+    "pinned_capture": 0.25335629556445666,
+    "closed_form_capture": 0.3
+   }
+  ]
+ },
+ "check_2b_mandate_legal_ceiling": {
+  "construction": "0.40 BTC / 0.30 ETH / 0.30 USDT, rebalanced back to target only outside the shipped 2%-of-NAV band, 15 bps a side on traded notional, 2019-01-01..2026-09-24",
+  "total_multiple": 14.034744186657345,
+  "cagr": 0.40743869754404005,
+  "sharpe_arith": 0.9693481689689245,
+  "max_drawdown": -0.613261223968545,
+  "max_gross": 0.7360305233784573,
+  "avg_gross": 0.6998867317228523,
+  "on_20000_usdt": 280694.8837331469
+ },
+ "check_3_reachable_universe": {
+  "whitelisted_pairs": 31,
+  "core": [
+   "BTC",
+   "ETH"
+  ],
+  "major_carry_a_cap_but_cannot_take_a_seat": [
+   "ZEC",
+   "NEAR",
+   "XRP",
+   "SOL",
+   "DOGE",
+   "TRX"
+  ],
+  "satellite_total": 23,
+  "satellite_exit_only": [
+   "BCH",
+   "DOT",
+   "ENA",
+   "FET",
+   "FIL",
+   "HBAR",
+   "INJ",
+   "ONDO",
+   "PENGU",
+   "PEPE",
+   "PUMP",
+   "TAO",
+   "TRUMP",
+   "UNI",
+   "XPL"
+  ],
+  "satellite_enterable": [
+   "AAVE",
+   "ADA",
+   "AVAX",
+   "LINK",
+   "LTC",
+   "SUI",
+   "WLD",
+   "XLM"
+  ],
+  "max_satellite_positions": 2,
+  "max_satellite_gross": 0.05,
+  "max_weight": {
+   "BTC": 0.4,
+   "ETH": 0.3
+  },
+  "max_gross_exposure": 0.8,
+  "reachable_count": 10,
+  "reason_majors_unreachable": "SleeveA._book_targets builds `eligible` from cfg.universe.is_satellite(a), and RiskGate is_satellite() is tiers[a] == 'satellite'. A 'major' is neither core (base_weights is BTC/ETH only) nor satellite, so it is never offered a seat."
+ }
+}

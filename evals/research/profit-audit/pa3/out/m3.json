@@ -1,0 +1,101 @@
+{
+ "c_survivorship": {
+  "panel_tickers": 731,
+  "alive_TRADING_today": 480,
+  "dead_not_trading_today": 251,
+  "dead_that_passed_the_WATCHLIST_funnel_at_the_end": 88,
+  "dead_that_were_SATELLITE_members_at_the_end": 24,
+  "dead_that_were_ENTERABLE_at_the_end": 1,
+  "enterable_dead_names": [
+   "MATICUSDT"
+  ],
+  "satellite_dead_names": [
+   "AGIXUSDT",
+   "AUDUSDT",
+   "BCCUSDT",
+   "BCHABCUSDT",
+   "BTTUSDT",
+   "BZRXUSDT",
+   "COCOSUSDT",
+   "EOSUSDT",
+   "EPSUSDT",
+   "ERDUSDT",
+   "FTMUSDT",
+   "GXSUSDT",
+   "HNTUSDT",
+   "KEEPUSDT",
+   "MATICUSDT",
+   "MKRUSDT",
+   "NPXSUSDT",
+   "NUUSDT",
+   "OCEANUSDT",
+   "RNDRUSDT",
+   "TOMOUSDT",
+   "TONUSDT",
+   "WAVESUSDT",
+   "XMRUSDT"
+  ],
+  "cost_if_held_5pct_NAV": {
+   "median_last30_ret": -0.0576,
+   "median_last90_ret": -0.1396,
+   "worst_last90": -0.6648,
+   "nav_hit_at_5pct_median30": -0.00288
+  },
+  "all_dead_median_last30": -0.4146,
+  "all_dead_median_life_total": -0.934,
+  "delistings_per_year": {
+   "2018": 2,
+   "2019": 3,
+   "2020": 16,
+   "2021": 20,
+   "2022": 38,
+   "2023": 24,
+   "2024": 46,
+   "2025": 51,
+   "2026": 51
+  }
+ },
+ "d_structure": {
+  "d1_no_shorting": {
+   "n": 31,
+   "median_long_leg_cagr": 0.184,
+   "median_short_leg_cagr": -0.1307,
+   "pct_short_leg_profitable": 9.7,
+   "median_sum_of_returns_while_flat": 1.2506,
+   "note": "short leg = the identical rule mirrored (EMA down + breakdown of prior lows), costed. A spot-only mandate cannot take it."
+  },
+  "d2_btc_1x_daily_rebal": {
+   "cagr": 0.497,
+   "max_dd": -0.7663,
+   "sharpe_arith": 0.969,
+   "worst_day": -0.395,
+   "ruined": false
+  },
+  "d2_btc_2x_daily_rebal": {
+   "cagr": 0.4613,
+   "max_dd": -0.9741,
+   "sharpe_arith": 0.969,
+   "worst_day": -0.7901,
+   "ruined": false
+  },
+  "d2_btc_3x_daily_rebal": {
+   "cagr": null,
+   "max_dd": -7.4101,
+   "sharpe_arith": 0.969,
+   "worst_day": -1.1851,
+   "ruined": true
+  },
+  "d3_no_perps_funding": {
+   "error": "could not convert string to float: 'BCHUSDT'"
+  },
+  "d4_no_first_180_days": {
+   "n": 633,
+   "median_ret_first180": -0.4769,
+   "pct_positive_first180": 26.5,
+   "median_ret_first365": -0.6215,
+   "median_peak_within_180": 0.313,
+   "pct_that_double_within_180": 28.0
+  },
+  "d5_no_nonUSDT_quote": "computed in m4"
+ }
+}

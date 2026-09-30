@@ -1,0 +1,144 @@
+{
+ "venue": {
+  "usdt_symbols_any_status": 708,
+  "usdt_spot_TRADING_today": 496,
+  "usdt_spot_TRADING_in_snapshot": 496
+ },
+ "earn": {
+  "watchlist": 107,
+  "ingested_bases": 108,
+  "whitelist": 31,
+  "exit_only": 15,
+  "enterable": 16,
+  "screened_cheap": 107,
+  "screened_rich_cap": 20
+ },
+ "funnel": [
+  {
+   "filter": "quote",
+   "remaining": 708,
+   "removed": 0,
+   "step": 1
+  },
+  {
+   "filter": "status",
+   "remaining": 496,
+   "removed": 212,
+   "step": 2
+  },
+  {
+   "filter": "data_only",
+   "remaining": 495,
+   "removed": 1,
+   "step": 3
+  },
+  {
+   "filter": "leveraged_token",
+   "remaining": 495,
+   "removed": 0,
+   "step": 4
+  },
+  {
+   "filter": "pegged",
+   "remaining": 480,
+   "removed": 15,
+   "step": 5
+  },
+  {
+   "filter": "not_24_7",
+   "remaining": 418,
+   "removed": 62,
+   "step": 6
+  },
+  {
+   "filter": "real_world_asset",
+   "remaining": 397,
+   "removed": 21,
+   "step": 7
+  },
+  {
+   "filter": "non_ascii_base",
+   "remaining": 395,
+   "removed": 2,
+   "step": 8
+  },
+  {
+   "filter": "tick_size",
+   "remaining": 393,
+   "removed": 2,
+   "step": 9
+  },
+  {
+   "filter": "listing_age",
+   "remaining": 384,
+   "removed": 9,
+   "step": 10
+  },
+  {
+   "filter": "liquidity",
+   "remaining": 107,
+   "removed": 277,
+   "step": 11
+  }
+ ],
+ "panel": {
+  "symbols": 744,
+  "dead": 253,
+  "alive": 491,
+  "live_listed_covered": 490,
+  "live_listed_missing_from_panel": 6,
+  "missing_examples": [
+   "AGPUBUSDT",
+   "AMCBUSDT",
+   "CYPHBUSDT",
+   "HYPEUSDT",
+   "\u5e01\u5b89\u4eba\u751fUSDT",
+   "\u725b\u6765USDT"
+  ]
+ },
+ "a_not_looked_at": {
+  "n_not_looked": 383,
+  "n_pass_eligibility": 5,
+  "names": [
+   {
+    "symbol": "USDCUSDT",
+    "vol60": 0.004,
+    "age_days": 2840,
+    "adv90_musd": 1820.6,
+    "removed_by": "pegged:ann_vol=0.0039"
+   },
+   {
+    "symbol": "BNBUSDT",
+    "vol60": 0.392,
+    "age_days": 3244,
+    "adv90_musd": 62.0,
+    "removed_by": "data_only:BNB"
+   },
+   {
+    "symbol": "FDUSDUSDT",
+    "vol60": 0.007,
+    "age_days": 1156,
+    "adv90_musd": 17.8,
+    "removed_by": "pegged:ann_vol=0.0075"
+   },
+   {
+    "symbol": "EURUSDT",
+    "vol60": 0.078,
+    "age_days": 2456,
+    "adv90_musd": 13.7,
+    "removed_by": "pegged:ann_vol=0.0632"
+   },
+   {
+    "symbol": "PAXGUSDT",
+    "vol60": 0.251,
+    "age_days": 2218,
+    "adv90_musd": 11.8,
+    "removed_by": "not_24_7:weekend_ratio=0.288"
+   }
+  ]
+ },
+ "included_passing": {
+  "watchlist_pass": 13,
+  "whitelist_pass": 13
+ }
+}

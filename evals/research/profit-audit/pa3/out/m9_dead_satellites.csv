@@ -1,0 +1,25 @@
+symbol,last,adv90_musd,was_enterable,ret_last30,ret_last90,successor,kind
+BCCUSDT,2018-11-20,21.2,False,-0.029,-0.1909,BCH,rename/merge
+BCHABCUSDT,2019-11-28,15.2,False,-0.2391,-0.211,BCH,rename/merge
+ERDUSDT,2020-08-31,6.8,False,-0.0566,6.1882,EGLD,rename/merge
+NPXSUSDT,2021-04-05,11.3,False,2.4652,38.2086,,forced exit
+BZRXUSDT,2021-12-20,8.2,False,-0.2483,-0.065,,forced exit
+BTTUSDT,2022-01-17,44.2,False,0.035,-0.2275,BTTC,rename/merge
+KEEPUSDT,2022-02-16,7.5,False,0.0133,-0.0293,,forced exit
+NUUSDT,2022-02-16,6.0,False,-0.1182,-0.3291,,forced exit
+GXSUSDT,2022-04-25,6.5,False,0.1145,0.2764,,forced exit
+EPSUSDT,2022-05-09,6.2,False,-0.2613,-0.0939,,forced exit
+HNTUSDT,2022-10-14,5.1,False,0.1066,-0.4788,,forced exit
+COCOSUSDT,2023-05-29,12.1,False,-0.0332,-0.1758,,forced exit
+AUDUSDT,2023-06-01,8.4,False,0.0881,0.0707,,forced exit
+TOMOUSDT,2023-11-20,5.7,False,-0.0731,-0.0798,,forced exit
+XMRUSDT,2024-02-20,12.8,False,-0.2468,-0.2722,,forced exit
+WAVESUSDT,2024-06-17,6.9,False,-0.5728,-0.6648,,forced exit
+AGIXUSDT,2024-07-01,22.5,False,-0.3113,-0.4331,FET,rename/merge
+OCEANUSDT,2024-07-01,7.7,False,-0.3156,-0.4562,FET,rename/merge
+RNDRUSDT,2024-07-22,51.6,False,-0.0424,-0.2171,RENDER,rename/merge
+MATICUSDT,2024-09-10,25.4,True,-0.0586,-0.4115,POL,rename/merge
+FTMUSDT,2025-01-13,72.8,False,-0.4292,-0.0794,S,rename/merge
+EOSUSDT,2025-05-26,21.2,False,0.1446,0.3838,A,rename/merge
+MKRUSDT,2025-09-15,8.2,False,0.0151,-0.1035,SKY,rename/merge
+TONUSDT,2026-06-30,19.7,False,-0.1557,0.2935,,forced exit

@@ -1,0 +1,43 @@
+{
+ "id": "2026-09-30-track6-missed-rally-forensics",
+ "seal_rechecked": true,
+ "costs_on": true,
+ "cost_round_trip": 0.003,
+ "both_baselines_reported": [
+  "btc_buy_and_hold 24m +32.98% Sharpe 0.5424",
+  "shipped SleeveA replay 24m +12.47% Sharpe 0.5147"
+ ],
+ "headline_is_out_of_sample": "n/a -- this is a CENSUS with a pre-declared definition, not a fitted rule. No parameter was chosen to maximise anything; the three free parameters are reported across a 5-point plateau.",
+ "regime_split_present": true,
+ "parameters_added_after_the_fact": 0,
+ "falsifiers": {
+  "F1_attribution_completeness": {
+   "triggered": false,
+   "number": "C99_unattributable = 0 of 2605 = 0.0% (bar: >10%)"
+  },
+  "F2_mandate_vs_detection": {
+   "triggered": false,
+   "number": "mandate causes C01-C05 = 2548 of 2605 = 97.8%; the largest detection-or-later cause is C10_own_regime_gate_off at 26 = 1.0%. Flat across thresholds: 97.7% at +20%, 97.8% at +30%, 97.6% at +50%."
+  },
+  "F3_materiality": {
+   "triggered": "SPLIT -- reported both ways",
+   "number": "naive per-rally accounting for the top three causes = 1055%/yr of NAV, which is arithmetically impossible (it implies 51x gross in a book capped at 0.80x). Capacity-bounded perfect-foresight ceiling = 87.8%/yr. The only NO-FORESIGHT measurement -- the shipped rule replayed with each cause relaxed one at a time -- is -0.47pp, 0.00pp and -0.43pp over 24 months, i.e. ZERO to NEGATIVE. F3 triggers on the two foresight numbers and does not trigger on the realisable one."
+  }
+ },
+ "outcome": "supported_with_one_correction",
+ "correction": "C06_no_detector_fired was originally ordered ahead of the regime gates and mislabelled 8 of 10 rallies whose real cause was the coin's own 200d gate. SleeveA is the RULES sleeve and never consults a detector, so detector coverage is now reported as an independent column, not a funnel step.",
+ "trials_added": 9,
+ "trials_detail": [
+  "B1 satellite_eligibility off",
+  "B2 majors get seats",
+  "B3 whole watchlist tradeable",
+  "B4 six seats at 15% gross",
+  "B5 whole watchlist + six seats",
+  "B6 min_position floor removed",
+  "B7 ONE satellite seat at 5% gross",
+  "B8 two seats at 10% gross",
+  "B9 two seats at 5% gross, floor removed"
+ ],
+ "deflated_hurdle": "8144 -> 8153 trials; expected_max_sharpe(8153, 9.1y) = 1.4925, deflated hurdle = 0.83 + 1.4925 = 2.3225. Over the 2-year measurement window itself: expected_max_sharpe(8153, 2.0y) = 3.1837, hurdle 4.0137. EVERY book measured here (Sharpe 0.48-0.68) is far below both. NOTHING here is offered as an edge.",
+ "bug_found_and_fixed_during_the_study": "core_satellite_targets was handed symbol keys (BTCUSDT) while reading base-asset weights (BTC), so the first replayed book held ZERO BTC and ETH and returned +0.48% instead of +12.47%. Caught by cross-checking the BTC rally of 2024-10-22, which the attribution reported as sized-to-zero while BTC was 1.06x above its own 200d MA."
+}
