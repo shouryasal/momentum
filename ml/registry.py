@@ -260,6 +260,38 @@ def device_report() -> dict:
 # --------------------------------------------------------------------------- trial counter
 
 
+class _Locked:
+    """``flock`` on ``<counter>.lock`` for a read-modify-write cycle. Same shape as
+    ``ops/lib/flags.py: _Locked``, which is the house precedent for exactly this problem.
+
+    Why a lock at all: :meth:`Trials.add` used to mutate an in-memory snapshot taken by
+    :meth:`Trials.load` and then write the whole file back. Two processes that both loaded at
+    N each wrote N+1, so one trial vanished — a classic lost update, and this project runs
+    sweeps from many processes at once (2026-09-30: 115 concurrent agents). The direction of
+    the error is what makes it serious. The count feeds
+    :func:`ml.metrics.deflated_sharpe_hurdle`, so an undercount *lowers* the bar a result has
+    to clear, and every honesty claim in every design document rests on it.
+    """
+
+    def __init__(self, path: Path):
+        self.lock_path = path.with_suffix(path.suffix + ".lock")
+        self._fh = None
+
+    def __enter__(self):
+        import fcntl
+
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.lock_path, "w")
+        fcntl.flock(self._fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        import fcntl
+
+        fcntl.flock(self._fh, fcntl.LOCK_UN)
+        self._fh.close()
+
+
 @dataclass
 class Trials:
     """A persistent, monotonic count of model configurations tried, and the hurdle it implies.
@@ -284,18 +316,26 @@ class Trials:
     state: dict
 
     @classmethod
-    def load(cls, path: Path | None = None) -> Trials:
-        p = Path(path) if path else (cache_root() / "ml_trial_counter.json")
+    def _read(cls, p: Path) -> dict:
         try:
             st = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
+            st = {}
+        if not isinstance(st, dict):
             st = {}
         st.setdefault("n_trials", 0)
         st.setdefault("n_selection_trials", st["n_trials"])
         st.setdefault("history", [])
         st["n_trials"] = max(int(st["n_trials"]), 0)
         st["n_selection_trials"] = max(int(st["n_selection_trials"]), 0)
-        return cls(path=p, state=st)
+        if not isinstance(st["history"], list):
+            st["history"] = []
+        return st
+
+    @classmethod
+    def load(cls, path: Path | None = None) -> Trials:
+        p = Path(path) if path else (cache_root() / "ml_trial_counter.json")
+        return cls(path=p, state=cls._read(p))
 
     def add(self, what: str, *, selection: bool = True,
             hypothesis: str = "", metrics: dict | None = None) -> Trials:
@@ -304,24 +344,51 @@ class Trials:
         ``what`` should name the configuration, not the outcome: "lgbm depth 6, 500 trees, 7d
         return" and not "tried a model". The history is what an auditor reads to decide whether
         N is honest, and a history of 400 rows that all say "tried a model" is not evidence.
+
+        **The increment is applied to the file, not to the snapshot in memory.** This method
+        re-reads under an exclusive lock, adds one to whatever is on disk, and writes that —
+        so a second process that loaded the same starting count cannot overwrite this one's
+        trial. It used to mutate ``self.state`` from :meth:`load` and write the whole file
+        back, which lost an increment on every collision. See :class:`_Locked` for why the
+        direction of that error matters: an undercount lowers the deflated hurdle.
         """
-        self.state["n_trials"] += 1
-        if selection:
-            self.state["n_selection_trials"] += 1
-        self.state["history"].append({
+        row = {
             "utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "what": what, "selection": bool(selection), "hypothesis": hypothesis,
             "metrics": metrics or {}, "harness": HARNESS_VERSION,
-        })
-        self.save()
+        }
+        with _Locked(self.path):
+            fresh = self._read(self.path)
+            fresh["n_trials"] += 1
+            if selection:
+                fresh["n_selection_trials"] += 1
+            fresh["history"].append(row)
+            self.state = fresh
+            self._write(fresh)
         return self
 
-    def save(self) -> Path:
+    def _write(self, state: dict) -> Path:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.state, indent=2), encoding="utf-8")
-        tmp.replace(self.path)
+        # The temp name carries the pid: a shared ".tmp" is itself a race between two writers,
+        # even though the final replace() is atomic.
+        tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+            tmp.replace(self.path)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
         return self.path
+
+    def save(self) -> Path:
+        """Write ``self.state`` wholesale, under the lock.
+
+        Prefer :meth:`add`. This exists for a caller that has rebuilt the whole state on
+        purpose; it cannot merge, so two concurrent ``save`` calls still resolve last-writer-
+        wins. Nothing that merely records a trial should use it.
+        """
+        with _Locked(self.path):
+            return self._write(self.state)
 
     @property
     def n(self) -> int:

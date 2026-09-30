@@ -396,7 +396,23 @@ def rsi_extreme(ctx: Ctx) -> list[Candidate]:
 
 @register("volume_spike")
 def volume_spike(ctx: Ctx) -> list[Candidate]:
-    """Volume z-score above the configured threshold."""
+    """Volume z-score above the configured threshold. **Direction is deliberately neutral.**
+
+    This used to label the spike ``up`` when the spiking bar's own return was positive, which
+    reads as "heavy buying, going up". Measured on 468 coins over nine years, that is backwards:
+    a high-volume bar is followed by a *lower* return (1d cross-sectional rank IC −0.057 at
+    t −17.3; 1h −0.008 at t −10.7), and the same sign holds for every volume and attention
+    feature tested — five of them, nine surviving a strict multiple-testing correction, no
+    regime flip and no sample flip. Attention arrives with the top.
+
+    The label is dropped rather than inverted, because the effect that would justify inverting
+    it does **not** survive in the ~22 coins Earn may actually trade: after controlling for
+    volume, volatility, age and prior return its strength is 1.08 against a pre-registered bar
+    of 2.0, and break-even predictive strength there is 0.0264 against a measured 0.006. So the
+    honest statement is that a volume spike is an event worth looking at and we do not know
+    which way it resolves. ``ret_1h`` stays in ``detail`` — the number is still visible to the
+    model, it is simply no longer asserted as a direction.
+    """
     dc = _cfg_for(ctx, "volume_spike")
     if not dc.enabled:
         return []
@@ -408,11 +424,12 @@ def volume_spike(ctx: Ctx) -> list[Candidate]:
         ret = ctx.fget(pair, "ret_1h") or 0.0
         out.append(Candidate(
             detector="volume_spike", pair=pair,
-            direction=DIRECTION_UP if ret > 0 else DIRECTION_DOWN,
+            direction=DIRECTION_NEUTRAL,
             strength=_ratio_strength(z, dc.zscore),
             reason=f"volume_spike:{pair.split('/')[0]}:{z:.1f}",
             feature_keys=(ctx.fkey(pair, "vol_z_1h"), ctx.fkey(pair, "ret_1h")),
-            detail={"tf": dc.tf, "zscore": round(z, 3), "threshold": dc.zscore}))
+            detail={"tf": dc.tf, "zscore": round(z, 3), "threshold": dc.zscore,
+                    "ret_1h": round(ret, 4)}))
     return out
 
 

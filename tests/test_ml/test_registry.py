@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -226,3 +227,65 @@ def test_the_default_counter_is_separate_from_the_trading_loops(tmp_path, monkey
     t = Trials.load()
     assert t.path.name == "ml_trial_counter.json"
     assert "trial_counter.json" != t.path.name
+
+
+def test_two_processes_recording_a_trial_each_lose_neither(tmp_path):
+    """The lost update, as a test. An undercount LOWERS the bar a result has to clear.
+
+    ``add`` used to mutate the snapshot ``load`` took and write the whole file back, so two
+    writers that both loaded at N each wrote N+1 and one trial vanished. This project runs
+    sweeps from many processes at once — 115 concurrent agents on 2026-09-30 — and the count
+    feeds ``deflated_sharpe_hurdle``, so every honesty claim in every design document rests
+    on it. Real processes, not threads: the bug is in the file, and a lock that only works
+    within one interpreter would pass a threaded test and still lose trials in production.
+    """
+    import subprocess
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
+
+    p = tmp_path / "tc.json"
+    Trials.load(p).add("seed")
+    repo = str(Path(__file__).resolve().parents[2])
+    prog = (
+        f"import sys; sys.path.insert(0, {repo!r})\n"
+        "from pathlib import Path\n"
+        "from ml.registry import Trials\n"
+        f"t = Trials.load(Path({str(p)!r}))\n"  # every worker loads the SAME starting count
+        "import time; time.sleep(0.05)\n"       # ...then they all write: this is the collision
+        "t.add('config ' + sys.argv[1])\n"
+    )
+
+    n = 8
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        rcs = list(ex.map(
+            lambda i: subprocess.run([sys.executable, "-c", prog, str(i)],
+                                     capture_output=True, text=True, timeout=120),
+            range(n)))
+    for r in rcs:
+        assert r.returncode == 0, r.stderr[-800:]
+
+    final = Trials.load(p)
+    assert final.n == 1 + n, f"lost {1 + n - final.n} of {n} trials"
+    assert len(final.state["history"]) == 1 + n
+    recorded = {row["what"] for row in final.state["history"]}
+    assert recorded == {"seed"} | {f"config {i}" for i in range(n)}
+
+
+def test_the_counter_never_goes_backwards_when_a_stale_snapshot_adds(tmp_path):
+    """A long-lived handle must not undo trials recorded after it loaded."""
+    p = tmp_path / "tc.json"
+    stale = Trials.load(p)            # loaded at 0 and held
+    for i in range(5):
+        Trials.load(p).add(f"other {i}")
+    assert Trials.load(p).n == 5
+    stale.add("mine")                 # the stale handle records one more
+    assert Trials.load(p).n == 6, "a stale handle rolled the counter back"
+
+
+def test_a_screening_trial_still_lands_in_the_audit_trail_under_concurrency(tmp_path):
+    p = tmp_path / "tc.json"
+    Trials.load(p).add("screen a", selection=False)
+    Trials.load(p).add("select b", selection=True)
+    t = Trials.load(p)
+    assert t.state["n_trials"] == 2
+    assert t.state["n_selection_trials"] == 1

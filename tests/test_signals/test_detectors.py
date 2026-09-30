@@ -140,6 +140,32 @@ class TestNewFive:
         assert out and out[0].detector == "volume_spike"
         assert out[0].detail["zscore"] > 3.0
 
+    def test_a_volume_spike_asserts_no_direction(self, ctx):
+        """A spike on an UP bar must not be labelled bullish. Measured, it is the opposite.
+
+        Cross-sectionally a high-volume bar is followed by a LOWER return (1d rank IC −0.057
+        at t −17.3 over 468 coins and nine years), and every volume and attention feature
+        tested points the same way. The label is dropped rather than inverted because the
+        effect does not survive in the coins Earn may trade (t 1.08 after controls, against a
+        pre-registered bar of 2.0), so "we do not know" is the only honest direction.
+        """
+        make, _, _, kdb, _ = ctx
+        seed_candles(kdb, tf="1h", n=80, volume=10.0)
+        seed_candle(kdb, "BTC/USDT", "1h", open_=100.0, close=101.0, volume=1000.0)
+        up = detectorslib.volume_spike(make())
+        assert up and up[0].direction == "neutral", "a spike on a green bar was called bullish"
+        assert up[0].detail["ret_1h"] > 0, "the return is still visible, just not a direction"
+        assert up[0].strength > 0, "dropping the label must not drop the event's strength"
+
+    def test_a_volume_spike_on_a_down_bar_is_labelled_the_same_way(self, ctx):
+        """Same label both ways round, or the neutrality is cosmetic."""
+        make, _, _, kdb, _ = ctx
+        seed_candles(kdb, tf="1h", n=80, volume=10.0)
+        seed_candle(kdb, "BTC/USDT", "1h", open_=101.0, close=100.0, volume=1000.0)
+        down = detectorslib.volume_spike(make())
+        assert down and down[0].direction == "neutral"
+        assert down[0].detail["ret_1h"] < 0
+
     def test_dip_from_high(self, ctx):
         make, _, _, kdb, _ = ctx
         seed_candles(kdb, tf="1d", n=25, start=200.0, step=0.0)
