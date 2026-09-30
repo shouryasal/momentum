@@ -93,6 +93,14 @@ JOB_MIN_LEVEL: dict[str, str] = {
     # Always — the watchdog and the backups. See the module docstring.
     "healthcheck": OFF,
     "backup": OFF,
+    # The databases snapshot: OFF, because a human who has switched autonomy off still wants
+    # analysis to be SAFE, and this job is what makes it safe. It places no order, writes no
+    # proposal, spends nothing on models and talks to no venue — it copies two local sqlite
+    # files under the ops lock and gives up if anything is busy. Withholding it at low
+    # autonomy would only push a future study back onto the live database, which is the thing
+    # that blocked entries for 6h42m on 2026-09-30. Not in ALWAYS_JOBS: if this gate itself
+    # cannot load, a missing snapshot is an inconvenience, not an incident.
+    "snapshot": OFF,
     # Watching: data, signals and the local holdings watcher. No proposals, no orders.
     "ingest": WATCHING,
     "scanner": WATCHING,

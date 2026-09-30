@@ -330,9 +330,15 @@ outside this build; the key is rendered into `riskgate.json` for it to read.
 `tests/test_riskgate/test_crisis_block_entries.py` proves the two properties the doc insists on
 against the committed config: while the flag is live, `check_entry` refuses
 (`blackout:market_shock`) and releases itself at expiry; `loop_tick` produces no flatten and no
-trim; `flatten_pending`/`reduce_pending` stay `None`; `check_exit` and `check_discretionary_exit`
-(stop, exit signal, TP rung, rebalance) all stay allowed; `SEVERITIES` contains no selling
-severity; and the host mirror `ops.lib.flags.entries_blocked` agrees with the gate's.
+trim; `flatten_pending`/`reduce_pending` stay `None`; `check_discretionary_exit` (stop, exit
+signal, TP rung, rebalance) stays allowed; `SEVERITIES` contains no selling severity; and the
+host mirror `ops.lib.flags.entries_blocked` agrees with the gate's.
+
+> **Corrected 2026-09-30.** This sentence used to name `check_exit` alongside
+> `check_discretionary_exit`. `check_exit` returned allowed unconditionally and had no
+> production callers, so naming it added no assurance — it removed some, by making a vacuous
+> assertion look like a second independent proof. It is deleted, and the test now exercises
+> `check_discretionary_exit`, which is what `confirm_trade_exit` actually calls.
 
 ---
 

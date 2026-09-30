@@ -235,13 +235,20 @@ class GateConfig:
     max_order_notional_pct: float = 0.20
     max_orders_per_day: int = 16
     max_turnover_pct_per_day: float = 0.50
+    #: A reduction of at least this share of NAV is exempt from the churn/turnover/fee budget.
+    #: Exempting by SIZE rather than by reason-name is the point — see
+    #: :meth:`RiskGate.check_discretionary_exit`.
+    derisk_exempt_pct: float = 0.10
     # --- wide universe (wide-universe.md §2.2-2.4) -------------------------------
     universe: UniverseView = field(default_factory=UniverseView)
     tier_caps: dict[str, float] = field(default_factory=dict)   # tier -> human ceiling
     max_weight: dict[str, float] = field(default_factory=dict)  # asset -> human ceiling
     max_open_positions: int = 8
-    max_satellite_positions: int = 4
-    max_satellite_gross: float = 0.10
+    # 0 / 0.0, not the historical 4 / 0.10: a riskgate.json missing these keys must DISABLE
+    # satellites, not silently restore the pre-2026-09-29 wide-universe limits. A fallback
+    # that widens a risk limit is the one direction a default may never fail in.
+    max_satellite_positions: int = 0
+    max_satellite_gross: float = 0.0
     max_beta_to_btc: float = 1.30
     max_avg_pairwise_corr: float = 0.70
     min_position_pct_nav: float = 0.02
@@ -375,12 +382,13 @@ class GateConfig:
             tier_caps=tier_caps,
             max_weight=max_weight,
             max_open_positions=int(risk.get("max_open_positions", 8)),
-            max_satellite_positions=int(risk.get("max_satellite_positions", 4)),
-            max_satellite_gross=float(risk.get("max_satellite_gross", 0.10)),
+            max_satellite_positions=int(risk.get("max_satellite_positions", 0)),
+            max_satellite_gross=float(risk.get("max_satellite_gross", 0.0)),
             max_beta_to_btc=float(risk.get("max_beta_to_btc", 1.30)),
             max_avg_pairwise_corr=float(risk.get("max_avg_pairwise_corr", 0.70)),
             min_position_pct_nav=float(risk.get("min_position_pct_nav", 0.02)),
             max_turnover_pct_per_day=float(risk.get("max_turnover_pct_per_day", 0.50)),
+            derisk_exempt_pct=float(risk.get("derisk_exempt_pct", 0.10)),
             max_fee_pct_per_month=float(risk.get("max_fee_pct_per_month", 0.01)),
             market_entries_allowed=bool(risk.get("market_entries_allowed", False)),
             protection_drawdown_lookback=int(protections.get("lookback_candles", 6)),
@@ -921,6 +929,23 @@ class RiskGate:
         #: default answers "no history", under which the beta and correlation checks pass.
         self._returns = returns_provider or (lambda pair: None)
 
+    def kill_engaged(self) -> bool:
+        """Is the kill switch engaged? The public name, so callers stop reaching for ``_kill``.
+
+        What KILL means, in one sentence, because the codebase used to answer it differently in
+        four places: **no new risk, and no order whose size came from somewhere else.** A sleeve
+        may still reduce a position when both the trigger and the size come from what the bot
+        observes itself — price, NAV, its own candles — or from a direct human instruction. It
+        may not originate a sell sized by a file another process wrote, because KILL is engaged
+        exactly when that other process's output is in doubt: a human has said stop, or
+        ``ops/healthcheck.py`` found a mode mismatch, which is an integrity failure.
+
+        So stops, trailing stops, the daily-loss flatten, a human force-exit and the
+        price-sized take-profit ladder all keep working under KILL. The ensemble trim and
+        SleeveB's proposal-driven sells do not. See ``docs/design/decisions-2026-09-30.md`` §1.
+        """
+        return bool(self._kill())
+
     # -- book shape ------------------------------------------------------------
 
     def _held(self, ps: PortfolioState) -> dict[str, float]:
@@ -967,7 +992,7 @@ class RiskGate:
         cfg = self.cfg
 
         checks["nav_valid"] = bool(ps.valid) and ps.nav > 0
-        checks["kill"] = not self._kill()
+        checks["kill"] = not self.kill_engaged()
         checks["monthly_lock"] = not self._monthly_lock_active(ps.now)
         checks["daily_lock"] = not self._daily_locked(ps.now)
         blocked, flag = self._flags(pair, ps.now)
@@ -1087,21 +1112,40 @@ class RiskGate:
 
     # -- exit ------------------------------------------------------------------
 
-    def check_exit(self, pair: str, exit_reason: str, ps: PortfolioState) -> GateDecision:
-        # Exits reduce risk: always allowed (including under KILL — flattening must work).
-        return GateDecision(True, "ok", {"exit_always_allowed": True})
-
     def check_discretionary_exit(self, pair: str, stake: float, ps: PortfolioState,
                                  exit_reason: str) -> GateDecision:
         """Churn/turnover/fee gate for a *discretionary* exit (TP rung, rebalance trim).
 
-        A risk exit — stop, trailing stop, daily/monthly flatten, KILL, ``target_zero``
-        — is never blocked: the answer is always ``allowed``.
+        Two exemptions, and the second one is the important one.
+
+        A **risk exit** — stop, trailing stop, daily/monthly flatten, KILL, ``target_zero`` —
+        is never blocked. That is matched by name, through :func:`mechanics.is_risk_exit`.
+
+        A **large reduction** is never blocked either, whatever it is called, once it reaches
+        ``risk.derisk_exempt_pct`` of NAV. Matching only by name was a money bug with three
+        reinforcing halves. ``exit_signal`` — the value freqtrade actually passes for
+        ``populate_exit_trend``, verified against ``freqtrade.enums.ExitType`` — is in neither
+        ``RISK_EXIT_REASONS`` nor the ``risk_stop``/``stop_loss``/``trailing_stop``/``emergency``
+        prefixes, so **SleeveA's MA200 flip, its one signal-driven sell and a 100% close, was
+        refusable by a fee counter**. ``abs(stake)`` sits in the turnover numerator below, so the
+        bigger the de-risk the likelier the refusal. ``ACTION_PRIORITY`` ranks ``add`` above
+        ``rebalance``, so risk-*increasing* orders spend the budget the de-risk later needs. And
+        ``fee_budget`` is keyed to the Gulf month, so once tripped it refused the close on every
+        candle until the month turned — leaving only the per-position stop, in exactly the month
+        that was expensive enough to exhaust the budget.
+
+        0.10 of NAV separates the populations rather than splitting them: a full core close is
+        0.30–0.40 of NAV at the core tier cap and always clears, while a rebalance trim is
+        bounded by ``rebalance_band`` 0.05 and a take-profit rung is smaller still, so ordinary
+        churn stays fully budgeted. The point of a size test is that the *next* new sell reason
+        inherits the protection instead of silently missing it, which is how this arose.
         """
-        if is_risk_exit(exit_reason):
-            return GateDecision(True, "ok", {"risk_exit": True})
         cfg = self.cfg
         nav = max(ps.nav, _EPS)
+        if is_risk_exit(exit_reason):
+            return GateDecision(True, "ok", {"risk_exit": True})
+        if abs(stake) >= cfg.derisk_exempt_pct * nav:
+            return GateDecision(True, "ok", {"large_derisk": True})
         checks = {
             "orders_per_day": self.orders_today(ps.now) < cfg.max_orders_per_day,
             "turnover_day": ((self.turnover_today(ps.now) + abs(stake)) / nav

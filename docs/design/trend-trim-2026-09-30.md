@@ -408,10 +408,17 @@ Suites run in `~/earn-wk/tr1`: `tests/strategies` + `tests/test_riskgate` + `tes
 8. **The journal row for a trim is written before freqtrade agrees to place the order** — §5's
    unavoidable edge. A refused order leaves a `partial_exit` row on the Gate page. Shared with
    the ladder and SleeveB; not introduced here.
-9. **Under KILL the trim still trims.** `check_exit`'s own rule is that exits reduce risk and
-   are always allowed, including under KILL, and `_mechanics_plan` consults only
-   `flatten_pending`. This matches the ladder and SleeveB. An operator who wants nothing at
-   all to move uses the console's stop, not the kill file.
+9. ~~**Under KILL the trim still trims.**~~ **REVERSED 2026-09-30** — see
+   `docs/design/decisions-2026-09-30.md` §1. This item's reasoning was wrong twice over. It
+   cited `check_exit`, which returned allowed unconditionally and had **zero production
+   callers**; and its consistency claim ("this matches the ladder and SleeveB") was not
+   checked. The trim is now **suspended** under KILL, because its *size* comes from
+   `knowledge/state/trend.json` — a file another process wrote — and KILL is engaged exactly
+   when that process's output is in doubt: a human said stop, or `ops/healthcheck.py` found a
+   mode mismatch. What still sells under KILL is everything sized by what the bot observes
+   itself: the stop-loss, the trailing stop, the daily-loss flatten, a human force-exit and the
+   price-sized take-profit ladder. The rule, in one sentence: **no new risk, and no order whose
+   size came from somewhere else.**
 10. **One number in `docs/design/trend-ensemble.md` §3.2 is now wrong** and I did not edit it,
     because that file is outside this change's ownership: it says the ensemble is *"Never an
     exit"* and that *"a test asserts `custom_exit` is `None` at weight 0 with an open

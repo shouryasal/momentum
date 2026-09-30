@@ -327,12 +327,35 @@ class TestTheExitClassification:
         assert plan is not None and plan.tag == mx.TRIM_DRIFT
         assert not mx.is_risk_exit(plan.tag)
 
-    def test_a_drift_trim_is_refused_when_the_fee_budget_is_gone(self, monkeypatch, tmp_path):
+    def test_a_small_drift_trim_is_refused_when_the_fee_budget_is_gone(self, monkeypatch,
+                                                                      tmp_path):
         """And that is the correct answer for housekeeping: the position is inside every
-        shipped limit, so waiting a day costs the book nothing it can measure."""
-        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=2_000.0)
+        shipped limit, so waiting a day costs the book nothing it can measure.
+
+        1,800 against a scaled target of 1,000 sheds 800 — over the 500 band so it trims, under
+        ``risk.derisk_exempt_pct`` x NAV = 1,000 so the budget still governs it. A position of
+        2,000 sheds exactly 1,000 and is exempt by size; that is the test below.
+        """
+        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=1_800.0)
         self._exhaust_the_fee_budget(s)
         assert _trim(s, trade) is None
+
+    def test_a_large_drift_trim_is_exempt_from_the_fee_budget_by_its_size(self, monkeypatch,
+                                                                         tmp_path):
+        """Fixed 2026-09-30: a big de-risk must not be refusable for being big.
+
+        ``abs(stake)`` is in the turnover numerator, so before this the bigger the reduction the
+        likelier the veto — and ``fee_budget`` is keyed to the Gulf month, so once tripped it
+        refused on every candle until the month turned. ``exit_signal``, SleeveA's only
+        signal-driven sell and a 100% close, matched no risk-exit NAME and was refusable the
+        same way.
+        """
+        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=2_000.0)
+        self._exhaust_the_fee_budget(s)
+        plan = _trim(s, trade)
+        assert plan is not None, "a 10%-of-NAV de-risk was refused by a fee counter"
+        assert plan.stake == pytest.approx(-1_000.0)
+        assert plan.tag == mx.TRIM_DRIFT, "the classification was never the problem"
 
     def test_a_cap_breach_is_a_risk_exit_the_fee_budget_may_not_silence(
             self, monkeypatch, tmp_path):
@@ -424,7 +447,7 @@ class TestTheExitClassification:
             _journal, "record_gate_decision",
             lambda sleeve, pair, callback, intent, allowed, reason, **kw: rows.append(
                 {"reason": reason, "allowed": allowed, **kw}) or 1)
-        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=2_000.0)
+        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=1_800.0)
         s._journal_on = True
         self._exhaust_the_fee_budget(s)
         assert _trim(s, trade) is None
@@ -504,12 +527,25 @@ class TestTheGateStillAuthorisesIt:
             _journal, "record_gate_decision",
             lambda sleeve, pair, callback, intent, allowed, reason, **kw: rows.append(kw)
             or 1)
-        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=2_000.0)
+        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=1_800.0)
         s._journal_on = True
         _trim(s, trade).commit()
         checks = next(r["checks"] for r in rows if r.get("action") == "partial_exit")
         assert set(checks) == {"orders_per_day", "turnover_day", "fee_budget"}
         assert all(checks.values())
+
+    def test_an_exempt_de_risk_says_so_in_the_row(self, monkeypatch, tmp_path):
+        """The exemption has to be legible afterwards, or nobody can tell why it went through."""
+        rows: list[dict] = []
+        monkeypatch.setattr(
+            _journal, "record_gate_decision",
+            lambda sleeve, pair, callback, intent, allowed, reason, **kw: rows.append(kw)
+            or 1)
+        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=2_000.0)
+        s._journal_on = True
+        _trim(s, trade).commit()
+        checks = next(r["checks"] for r in rows if r.get("action") == "partial_exit")
+        assert checks == {"large_derisk": True}
 
     def test_the_trim_is_floored_onto_the_exchange_lot_grid(self, monkeypatch, tmp_path):
         """A sell is floored DOWN onto LOT_SIZE, so the book keeps a crumb rather than
@@ -584,3 +620,62 @@ class TestTrimReason:
             "position_value", "gross", "free_usdt", "nav", "weight_cap", "gross_cap",
             "usdt_floor"}
         assert all(p.default is inspect.Parameter.empty for p in sig.parameters.values())
+
+
+class TestTheRefusalRowIsIdempotent:
+    """One row per state change. `adjust_trade_position` runs every bot loop, not per candle.
+
+    The refused-trim row is written as a direct statement rather than a `plan.then` effect, so
+    it is gated neither by winning `actions.choose()` nor by `plan.commit()`. At
+    `process_throttle_secs: 5` a standing refusal therefore wrote **17,280 rows per pair per
+    day**, some graded `breach` — which buries the Gate page and adds write pressure to a
+    database whose locking has already cost this system hours of blocked entries.
+    """
+
+    @staticmethod
+    def _rows(monkeypatch):
+        rows: list[dict] = []
+        monkeypatch.setattr(
+            _journal, "record_gate_decision",
+            lambda sleeve, pair, callback, intent, allowed, reason, **kw: rows.append(
+                {"reason": reason, "allowed": allowed, **kw}) or 1)
+        return rows
+
+    def test_a_standing_refused_trim_journals_one_row_not_one_per_loop(self, monkeypatch,
+                                                                      tmp_path):
+        rows = self._rows(monkeypatch)
+        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=1_800.0)
+        s._journal_on = True
+        s.gate.store.set(f"fees_month_{GULF_MONTH}", repr(NAV))
+        for _ in range(20):
+            assert _trim(s, trade) is None
+        refusals = [r for r in rows if r.get("action") == "reject"]
+        assert len(refusals) == 1, f"{len(refusals)} rows for one standing refusal"
+
+    def test_a_refusal_that_recurs_after_the_condition_cleared_is_journalled_again(
+            self, monkeypatch, tmp_path):
+        """Latched, not suppressed. A second episode is a second thing that happened."""
+        rows = self._rows(monkeypatch)
+        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=1_800.0)
+        s._journal_on = True
+        s.gate.store.set(f"fees_month_{GULF_MONTH}", repr(NAV))
+        assert _trim(s, trade) is None
+        s.gate.store.set(f"fees_month_{GULF_MONTH}", "0.0")     # budget back: the trim fires
+        assert _trim(s, trade) is not None
+        s.gate.store.set(f"fees_month_{GULF_MONTH}", repr(NAV))  # and is refused again
+        assert _trim(s, trade) is None
+        assert len([r for r in rows if r.get("action") == "reject"]) == 2
+
+    def test_a_different_refusal_reason_is_a_new_row(self, monkeypatch, tmp_path):
+        """The latch is keyed on the reason, so a change of cause is never swallowed."""
+        rows = self._rows(monkeypatch)
+        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=1_800.0)
+        s._journal_on = True
+        s.gate.store.set(f"fees_month_{GULF_MONTH}", repr(NAV))
+        assert _trim(s, trade) is None
+        s.gate.store.set(f"fees_month_{GULF_MONTH}", "0.0")
+        for _ in range(s.gate_cfg.max_orders_per_day):
+            s.gate.record_order_fill(NOW, notional=1.0)          # a DIFFERENT check now fails
+        assert _trim(s, trade) is None
+        reasons = [r["reason"] for r in rows if r.get("action") == "reject"]
+        assert len(reasons) == 2 and reasons[0] != reasons[1], reasons

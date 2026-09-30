@@ -246,6 +246,11 @@ class EarnBaseStrategy(IStrategy):
         #: Last trend-gate reason journalled per pair, so the journal gets one row per
         #: state change rather than one per candle.
         self._trend_gate_last: dict[str, str] = {}
+        #: Same latch for a gate-refused TRIM. That row is written as a direct statement, not
+        #: as a ``plan.then`` effect, so it is gated neither by ``actions.choose()`` nor by
+        #: ``plan.commit()`` — and ``adjust_trade_position`` runs every bot loop (~5s), not
+        #: once a candle. Unlatched, a standing refusal wrote 17,280 rows per pair per day.
+        self._trim_reject_last: dict[str, str] = {}
 
     # ---------------------------------------------------------------- protections
 
@@ -609,7 +614,17 @@ class EarnBaseStrategy(IStrategy):
     #: candle store would liquidate the core book on a data fault. ``not_core`` is excluded
     #: too — a satellite's 1.0 is a placeholder for "this signal does not speak about you",
     #: not a measurement, and the ensemble is a core-asset signal.
+    #:
+    #: An engaged KILL is the fifth member of that fail-closed set, handled below rather than
+    #: here because it is not a trend reason. It is the same hazard class as a dead writer with
+    #: a human attached: the trim's SIZE comes from ``knowledge/state/trend.json``, a file
+    #: another process wrote, and KILL is engaged precisely when that process's output is in
+    #: doubt — a human said stop, or the healthcheck found a mode mismatch.
     _SELLABLE_TREND_REASONS: tuple[str, ...] = (ts.REASON_OK, ts.REASON_ZERO)
+
+    #: The trend-gate reason journalled when KILL suspends a trim. Not a ``ts.REASON_*``: the
+    #: trend state is fine, the permission is not.
+    REASON_KILL_ENGAGED = "kill_engaged"
 
     def _trend_weight_for_trim(self, pair: str, ps: PortfolioState) -> ts.TrendWeight | None:
         """The ensemble weight a TRIM may size against, or ``None`` meaning do not trim.
@@ -622,6 +637,15 @@ class EarnBaseStrategy(IStrategy):
         whichever buy-side row happened to be written first.
         """
         tw = self._trend_weight(pair, ps.now)
+        if self.gate.kill_engaged():
+            # Fail closed, before mx.trim_reason is ever consulted — so this closes the
+            # TRIM_BREACH branch too, not just the drift one. The stop-loss, the daily-loss
+            # flatten, a human force-exit and the price-sized TP ladder all keep working: they
+            # are sized by what the bot itself observes, not by a file another process wrote.
+            self._journal_trend_gate(pair, ts.TrendWeight(tw.weight, self.REASON_KILL_ENGAGED),
+                                     ps, where="adjust_trade_position", intent="adjust",
+                                     stake=0.0, side="sell")
+            return None
         if tw.reason in self._SELLABLE_TREND_REASONS:
             return tw
         self._journal_trend_gate(pair, tw, ps, where="adjust_trade_position",
@@ -938,7 +962,13 @@ class EarnBaseStrategy(IStrategy):
             _journal.record_gate_decision(
                 self.gate_cfg.sleeve, pair, "confirm_trade_exit", "exit", d.allowed,
                 exit_reason if d.allowed else f"{d.reason}:{exit_reason}", side=exit_side,
-                severity="allow" if d.allowed else "reject", checks=d.checks, quote=quote,
+                # A refused EXIT is a breach, not a reject. This callback is always a sell, so
+                # a refusal means the book is holding risk it decided to shed — and
+                # ops/healthcheck.py and ops/preflight.py both filter severity='breach', so
+                # grading it 'reject' is what made a vetoed de-risk leave one unread row and
+                # raise nothing. Entries keep the old grading: a refused BUY is the gate doing
+                # its job and must not page.
+                severity="allow" if d.allowed else "breach", checks=d.checks, quote=quote,
                 nav=ps.nav, strategy_version=STRATEGY_VERSION,
                 run_id=self.gate_cfg.run_id or None,
                 action="allow" if d.allowed else "reject",
@@ -1078,7 +1108,7 @@ class EarnBaseStrategy(IStrategy):
 
     def check_entry_timeout(self, pair: str, trade, order, current_time: datetime,
                             **kwargs) -> bool:
-        if self.gate._kill() or self.gate.flatten_pending(_aware(current_time)):
+        if self.gate.kill_engaged() or self.gate.flatten_pending(_aware(current_time)):
             return True  # cancel open entry orders under KILL or an active stop
         return bool(self.mech.get("reprice_on_timeout", False))
 

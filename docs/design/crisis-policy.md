@@ -289,8 +289,16 @@ the entries not made, not the positions not held — the book keeps everything i
 whole reason this tier is cheap and every selling tier is not.
 
 Severity: `block_entries`, scope ALL, bounded expiry. It must never be able to cause an exit, and it
-must never be able to *stop* one (`check_exit` already returns allowed unconditionally, including
-under KILL — that is correct and must stay).
+must never be able to *stop* one.
+
+> **Corrected 2026-09-30.** This paragraph used to cite `RiskGate.check_exit` as the guarantee.
+> That method returned allowed unconditionally and had **zero production callers** — every exit
+> goes through `check_discretionary_exit`, which was a churn/turnover/fee gate that *could*
+> refuse a sell. So the guarantee was asserted against a method nothing called, in two tests as
+> well as here. `check_exit` is now deleted, and the real guarantee is in
+> `check_discretionary_exit`: a risk exit is exempt by name, and **any** reduction of at least
+> `risk.derisk_exempt_pct` of NAV is exempt by size, whatever it is called. See
+> `docs/design/decisions-2026-09-30.md` §3.
 
 ### Tier 2 — TIGHTEN THE SATELLITE SLEEVE. Directionally right, not yet earned.
 

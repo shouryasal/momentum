@@ -96,5 +96,5 @@ class TestTheCommittedConfig:
             raw, ladder=[{"at_profit_pct": 0.004, "sell_fraction": 0.5}]))
         gate = benign_gate(cfg, MemoryStateStore())
         state = ps(btc=3000)
-        assert gate.check_exit("BTC/USDT", "exit_signal", state).allowed
+        assert gate.check_discretionary_exit("BTC/USDT", 3000.0, state, "exit_signal").allowed
         assert gate.check_discretionary_exit("BTC/USDT", 500.0, state, "tp1").allowed

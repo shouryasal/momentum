@@ -87,7 +87,9 @@ allowlist() {
     # start under EARN_AUTOMATED_RUN=1); the entry exists so tooling can ask, and get
     # "nothing".
     console)        echo "" ;;
-    tca|excel)      echo "" ;;
+    # The database snapshot needs no credential of any kind: it copies two local sqlite
+    # files under the ops lock and talks to nothing. See ops/lib/snapshot.py.
+    tca|excel|snapshot) echo "" ;;
     *) echo "envwrap: unknown job '$1'" >&2; exit 2 ;;
   esac
 }

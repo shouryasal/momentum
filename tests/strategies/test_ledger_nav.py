@@ -362,13 +362,35 @@ class TestGatedAdjustments:
         assert strategy._mechanics_adjust(trade, NOW, PRICE, 0.12, 25.0, 9_999.0) is None
 
     def test_tp_ladder_is_blocked_when_the_order_budget_is_gone(self, strategy, monkeypatch):
+        """A rung under ``risk.derisk_exempt_pct`` of NAV is still governed by the budget.
+
+        0.10 of a 5,000 position is 500, i.e. 5% of the 10,000 NAV, so it stays refusable. A
+        rung big enough to matter is exempt by size — the test below.
+        """
+        strategy.mech["take_profit"] = {"ladder": [{"at_profit_pct": 0.10,
+                                                    "sell_fraction": 0.10}]}
+        trade = FakeTrade(amount=0.1, stake_amount=5_000.0)
+        self._ps(strategy, monkeypatch, trades=[trade])
+        for _ in range(strategy.gate_cfg.max_orders_per_day):
+            strategy.gate.record_order_fill(NOW, notional=1.0)
+        assert strategy._mechanics_adjust(trade, NOW, PRICE, 0.12, 25.0, 9_999.0) is None
+
+    def test_a_large_tp_rung_is_exempt_from_the_order_budget(self, strategy, monkeypatch):
+        """A quarter of a half-NAV position is 12.5% of NAV. Banking that is a real de-risk.
+
+        The churn budget is not what stops the ladder churning — each rung is latched in
+        ``tp_rungs`` and fires once — so exempting a large rung costs no protection and buys
+        the property that matters: a reduction big enough to matter cannot be vetoed for being
+        big. Before this, ``abs(stake)`` in the turnover numerator meant exactly the opposite.
+        """
         strategy.mech["take_profit"] = {"ladder": [{"at_profit_pct": 0.10,
                                                     "sell_fraction": 0.25}]}
         trade = FakeTrade(amount=0.1, stake_amount=5_000.0)
         self._ps(strategy, monkeypatch, trades=[trade])
         for _ in range(strategy.gate_cfg.max_orders_per_day):
             strategy.gate.record_order_fill(NOW, notional=1.0)
-        assert strategy._mechanics_adjust(trade, NOW, PRICE, 0.12, 25.0, 9_999.0) is None
+        assert strategy._mechanics_adjust(
+            trade, NOW, PRICE, 0.12, 25.0, 9_999.0) == pytest.approx(-1_250.0)
 
     def test_a_gate_refused_tp_rung_is_not_burned(self, strategy, monkeypatch):
         """Verified HIGH: the rung was persisted as fired BEFORE the gate was consulted.
@@ -377,7 +399,7 @@ class TestGatedAdjustments:
         profit level for the rest of the month.
         """
         strategy.mech["take_profit"] = {"ladder": [{"at_profit_pct": 0.10,
-                                                    "sell_fraction": 0.25}]}
+                                                    "sell_fraction": 0.10}]}
         trade = FakeTrade(amount=0.1, stake_amount=5_000.0)
         self._ps(strategy, monkeypatch, trades=[trade])
         for _ in range(strategy.gate_cfg.max_orders_per_day):
@@ -387,7 +409,7 @@ class TestGatedAdjustments:
         # Next Gulf day the order budget is back and the rung finally fires.
         tomorrow = NOW + timedelta(days=1)
         assert strategy._mechanics_adjust(
-            trade, tomorrow, PRICE, 0.12, 25.0, 9_999.0) == pytest.approx(-1_250.0)
+            trade, tomorrow, PRICE, 0.12, 25.0, 9_999.0) == pytest.approx(-500.0)
         assert trade.get_custom_data("tp_rungs") == [0]
 
     def test_a_tp_rung_sells_a_fraction_of_the_cost_basis(self, strategy, monkeypatch):

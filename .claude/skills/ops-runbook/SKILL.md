@@ -52,6 +52,16 @@ The kill switch never takes the ops lock. It always works.
 * **What it does:** entries refuse immediately in the gate (`kill` is check 2 of 17);
   `ops.lib.kill.enforce` stops entries on each bot (`stopentry`, falling back to `stopbuy`)
   and cancels open entry orders; `ops/healthcheck.py` re-enforces within 5 minutes.
+* **What it does to SELLS — one sentence:** *no new risk, and no order whose size came from
+  somewhere else.* A reduction still fires when both the trigger and the size come from what
+  the bot observes itself, or from you: the **stop-loss, the trailing stop, the daily-loss
+  flatten, a force-exit, and the price-sized take-profit ladder all keep working.** What is
+  **suspended** is every sell sized by a file another process wrote — SleeveA's ensemble trim
+  and SleeveB's proposal-driven trims and `target_zero` closes — because KILL is engaged
+  exactly when that file's provenance is in doubt (you said stop, or the healthcheck found a
+  mode mismatch). Consequence to know: a position can drift above its cap during a KILL window
+  while its own 200-day regime is still up. If you want it reduced, force-exit it; the machine
+  will not decide to. Reversed on 2026-09-30 — `docs/design/decisions-2026-09-30.md` §1.
 * **Runaway trading:** engage, then force-exit both sleeves (console `/mode` flatten, or
   `POST /api/bots/{sleeve}/forceexit`, or `/forceexit a all` on Telegram). Read
   `gate_decisions` before clearing anything.

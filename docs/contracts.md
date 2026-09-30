@@ -55,8 +55,37 @@ var/runtime/freqtrade-<s>.mode.json   freqtrade overlay, 2nd --config   ops.gen_
 var/runtime/runtime-<s>.json          what the strategy reads ($EARN_RUNTIME)
 var/runtime/compose.override.yml      exchange credentials, env references only
 ops/locks/ops.lock               the one operations lock     ops.lib.oplock
+var/snapshots/<stamp>/            consistent DB copy a STUDY reads   ops.lib.snapshot
 logs/                            cron job logs
 ```
+
+### `ops.lib.snapshot` — the only sanctioned way to read the databases for analysis
+
+A study never opens `knowledge/earn.db`, `journal/journal.db` or an `ft_userdata` sqlite file.
+On 2026-09-30 read-copies taken while the bots traded made `healthcheck` log `database is
+locked` three times running and `ingest` write no `ingest_runs` rows for **6h42m** — and since
+a stale freshness stamp is what refuses an entry, nothing could be bought for most of a working
+day. Nothing was corrupted and nothing alerted.
+
+```python
+take(sources, *, root=None, now=None, keep=6, lock_timeout_s=20.0, schema_version=None)
+                          # produce one snapshot under the ops lock; raises SnapshotError or
+                          # OpsLockBusy rather than waiting. All-or-nothing: a failed copy
+                          # leaves no directory behind.
+latest(root=None, *, max_age_h=None)   # newest COMPLETE snapshot, or raise. Never falls back
+                                       # to the live file; refuses one older than max_age_h.
+prune(root=None, *, keep=6)            # keep the N newest; called by take()
+Snapshot.db(name)                      # path to 'knowledge'/'journal' copy, or raise
+snapshot_root(env=None)                # var/snapshots, honouring $EARN_STATE_ROOT
+```
+
+Properties the tests pin (`tests/test_ops/test_snapshot.py`): the copy uses SQLite's backup
+API so it is consistent while a writer commits (a `cp` of a WAL database is a silent rollback
+to an unknown earlier commit); the source is opened `mode=ro`; a busy source or a held ops lock
+makes it **give up**, never wait; a partial snapshot is deleted rather than left looking usable;
+and every snapshot carries `manifest.json` with its sources, sizes, instant and schema version,
+so a result can name the data it came from. Written hourly at :37 by `runs/snapshot_job.py`,
+which exits 0 when it skips — being skippable is the design.
 
 `ops.lib.paths` API (stdlib only, imports nothing from the repo):
 

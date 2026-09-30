@@ -6,8 +6,14 @@ a reader of the design document would assume. Pinning them is the point: each on
 property of the shipped code, and a future change should have to argue with a test rather
 than discover it in production.
 
-* **Under KILL the trim still trims** while every entry is refused (doc §7 item 9). Asserted
-  so the asymmetry cannot be removed, or introduced elsewhere, by accident.
+* **Under KILL the trim is suspended.** This reversed on 2026-09-30
+  (``docs/design/decisions-2026-09-30.md`` §1). The trim's SIZE comes from
+  ``knowledge/state/trend.json``, a file another process wrote, and KILL is engaged exactly
+  when that process's output is in doubt — a human said stop, or the healthcheck found a mode
+  mismatch. What still sells under KILL is everything sized by what the bot observes itself:
+  the stop-loss, the trailing stop, the daily-loss flatten, a human force-exit and the
+  price-sized take-profit ladder. The rule in one sentence: no new risk, and no order whose
+  size came from somewhere else.
 * **A ``daily_loss_response: hold`` stop still sells nothing of its own** — but it does not
   stop the trim either, so the sleeve can place a sell on a day its entries are locked.
 * **The returned stake is never positive.** The trim can never become an entry.
@@ -17,7 +23,10 @@ than discover it in production.
   days" is an empirical result with ~3.5pp of margin, not a structural guarantee.
 * **The trim carries no candle-staleness check**, where every buy does.
 * **At a real, fresh weight of zero the trim closes the whole position**, tagged
-  ``rebalance_trim``, which the monthly fee budget can silence.
+  ``rebalance_trim`` — and as of 2026-09-30 the monthly fee budget can no longer silence it,
+  because ``check_discretionary_exit`` now exempts any reduction of at least
+  ``risk.derisk_exempt_pct`` of NAV whatever it is called. Ordinary band trims are still
+  budgeted, which is asserted too.
 """
 
 from __future__ import annotations
@@ -46,19 +55,57 @@ def _hold_stop(gate) -> None:
 
 
 class TestUnderKill:
-    def test_the_trim_still_fires_under_kill(self, monkeypatch, tmp_path):
+    def test_the_trim_is_suspended_under_kill(self, monkeypatch, tmp_path):
+        """Reversed 2026-09-30. The trim's size comes from a file another process wrote.
+
+        KILL is engaged when a human says stop, or when ``ops/healthcheck.py`` finds a mode
+        mismatch — an integrity failure. At that moment the ensemble weight in
+        ``knowledge/state/trend.json`` is exactly the input whose provenance is in doubt, and a
+        weight of zero on this path means "sell the whole position". So the trim fails closed,
+        like every other member of the fail-closed set, and journals the refusal.
+        """
         s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=2_000.0)
         monkeypatch.setattr(s.gate, "_kill", lambda: True)
+        assert _trim(s, trade) is None
+        assert _plan(s, trade) is None
+
+    def test_a_full_close_at_weight_zero_is_also_suspended_under_kill(self, monkeypatch,
+                                                                     tmp_path):
+        """The biggest sell on this path is the one a bad trend file would produce."""
+        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.0}, position=2_000.0)
+        assert _trim(s, trade) is not None              # fires normally
+        monkeypatch.setattr(s.gate, "_kill", lambda: True)
+        assert _trim(s, trade) is None
+
+    def test_the_trim_resumes_when_the_human_lifts_kill(self, monkeypatch, tmp_path):
+        """Suspended, not latched off. Only a human removes the KILL file, and then it works."""
+        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=2_000.0)
+        engaged = {"v": True}
+        monkeypatch.setattr(s.gate, "_kill", lambda: engaged["v"])
+        assert _trim(s, trade) is None
+        engaged["v"] = False
         plan = _trim(s, trade)
         assert plan is not None and plan.stake < 0
-        assert _plan(s, trade).stake == pytest.approx(plan.stake)
 
     def test_an_entry_is_still_refused_under_kill(self, monkeypatch, tmp_path):
-        """The asymmetry the operator has to know about: buys stop, this sell does not."""
+        """Buys stop at the gate; the sell stops in the sleeve. Both stop, by two mechanisms."""
         s, _trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 1.0}, position=500.0)
         monkeypatch.setattr(s.gate, "_kill", lambda: True)
         d = s.gate.check_entry(BTC, 100.0, s._portfolio_state(NOW))
         assert d.allowed is False and d.checks["kill"] is False
+
+    def test_the_gate_itself_still_permits_an_exit_under_kill(self, monkeypatch, tmp_path):
+        """The gate's own rule is unchanged, and that matters: a stop must still get through.
+
+        What changed is which sells the SLEEVE originates, not what the gate will authorise.
+        Conflating the two would break the stop-loss, which is the one thing that must never
+        be suspended.
+        """
+        s, _trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=2_000.0)
+        monkeypatch.setattr(s.gate, "_kill", lambda: True)
+        state = s._portfolio_state(NOW)
+        for reason in ("stop_loss", "risk_stop_daily", "trailing_stop_loss", "force_exit"):
+            assert s.gate.check_discretionary_exit(BTC, 2_000.0, state, reason).allowed, reason
 
 
 class TestUnderAHoldDailyStop:
@@ -133,18 +180,38 @@ class TestWeightZeroIsAFullClose:
         plan = _trim(s, trade)
         assert plan is not None and plan.stake == pytest.approx(-2_000.0)
 
-    def test_and_it_is_discretionary_so_the_fee_budget_can_silence_it(
-            self, monkeypatch, tmp_path):
-        """The largest de-risk the design produces is the refusable kind.
+    def test_the_fee_budget_can_no_longer_silence_a_full_close(self, monkeypatch, tmp_path):
+        """Fixed 2026-09-30. The largest de-risk used to be the refusable kind.
 
-        ``trim_reason`` is keyed on whether the book is outside a limit, not on how much of
-        the position the trim is selling, so a book comfortably inside every cap whose trend
-        ensemble has gone to zero takes ``rebalance_trim`` — and an exhausted monthly fee
-        budget turns the whole scale-out into ``None``. Book Dr in §4.3 shows limit
-        compliance survives that; the drawdown benefit is what does not.
+        ``trim_reason`` is keyed on whether the book is outside a limit, not on how much of the
+        position the trim is selling — it says so at ``mechanics.py:99`` — so a book comfortably
+        inside every cap whose trend ensemble has gone to zero takes ``rebalance_trim``, which
+        is not a risk-exit NAME. An exhausted monthly fee budget therefore turned the whole
+        scale-out into ``None``, on every candle until the Gulf month turned.
+
+        ``check_discretionary_exit`` now exempts by SIZE as well as by name, so a reduction of
+        at least ``risk.derisk_exempt_pct`` of NAV goes through whatever it is called. The tag
+        is deliberately unchanged: the classification was never the problem.
         """
         s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.0}, position=2_000.0)
         assert _trim(s, trade).tag == mx.TRIM_DRIFT
-        assert mx.is_risk_exit(mx.TRIM_DRIFT) is False
+        assert mx.is_risk_exit(mx.TRIM_DRIFT) is False, "still not a risk-exit NAME"
+        s.gate.store.set("fees_month_2026-09", repr(NAV))
+        plan = _trim(s, trade)
+        assert plan is not None, "an exhausted fee budget silenced a full close again"
+        assert plan.stake == pytest.approx(-2_000.0)
+
+    def test_an_ordinary_band_trim_is_still_silenceable(self, monkeypatch, tmp_path):
+        """The other half: if every trim bypassed the budget, the budget would be decoration.
+
+        The scaled target is ``weight x TARGET x NAV`` = 0.5 x 0.20 x 10,000 = 1,000, so a 1,800
+        position asks to shed 800: over the 500 rebalance band so it trims at all, and under the
+        1,000 exemption so the budget can still refuse it. (A full close at weight zero is 2,000,
+        20% of NAV, and is exempt — the test above.)
+        """
+        s, trade = _sleeve(monkeypatch, tmp_path, weights={"BTC": 0.5}, position=1_800.0)
+        small = _trim(s, trade)
+        assert small is not None, "fixture raised no trim at all, so it tests nothing"
+        assert abs(small.stake) < 0.10 * NAV, abs(small.stake)
         s.gate.store.set("fees_month_2026-09", repr(NAV))
         assert _trim(s, trade) is None

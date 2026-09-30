@@ -332,6 +332,14 @@ class SleeveB(EarnBaseStrategy):
         ``rebalance.min_interval_hours``.
         """
         pair = str(trade.pair)
+        if self.gate.kill_engaged():
+            # Every size on this path comes from a proposal file another process wrote, and
+            # KILL is engaged exactly when that file's provenance is in doubt. Behaviour-neutral
+            # for the add branch, which check_entry already refuses on checks["kill"]; the point
+            # is the SELL branches below. Before the cadence read, so a suspended trim does not
+            # burn the `last_rebalance_<pair>` stamp and then refuse to retry for
+            # rebalance.min_interval_hours once the human lifts KILL.
+            return None
         target_w = self._target_weight(pair)
         if target_w < self.gate_cfg.dust_weight and self._named_zero(pair):
             return None  # a decided zero: full close handled by custom_exit target_zero
@@ -430,6 +438,16 @@ class SleeveB(EarnBaseStrategy):
         return True
 
     def _custom_exit_extra(self, pair: str, trade) -> str | None:
+        """``target_zero`` when the proposal has decided this name to zero, else ``None``.
+
+        Suspended under KILL, and this is the most important of the three seats: ``target_zero``
+        is a RISK exit reason, so it is waved through ``check_discretionary_exit`` with no checks
+        at all — it is the most permissive sell in the system. Its authority is a proposal file
+        another process wrote, which is the one thing KILL says not to trust. A stop, a flatten
+        or a human force-exit still closes this position; the sleeve simply stops deciding to.
+        """
+        if self.gate.kill_engaged():
+            return None
         if self._target_weight(pair) >= self.gate_cfg.dust_weight:
             self.gate.store.set(f"unwind_done_{pair}", "")
             return None

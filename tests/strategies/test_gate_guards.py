@@ -26,7 +26,7 @@ class TestBlackout:
             staleness_provider=lambda now: 0.0, kill_provider=lambda: False)
         d = gate.check_entry("BTC/USDT", ENTRY, ps())
         assert not d.allowed and d.reason == "blackout:macro_blackout"
-        assert gate.check_exit("BTC/USDT", "roi", ps()).allowed
+        assert gate.check_discretionary_exit("BTC/USDT", 3000.0, ps(), "roi").allowed
 
     def test_expired_flag_does_not_block(self, gate_cfg):
         self._write_flags(gate_cfg.flags_path, expires_at="2026-09-22T09:00:00Z")
@@ -122,7 +122,8 @@ class TestKillSwitch:
         gate = benign_gate(gate_cfg, kill_provider=lambda: True)
         d = gate.check_entry("BTC/USDT", ENTRY, ps())
         assert not d.allowed and d.reason == "kill"
-        assert gate.check_exit("BTC/USDT", "risk_stop_daily", ps()).allowed
+        assert gate.check_discretionary_exit("BTC/USDT", 3000.0, ps(),
+                                             "risk_stop_daily").allowed
 
     def test_kill_is_first_in_check_order(self, gate_cfg):
         gate = benign_gate(

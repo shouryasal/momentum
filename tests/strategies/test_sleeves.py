@@ -272,10 +272,26 @@ class TestSleeveBSizing:
         got = s._mechanics_adjust(trade, NOW, PRICE, 0.01, 25.0, 9_999.0)
         assert got == pytest.approx(2_000.0)     # clamped to max_order_notional_pct
 
-    def test_a_trim_blocked_by_turnover_does_nothing(self, monkeypatch, tmp_path):
+    def test_a_small_trim_blocked_by_turnover_does_nothing(self, monkeypatch, tmp_path):
+        """A 1,800 position against a 1,000 target sheds 800 — 8% of NAV, so still budgeted.
+
+        A trim of at least ``risk.derisk_exempt_pct`` of NAV is exempt by size; that is the
+        test below. The old fixture shed 2,000 (20% of NAV) and so tested the exemption while
+        claiming to test the budget.
+        """
+        s = self._sleeve(monkeypatch, tmp_path, {"BTC/USDT": 0.10})
+        trade = FakeTrade(amount=0.036, stake_amount=1_800.0)
+        with_trades(monkeypatch, s, [trade])
+        s.wallets = FakeWallets(start=10_000.0, free=8_200.0)
+        s.gate.record_order_fill(NOW, notional=4_900.0)
+        assert s._mechanics_adjust(trade, NOW, PRICE, 0.01, 25.0, 9_999.0) is None
+
+    def test_a_large_trim_is_not_blocked_by_turnover(self, monkeypatch, tmp_path):
+        """The de-risk that matters goes through even with the day's turnover spent."""
         s = self._sleeve(monkeypatch, tmp_path, {"BTC/USDT": 0.10})
         trade = FakeTrade(amount=0.06, stake_amount=3_000.0)
         with_trades(monkeypatch, s, [trade])
         s.wallets = FakeWallets(start=10_000.0, free=7_000.0)
         s.gate.record_order_fill(NOW, notional=4_900.0)
-        assert s._mechanics_adjust(trade, NOW, PRICE, 0.01, 25.0, 9_999.0) is None
+        got = s._mechanics_adjust(trade, NOW, PRICE, 0.01, 25.0, 9_999.0)
+        assert got == pytest.approx(-2_000.0), "a 20%-of-NAV trim was refused on turnover"

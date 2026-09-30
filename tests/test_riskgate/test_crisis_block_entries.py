@@ -79,8 +79,10 @@ class TestItBlocksEntriesAndOnlyEntries:
         path, _ = crisis_flag
         gate = _gate(gate_cfg, path)
         inside = ps(nav=10000, btc=3000, now=NOW + timedelta(hours=1))
-        assert gate.check_exit("BTC/USDT", "exit_signal", inside).allowed
-        assert gate.check_exit("BTC/USDT", "stop_loss", inside).allowed
+        # Through the method the bot actually calls. `check_exit` used to be asserted here and
+        # returned allowed unconditionally with zero production callers, so it proved nothing.
+        assert gate.check_discretionary_exit("BTC/USDT", 3000.0, inside, "exit_signal").allowed
+        assert gate.check_discretionary_exit("BTC/USDT", 3000.0, inside, "stop_loss").allowed
         assert gate.check_discretionary_exit("BTC/USDT", 900.0, inside, "tp1").allowed
         assert gate.check_discretionary_exit("BTC/USDT", 900.0, inside, "rebalance").allowed
 

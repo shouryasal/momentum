@@ -281,22 +281,28 @@ class SleeveA(EarnBaseStrategy):
         """
         pair = str(trade.pair)
         target_w = self._target_weight(pair)
+        # Every exit below that is NOT a gate refusal drops the refusal latch, so a refusal
+        # that recurs after the condition cleared is journalled again rather than swallowed.
         if target_w <= 0:
             # Regime down, or no trustworthy book target: the MA200 flip owns the close and a
             # data fault owns nothing at all. Either way this is not the trim's business.
             instrument("trim_none", pair, current_time, "target_zero")
+            self._trim_reject_last.pop(pair, None)
             return None
         tw = self._trend_weight_for_trim(pair, ps)
         if tw is None:
             instrument("trim_none", pair, current_time, "trend_gate")
+            self._trim_reject_last.pop(pair, None)
             return None
         position_value = float(getattr(trade, "amount", 0.0) or 0.0) * float(current_rate or 0.0)
         if position_value <= 0:
+            self._trim_reject_last.pop(pair, None)
             return None
         excess = position_value - tw.weight * target_w * ps.nav
         if excess <= 0 or mx.within_band(excess, ps.nav, self.gate_cfg.rebalance_band):
             instrument("trim_none", pair, current_time,
                        "within_band" if excess > 0 else "under_target", max(excess, 0.0))
+            self._trim_reject_last.pop(pair, None)
             return None
 
         trim = min(excess, position_value)      # a trim can never exceed the position
@@ -324,9 +330,21 @@ class SleeveA(EarnBaseStrategy):
             # ``check:qualifier``, the codebase's shape (``weight_cap:BTC/USDT``): the failing
             # check leads so ``_journal_adjust`` grades the severity off it, and the branch
             # rides behind so the Gate page still says WHICH trim was refused.
-            self._journal_adjust(pair, trade, False, f"{decision.reason}:{reason}",
-                                 decision.checks, -trim, ps, action="reject", is_entry=False)
+            #
+            # ONE row per state change, not one per loop. This is a direct statement rather
+            # than a `plan.then` effect, so it is gated neither by winning `actions.choose()`
+            # nor by `plan.commit()`: at `process_throttle_secs: 5` a standing refusal wrote
+            # **17,280 rows per pair per day**, some of them graded `breach`, which buries the
+            # Gate page and adds write pressure to a database whose locking has already cost
+            # this system hours of blocked entries. Same latch shape as `_journal_trend_gate`.
+            key = f"{decision.reason}:{reason}"
+            if self._trim_reject_last.get(pair) != key:
+                self._trim_reject_last[pair] = key
+                self._journal_adjust(pair, trade, False, key,
+                                     decision.checks, -trim, ps, action="reject",
+                                     is_entry=False)
             return None
+        self._trim_reject_last.pop(pair, None)
         if not full:
             # The gate, the band and the exchange filters all judge the MARKET value.
             trim = self._clamp_to_exchange(pair, trim)

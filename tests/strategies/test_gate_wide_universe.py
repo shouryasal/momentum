@@ -146,7 +146,8 @@ class TestExitOnly:
 
     def test_an_exit_is_still_always_allowed(self, tmp_path):
         gate = benign_gate(wide_cfg(tmp_path))
-        assert gate.check_exit("LEAV/USDT", "target_zero", wide_ps()).allowed
+        assert gate.check_discretionary_exit("LEAV/USDT", 3000.0, wide_ps(),
+                                             "target_zero").allowed
 
 
 # ------------------------------------------------------------------- concurrency

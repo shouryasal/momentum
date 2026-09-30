@@ -208,6 +208,12 @@ risk:                              # the gate reads these (via riskgate.json); o
   max_order_notional_pct: 0.20     # single order <= 20% of ledger NAV
   max_orders_per_day: 16           # discretionary orders per sleeve per Gulf day
   max_turnover_pct_per_day: 0.50   # traded notional / NAV per Gulf day
+  # A reduction this large bypasses the churn/turnover/fee budgets whatever it is called.
+  # "exit_signal" matched no risk-exit NAME, so SleeveA's only signal-driven sell -- the
+  # 200-day MA flip, a 100% close -- was refusable by the monthly fee counter, and once
+  # tripped it stayed refused on every candle until the month turned, leaving only the
+  # per-position stop. Above the 0.05 rebalance band so ordinary trims stay budgeted.
+  derisk_exempt_pct: 0.10          # de-risk >= 10% of NAV is never churn-blocked
   # --- wide-universe controls (docs/design/wide-universe.md §2.3-2.4) -------------------
   # A twenty-alt book is worth ~2 independent bets (measured avg pairwise corr 0.37-0.49,
   # N_eff saturating at 1.95 by N=20), and on the 20 worst BTC days since 2019 between
@@ -523,6 +529,11 @@ ops:
     nav_tick:      { cron: "*/15 * * * *",  deadline_s: 120,  artifact: none }
     reconcile:     { cron: "*/15 * * * *",  deadline_s: 120,  artifact: none }
     tca_job:       { cron: "5 * * * *",     deadline_s: 1500, artifact: tca_rows }
+    # The snapshot every study reads instead of the live databases. :37 is clear of the
+    # */5, */15 and :05 jobs on purpose. It takes the ops lock and SKIPS if anything else
+    # holds it or a source is busy — a reader that waited is what blocked entries for
+    # 6h42m on 2026-09-30. See ops/lib/snapshot.py.
+    snapshot:      { cron: "37 * * * *",    deadline_s: 300,  artifact: none }
     nav_job:       { cron: "10 0 * * *",    deadline_s: 300,  artifact: nav_rows }
     healthcheck:   { cron: "*/5 * * * *",   deadline_s: 240,  artifact: none }
     research_run:  { cron: derived,         deadline_s: 2700, artifact: proposals_file }

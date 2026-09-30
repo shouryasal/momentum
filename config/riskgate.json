@@ -61,6 +61,7 @@
     "daily_loss_response": "hold",
     "daily_loss_stop": 0.03,
     "daily_stop_lock_hours": 24,
+    "derisk_exempt_pct": 0.1,
     "kill_file": "ops/killdir/KILL",
     "market_entries_allowed": false,
     "max_avg_pairwise_corr": 0.7,
@@ -114,7 +115,7 @@
   "sleeve_b": {
     "drift_to_a_after_h": 48
   },
-  "source_sha256": "e87374d490d7d4090398026e02228d5c09ef4d5b00aa9c240aeeb906aa36fa24",
+  "source_sha256": "102492160b134fb63f4e9dd83245e932ec10f6806afb35c45bdfe1a8acd9b426",
   "trading": {
     "plan_bounds": {
       "allow_model_urgency": false,

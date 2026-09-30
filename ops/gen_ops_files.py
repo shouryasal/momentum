@@ -147,6 +147,11 @@ JOBS: dict[str, JobSpec] = {
     "reconcile": JobSpec("reconcile", "cron-reconcile", "reconcile.log",
                          module="runs.reconcile_job"),
     "tca_job": JobSpec("tca", "cron-tca", "tca.log", module="runs.tca_job"),
+    # The databases snapshot every study reads instead of the live files. No credential of
+    # any kind (see ops/envwrap.sh) and it gives up rather than waiting, because a reader
+    # that would not give up is what cost 6h42m of blocked entries on 2026-09-30.
+    "snapshot": JobSpec("snapshot", "cron-snapshot", "snapshot.log",
+                        module="runs.snapshot_job"),
     "nav_job": JobSpec("nav", "cron-nav", "nav.log", module="runs.nav_job"),
     "healthcheck": JobSpec("healthcheck", "cron-health", "health.log", module="ops.healthcheck"),
     "research_run": JobSpec("research", "cron-research", "research.log",
@@ -179,8 +184,8 @@ JOBS: dict[str, JobSpec] = {
 #: Deterministic order of the rendered lines (fast cadence first, then the day jobs).
 JOB_ORDER: tuple[str, ...] = (
     "ingest", "scanner", "watch", "nav_tick", "reconcile", "healthcheck", "tca_job",
-    "nav_job", "research_run", "daily_review", "discovery_light", "discovery_deep",
-    "review_run", "backtest_data", "backup", "maintenance",
+    "snapshot", "nav_job", "research_run", "daily_review", "discovery_light",
+    "discovery_deep", "review_run", "backtest_data", "backup", "maintenance",
 )
 
 #: Jobs rendered from their own config section rather than from ``ops.schedules``.

@@ -84,7 +84,10 @@ class TestTheCommittedConfigHolds:
         gate = benign_gate(gate_cfg, MemoryStateStore())
         _fire(gate)
         inside = ps(nav=9690, btc=3000, now=NOW + timedelta(hours=3))
-        assert gate.check_exit("BTC/USDT", "risk_stop_daily", inside).allowed
+        # check_discretionary_exit is what confirm_trade_exit actually calls; `check_exit`
+        # returned allowed unconditionally and had no production callers, so it proved nothing.
+        assert gate.check_discretionary_exit("BTC/USDT", 3000.0, inside,
+                                             "risk_stop_daily").allowed
         assert gate.check_discretionary_exit("BTC/USDT", 1500.0, inside,
                                              "risk_stop_daily").allowed
 

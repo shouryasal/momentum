@@ -61,7 +61,8 @@ class TestReconcile:
 
     def test_exits_are_never_blocked_by_reconcile(self, gate_cfg):
         gate = self._gate(gate_cfg, RECONCILE_FLAG)
-        assert gate.check_exit("BTC/USDT", "risk_stop_daily", ps()).allowed
+        assert gate.check_discretionary_exit("BTC/USDT", 3000.0, ps(),
+                                             "risk_stop_daily").allowed
 
 
 class TestOrderNotional:

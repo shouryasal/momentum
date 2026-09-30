@@ -1115,6 +1115,16 @@ class Risk(_Model):
         0.01, desc="Fee budget per month as a fraction of NAV.", group="risk.throughput",
         unit="fraction", protected=True, gt=0,
     )
+    derisk_exempt_pct: float = F(
+        0.10,
+        desc="A reduction of at least this share of NAV bypasses the churn, turnover and fee "
+             "budgets, whatever the exit is called. Exempting by SIZE rather than by "
+             "reason-name is the point: 'exit_signal' matched no risk-exit name, so SleeveA's "
+             "only signal-driven sell (the 200-day MA flip, a 100% close) was refusable by a "
+             "monthly fee counter, on every candle until the month turned. Keep it above the "
+             "rebalance band (0.05) so ordinary trims stay budgeted.",
+        group="risk.throughput", unit="fraction", protected=True, gt=0, lt=1,
+    )
     market_entries_allowed: bool = F(
         False, desc="Allow market ENTRY orders. Off by default; exits may always be market.",
         group="risk.mechanics", protected=True,
@@ -2899,6 +2909,42 @@ def _validate_min_edge(cfg: EarnConfig, sleeve: str) -> None:
         )
 
 
+def _validate_satellite_sizing(cfg: EarnConfig) -> None:
+    """Refuse a satellite sleeve that asks for a position the gate can never open.
+
+    ``max_satellite_gross / max_satellite_positions`` is what one seat may hold; anything below
+    ``min_position_pct_nav`` is a seat the gate refuses on ``min_position`` every single time —
+    a sleeve that computes a position and then throws it away.
+
+    **What this does not catch, stated plainly.** The volatility target scales the per-seat
+    figure DOWN before the floor is applied, and the scalar is not knowable at load time. The
+    shipped 0.05 / 2 = 0.025 clears the 0.02 floor unscaled and so passes here, while the
+    measured median scalar took it to 0.0163 and the gate deleted the position on 292 of 430
+    asset-days (67.9%) — see ``docs/design/decisions-2026-09-30.md`` §2. So this check catches
+    the *unconditional* impossibility (three seats at 5% gross gives 0.0167) and nothing
+    subtler. It is a guard against the next version of this mistake, not a detector for the
+    one that is live.
+
+    The ``<= 0`` returns are required rather than defensive: both keys are declared ``ge=0``, so
+    switching satellites off entirely is a legal config and a bare divide would raise
+    ``ZeroDivisionError`` at load.
+    """
+    r = cfg.risk
+    seats, gross, floor = r.max_satellite_positions, r.max_satellite_gross, r.min_position_pct_nav
+    if seats <= 0 or gross <= 0 or floor <= 0:
+        return                      # satellites off, or no floor: nothing to contradict
+    per_seat = gross / seats
+    if per_seat + 1e-12 < floor:
+        raise ConfigError(
+            f"risk.max_satellite_gross ({gross:.4%}) divided by risk.max_satellite_positions "
+            f"({seats}) gives {per_seat:.4%} per seat, which is below "
+            f"risk.min_position_pct_nav ({floor:.4%}): the gate would refuse every satellite "
+            f"entry on its min_position check, so the sleeve would size a position it can "
+            f"never open. Raise max_satellite_gross, cut max_satellite_positions, or lower "
+            f"min_position_pct_nav."
+        )
+
+
 def _validate_deadlines(cfg: EarnConfig) -> None:
     r = cfg.research
     total = sum(r.stage_deadlines_s.values())
@@ -3095,6 +3141,7 @@ def _cross_validate(cfg: EarnConfig, root: Path | None = None) -> None:
     _validate_slots(cfg)
     _validate_deadlines(cfg)
     _validate_seeds(cfg)
+    _validate_satellite_sizing(cfg)
     _validate_trading(cfg)
     _validate_signals(cfg)
     _validate_news(cfg)

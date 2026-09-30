@@ -157,10 +157,44 @@ class TestSatelliteConcentration:
     def test_the_limits_moved_to_the_floor(self, cfg):
         assert cfg.risk.max_satellite_positions == 2
         assert cfg.risk.max_satellite_gross == 0.05
-        # Two positions at the min_position floor still fit the sleeve.
+        # CEILING: two floor-sized positions fit inside the sleeve. This is what was asserted
+        # here, and it is one inequality away from the question that mattered.
         assert 2 * cfg.risk.min_position_pct_nav <= cfg.risk.max_satellite_gross
+        # FLOOR: every seat the sleeve offers can hold a position the gate will open. Same two
+        # numbers, other direction — and it is the direction the 2026-09-30 defect was in.
+        # Read both lines together: the first says the seats fit, the second says they exist.
+        assert (cfg.risk.max_satellite_positions * cfg.risk.min_position_pct_nav
+                <= cfg.risk.max_satellite_gross)
         # ... and one satellite may still take its full tier cap.
         assert cfg.risk.tier_caps.satellite <= cfg.risk.max_satellite_gross
+
+    def test_a_seat_that_can_never_open_is_refused_at_load_time(self, tmp_path):
+        """Three seats at 5% gross is 1.67% each, under the 2% floor: refuse the file."""
+        raw = _raw()
+        raw["risk"]["max_satellite_positions"] = 3
+        with pytest.raises(ConfigError, match="min_position"):
+            load_config(_write(tmp_path, raw))
+
+    def test_the_shipped_seats_clear_the_floor_unscaled(self, cfg):
+        """States what the load-time check does NOT cover, so nobody reads more into it.
+
+        0.05 / 2 = 0.025 against a 0.02 floor, so the shipped config passes. The volatility
+        target then scales the per-seat figure down before the floor is applied — measured
+        median 1.63% — and the gate deleted the position on 292 of 430 asset-days. A load-time
+        check cannot see that, because the scalar is not knowable at load time.
+        """
+        per_seat = cfg.risk.max_satellite_gross / cfg.risk.max_satellite_positions
+        assert per_seat == pytest.approx(0.025)
+        assert per_seat > cfg.risk.min_position_pct_nav
+        assert cfg.risk.min_position_pct_nav == pytest.approx(0.02)
+
+    def test_satellites_switched_off_is_not_a_division_by_zero(self, tmp_path):
+        """Both keys are declared ge=0, so switching the sleeve off is a legal config."""
+        raw = _raw()
+        raw["risk"]["max_satellite_positions"] = 0
+        raw["risk"]["max_satellite_gross"] = 0.0
+        loaded = load_config(_write(tmp_path, raw))
+        assert loaded.risk.max_satellite_positions == 0
 
     def test_the_exclusion_filter_carries_the_audited_numbers(self, cfg):
         e = cfg.universe.satellite_eligibility
