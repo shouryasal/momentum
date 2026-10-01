@@ -451,3 +451,90 @@ def test_auto_revert_can_be_switched_off(env):
                      session_runner=session_ok(root, jdb),
                      alert=lambda t, s="info": alerts.append((s, t)))
     assert dr.auto_revert_candidates() == []
+
+
+# ------------------------------------------------- the report half vs the grading half
+
+
+def _session_report_only(root, day=DAY):
+    """Writes the report and NO grades — a session that ran out of turns before the skill.
+
+    Nothing in ``runs/`` writes ``decision_grades``; the ``post-mortem`` skill does, from
+    inside the session. So this is exactly the shape of the three real runs on 2026-10-01
+    that died at 41 and 57 turns against a cap of 40.
+    """
+    def runner(prompt, *, model, **kwargs):
+        (root / "reports" / "daily").mkdir(parents=True, exist_ok=True)
+        (root / "reports" / "daily" / f"{day}.md").write_text(
+            f"# Daily review {day}\n\nnarrative\n")
+        return StageResult(True, "done", StageMeta(subtype="success", cost_usd=1.2,
+                                                  served_model=model, applied_effort="max",
+                                                  auth_source="none"))
+    return runner
+
+
+def test_a_report_without_grades_does_not_pay_for_a_fallback_rerun(env):
+    """The narrative is the expensive half and it is already written.
+
+    Rerunning the whole session on the dearer fallback buys one more attempt at the half that
+    just failed on turns, and the ungraded ids come back on tomorrow's ``ungraded_run_ids()``
+    regardless. Measured 2026-10-01: three such runs cost $10.71 in reruns.
+    """
+    cfg, root, jdb, kdb, alerts = env
+    _proposal(jdb, RID1, "2026-09-21T04:30:00Z")
+    calls = []
+
+    def runner(prompt, *, model, **kwargs):
+        calls.append(model)
+        return _session_report_only(root)(prompt, model=model, **kwargs)
+
+    dr = _dr(cfg, root, jdb, kdb, alerts, runner)
+    assert dr.main_flow() == 0
+    assert calls == [cfg.daily_review.model], f"it reran: {calls}"
+
+
+def test_a_report_without_grades_is_not_journalled_as_failed(env):
+    """It produced the report. Recording that as a failure is what hid a turn-cap defect."""
+    cfg, root, jdb, kdb, alerts = env
+    _proposal(jdb, RID1, "2026-09-21T04:30:00Z")
+    dr = _dr(cfg, root, jdb, kdb, alerts, _session_report_only(root))
+    assert dr.main_flow() == 0
+    row = jdb.execute("SELECT status, error FROM runs WHERE stage='daily_review'").fetchone()
+    assert row["status"] == "success"
+    assert "ungraded:1/1" in (row["error"] or ""), row["error"]
+
+
+def test_the_ungraded_gap_is_alerted_not_swallowed(env):
+    """'success' must not mean silence: the grading half is the point of the nightly loop."""
+    cfg, root, jdb, kdb, alerts = env
+    _proposal(jdb, RID1, "2026-09-21T04:30:00Z")
+    dr = _dr(cfg, root, jdb, kdb, alerts, _session_report_only(root))
+    dr.main_flow()
+    assert any("ungraded" in t for _, t in alerts), alerts
+
+
+def test_no_report_at_all_still_reruns_on_the_fallback(env):
+    """The other half of the split: nothing produced IS worth paying the fallback for."""
+    cfg, root, jdb, kdb, alerts = env
+    _proposal(jdb, RID1, "2026-09-21T04:30:00Z")
+    calls = []
+
+    def runner(prompt, *, model, **kwargs):
+        calls.append(model)
+        if model == cfg.daily_review.model:
+            return StageResult(True, "done", StageMeta(subtype="success"))  # ok, but no file
+        return session_ok(root, jdb)(prompt, model=model, **kwargs)
+
+    dr = _dr(cfg, root, jdb, kdb, alerts, runner)
+    assert dr.main_flow() == 0
+    assert calls == [cfg.daily_review.model, cfg.daily_review.fallback_model]
+
+
+def test_a_fully_graded_session_carries_no_ungraded_marker(env):
+    cfg, root, jdb, kdb, alerts = env
+    _proposal(jdb, RID1, "2026-09-21T04:30:00Z")
+    dr = _dr(cfg, root, jdb, kdb, alerts, session_ok(root, jdb))
+    assert dr.main_flow() == 0
+    row = jdb.execute("SELECT status, error FROM runs WHERE stage='daily_review'").fetchone()
+    assert row["status"] == "success"
+    assert "ungraded" not in (row["error"] or "")

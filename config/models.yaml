@@ -90,6 +90,10 @@ models:                        # alias -> {provider, exact id, capability tier}
   fable:       { provider: claude, id: claude-fable-5-1,          tier: 5 }
   opus:        { provider: claude, id: claude-opus-5,             tier: 4 }
   sonnet:      { provider: claude, id: claude-sonnet-5,           tier: 3 }
+  # Dated on purpose. The 2026-10-01 audit suggested unpinning to `claude-haiku-4-5` as
+  # tidiness; the dated id is the one this account's tooling documents and the one that
+  # is demonstrably served (135 calls, latest 2026-10-01T18:35:22Z), and an alias that
+  # does not resolve would break every haiku call for zero measured benefit. Left as is.
   haiku:       { provider: claude, id: claude-haiku-4-5-20251001, tier: 2 }
   # granite4.2:3b, not llama3.1:8b (2026-09-29, docs/design/local-tier-2026-09-29.md). One
   # local model serves scan, classify and holdings_watch because the ~6 GB GPU holds one:
@@ -406,7 +410,10 @@ tasks:
     retry: 0
     effort: max
     max_usd_per_run: 8.00
-    max_turns: 40
+    # 80, not 40 — must stay in step with config/earn.yaml daily_review.max_turns. Measured
+    # 2026-10-01: 2 of 3 scheduled runs died at 41 and 57 turns against a cap of 40, after
+    # writing a real report and grading pack. See the note at max_turns under `scan`.
+    max_turns: 80
     monthly_budget_usd: 40
     deadline_s: 3000
     on_all_failed: abstain
@@ -423,7 +430,15 @@ switching:
 
 budget:                       # TELEMETRY under the Claude Max subscription —
   mode: telemetry             # degradation keys on rate-limit signals, not USD;
-  monthly_total_usd: 150      # per-run max_usd stays as runaway-loop safety only.
+  # 300, not 150. The per-task `monthly_budget_usd` rows sum to 292, so a 150 total was a
+  # ceiling the parts could exceed by construction — it could never be enforced and it made
+  # measured spend look like an overrun when it was inside every per-task cap. Measured
+  # 2026-10-01: $59.5616 over the journal's 8.21-day span = $217.70 per 30 days, inside the
+  # sum of the parts and outside the old total. Dollars here are NOTIONAL under the Max
+  # subscription (0 of 436 journalled calls were metered), so this changes no behaviour in
+  # `telemetry` mode; what it buys is that `mode: hard` would now mean something instead of
+  # blocking `scan` on day one at 150% of a $3 cap.
+  monthly_total_usd: 300      # per-run max_usd stays as runaway-loop safety only.
   throttle_at_pct: 80         # 16:00 brief drops first; decide runs are NEVER skipped
 
 shadow:                       # 30-day shadow mode for promoting a new decision model

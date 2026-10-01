@@ -94,7 +94,7 @@ def test_a_non_human_actor_is_refused_and_audited(env):
             "SELECT actor, result FROM audit_log WHERE action='risk.resume_monthly'"
         ).fetchall()
     assert rows and tuple(rows[-1]) == ("system:review_run", "denied")
-    assert risk_resume.gate_for(cfg, "a", root=root).monthly_locked()
+    assert risk_resume.gate_for(cfg, "a", root=root).monthly_locked(NOW)
 
 
 def test_an_automated_run_can_never_resume(env, monkeypatch):
@@ -149,14 +149,18 @@ def test_lock_deletion_failures_are_reported_not_raised(env):
 
 
 def test_status_is_read_only_and_reports_the_lock(env):
+    """PIN THE CLOCK. `status()` without `now` reads the real one, and the lock this test
+    stamps belongs to Gulf month 2026-09 — so from 2026-10-01 the assertion below started
+    failing on a correct answer. `status()`'s own docstring says a lock whose month has ended
+    reads as clear; the code was right and the test was asking the wrong question."""
     cfg, root, _ = env
     _trip(cfg, root)
-    status = risk_resume.status(cfg, "a", root=root)
+    status = risk_resume.status(cfg, "a", root=root, now=NOW)
     assert status["monthly_locked"] is True
     assert status["monthly_loss_stop"] == cfg.risk.monthly_loss_stop
     assert status["confirm_phrase"] == "RESUME SLEEVE A"
-    assert risk_resume.gate_for(cfg, "a", root=root).monthly_locked()   # unchanged
+    assert risk_resume.gate_for(cfg, "a", root=root).monthly_locked(NOW)   # unchanged
     risk_resume.resume(cfg, "a", ACTOR, nav=8_900.0, root=root,
                        now=NOW + timedelta(hours=13))
-    after = risk_resume.status(cfg, "a", root=root)
+    after = risk_resume.status(cfg, "a", root=root, now=NOW + timedelta(hours=13))
     assert after["monthly_locked"] is False and after["monthly_resumed_utc"]

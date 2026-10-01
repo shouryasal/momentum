@@ -28,11 +28,40 @@ def jdb(cfg, tmp_path):
 
 def test_no_flags_opus_with_flags_fable():
     assert router.resolve("decide", router.HardCaseFlags()).model == "claude-opus-5"
-    for flag in ("regime_change_48h", "module_disagreement", "near_stop",
-                 "regwatch_active", "two_abstains", "tca_above_threshold"):
+    for flag in sorted(router.HardCaseFlags.ESCALATING):
         c = router.resolve("decide", router.HardCaseFlags(**{flag: True}))
         assert c.model == "claude-fable-5-1", flag
         assert c.escalated and c.escalation_reasons == [flag]
+
+
+def test_two_abstains_is_observed_but_never_pays_for_the_top_tier():
+    """Changed 2026-10-01, deliberately.
+
+    `abstain: true` is this system's CORRECT default when inputs are stale or conflicting, so
+    escalating because the last two proposals abstained pays more money for right behaviour —
+    and it is self-reinforcing, because a third abstention re-arms it. Measured over the 12
+    `decide` runs to 2026-10-01 it was the SOLE cause of escalation on 5 of them: $5.99 of the
+    $7.73 that bought "hold, confidence 0.50" at $1.5781 a run against $0.4348 unescalated.
+
+    It stays a FLAG — the console and the journal still show it — it simply does not spend.
+    """
+    flags = router.HardCaseFlags(two_abstains=True)
+    assert flags.any() is True, "still visible to telemetry"
+    assert "two_abstains" in flags.reasons()
+    assert flags.escalating() is False, "it must not force the escalation model"
+    assert flags.escalating_reasons() == []
+    c = router.resolve("decide", flags)
+    assert c.model == "claude-opus-5"
+    assert not c.escalated
+
+
+def test_a_real_hard_case_still_escalates_even_alongside_two_abstains():
+    """Dropping one trigger must not mask the others."""
+    flags = router.HardCaseFlags(two_abstains=True, near_stop=True)
+    assert flags.escalating() is True
+    c = router.resolve("decide", flags)
+    assert c.model == "claude-fable-5-1"
+    assert c.escalation_reasons == ["near_stop"], c.escalation_reasons
 
 
 def test_other_tasks_never_escalate():

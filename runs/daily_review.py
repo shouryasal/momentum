@@ -173,13 +173,25 @@ class DailyReview:
                                           DAILY_POSTFLIGHT_RESERVE_S))
 
     def _session_outputs_ok(self, run_ids: list[str]) -> bool:
-        if not self.report_path().exists():
-            return False
+        """Did the session produce BOTH halves — the report and at least one grade?"""
+        return self._report_ok() and self._grades_ok(run_ids)
+
+    def _report_ok(self) -> bool:
+        """The narrative half. This is the half a rerun cannot improve on."""
+        return self.report_path().exists()
+
+    def _grades_ok(self, run_ids: list[str]) -> bool:
+        """The grading half, written by the ``post-mortem`` skill, not by this module.
+
+        Nothing in ``runs/`` writes ``decision_grades`` —
+        ``.claude/skills/post-mortem/scripts/write_grades.py`` does, from inside the session.
+        So a session that runs out of turns before it reaches the skill leaves a real report
+        and no grades, and that used to read as an outright failure.
+        """
         if not run_ids:
             return True
-        graded = sum(1 for rid in run_ids if self.jdb.execute(
-            "SELECT 1 FROM decision_grades WHERE run_id=?", (rid,)).fetchone())
-        return graded > 0
+        return any(self.jdb.execute("SELECT 1 FROM decision_grades WHERE run_id=?",
+                                    (rid,)).fetchone() for rid in run_ids)
 
     # ------------------------------------------------------------- postflight
 
@@ -445,8 +457,15 @@ class DailyReview:
         model = self.cfg.daily_review.model
         # the session runs even on a quiet day: the one-page narrative is wanted
         res = self.run_session(model, run_ids)
-        if not (res.ok and self._session_outputs_ok(run_ids)):
-            self.alert(f"daily review session on {model} failed"
+        # Two halves, two different remedies. A missing REPORT means the session produced
+        # nothing and the fallback model is worth paying for. Missing GRADES with a report in
+        # hand is a different animal: the narrative — the expensive part — is already written,
+        # the ungraded run_ids come back on tomorrow's `ungraded_run_ids()` anyway, and
+        # rerunning the whole session on the dearer fallback buys one more attempt at the half
+        # that already failed on turns. Measured 2026-10-01: three runs were journaled `failed`
+        # and rerun for $10.71 while each had written a real report and a grading pack.
+        if not res.ok or not self._report_ok():
+            self.alert(f"daily review session on {model} produced no report"
                        f" ({res.meta.error}); rerunning on"
                        f" {self.cfg.daily_review.fallback_model} — its changes"
                        f" will be HELD", "warn")
@@ -454,8 +473,19 @@ class DailyReview:
                 worktree.reset(self.wt)   # the WORKTREE, never the live checkout
             model = self.cfg.daily_review.fallback_model
             res = self.run_session(model, run_ids)
-        status = "success" if (res.ok and self._session_outputs_ok(run_ids)) \
-            else "failed"
+        ungraded = [rid for rid in run_ids
+                    if not self.jdb.execute("SELECT 1 FROM decision_grades WHERE run_id=?",
+                                            (rid,)).fetchone()]
+        if res.ok and self._report_ok() and ungraded:
+            # `runs.status` has no 'partial' (journal.sql:40), so the gap rides in `error`
+            # where the console and the healthcheck can both see it, and it is alerted.
+            self.alert(f"daily review {self.day}: report written but"
+                       f" {len(ungraded)} of {len(run_ids)} run_id(s) ungraded"
+                       f" — tomorrow's run retries them", "warn")
+        status = "success" if (res.ok and self._report_ok()) else "failed"
+        if status == "success" and ungraded:
+            res.meta.error = (f"ungraded:{len(ungraded)}/{len(run_ids)}"
+                              + (f" ({res.meta.error})" if res.meta.error else ""))
         self.postflight(model, res.meta, run_ids, status)
         return 0 if status == "success" else 1
 

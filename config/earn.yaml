@@ -567,7 +567,11 @@ maintenance:                       # Monday 02:00 Gulf self-maintenance (runs/ma
 daily_review:                      # nightly learning loop (runs/daily_review.py, 21:30 Gulf)
   model: claude-fable-5-1          # grades the PREVIOUS Gulf day at max effort
   fallback_model: claude-opus-5    # explicit rerun; fallback-authored changes are HELD
-  max_turns: 40
+  # 80, not 40. Measured 2026-10-01: 2 of 3 scheduled runs died on "Reached maximum number of
+  # turns (40)" at 41 and 57 turns, having already written a real report and a grading pack —
+  # so the cap spent the money and discarded the result, which is exactly what
+  # config/models.yaml:198-203 says a turn cap must not do. Must move WITH models.yaml:409.
+  max_turns: 80
   max_budget_usd: 8.0              # runaway-loop safety (telemetry mode)
   wrong_process_below: 70          # process grade below this = wrong decision -> trace report
 

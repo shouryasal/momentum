@@ -238,20 +238,33 @@ def test_idempotent_when_file_exists(rr):
     assert runner.calls == []
 
 
-def test_escalation_journaled_with_reasons(rr):
+def test_escalation_journaled_with_reasons(rr, monkeypatch):
     r, runner, _, jdb, root, cfg = rr
-    # plant two abstains -> hard case -> fable
+    # An ESCALATING hard case. `two_abstains` was used here until 2026-10-01 and no longer
+    # escalates on purpose — see tests/test_research/test_router.py for why.
+    from runs import router
+    monkeypatch.setattr(router, "compute_hardcase_flags",
+                        lambda *a, **kw: router.HardCaseFlags(near_stop=True))
+    runner.script["decide:claude-fable-5-1"] = [ok(GOOD)]
+    r.main_flow("0830")
+    row = jdb.execute("SELECT * FROM runs WHERE stage='decide'").fetchone()
+    assert row["escalated"] == 1
+    assert "near_stop" in row["escalation_reasons"]
+    assert row["requested_model"] == "claude-fable-5-1"
+
+
+def test_two_abstains_no_longer_buys_the_escalation_model(rr):
+    """The money finding, as a test: an abstain streak must not force the dearer model."""
+    r, runner, _, jdb, root, cfg = rr
     for i in (1, 2):
         jdb.execute("INSERT INTO proposals(run_id, shadow, ts_utc, valid, abstain)"
                     " VALUES (?,0,?,1,1)",
                     (f"2026-09-1{i}T08:30+04:00", f"2026-09-1{i}T04:30:00Z"))
     jdb.commit()
-    runner.script["decide:claude-fable-5-1"] = [ok(GOOD)]
     r.main_flow("0830")
     row = jdb.execute("SELECT * FROM runs WHERE stage='decide'").fetchone()
-    assert row["escalated"] == 1
-    assert "two_abstains" in row["escalation_reasons"]
-    assert row["requested_model"] == "claude-fable-5-1"
+    assert row["escalated"] == 0, "an abstain streak escalated again"
+    assert row["requested_model"] == "claude-opus-5"
 
 
 def test_shadow_stage_writes_shadow_row_not_loader_visible(rr, monkeypatch):

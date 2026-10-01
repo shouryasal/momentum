@@ -222,8 +222,8 @@ def _escalation_reasons(
         reasons += [f"trigger:{r}" for r in force_escalation]
     if hard_flags is not None and "hard_case" in allowed:
         try:
-            if hard_flags.any():
-                reasons += list(hard_flags.reasons())
+            if hard_flags.escalating():
+                reasons += list(hard_flags.escalating_reasons())
         except AttributeError:  # pragma: no cover - a caller passing something else
             pass
     if gray_zone and "gray_zone" in allowed:

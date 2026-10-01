@@ -34,6 +34,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 
 import yaml
 
@@ -105,11 +106,35 @@ class HardCaseFlags:
     two_abstains: bool = False
     tca_above_threshold: bool = False
 
+    #: The flags that may force `decide` onto the top-tier escalation model. Everything else
+    #: is observed and journaled but does not spend money.
+    #:
+    #: ``two_abstains`` is deliberately NOT here. It escalates because the last two proposals
+    #: abstained — but ``abstain: true`` is this system's *correct* default when inputs are
+    #: stale or conflicting (CLAUDE.md), so the flag punishes right behaviour by paying more
+    #: for it, and it is self-reinforcing: a third abstention re-arms it. Measured over the 12
+    #: `decide` runs in the journal to 2026-10-01, it was the SOLE cause of escalation on 5 of
+    #: them, $5.99 of the $7.73 that bought "hold, confidence 0.50" at $1.5781 a run against
+    #: $0.4348 unescalated.
+    ESCALATING: ClassVar[frozenset[str]] = frozenset({
+        "regime_change_48h", "module_disagreement", "near_stop", "regwatch_active",
+        "tca_above_threshold",
+    })
+
     def any(self) -> bool:
+        """Is ANY hard-case flag set? Telemetry and the console read this."""
         return any(vars(self).values())
 
     def reasons(self) -> list[str]:
+        """Every flag that is set, for the journal and the console."""
         return [k for k, v in vars(self).items() if v]
+
+    def escalating(self) -> bool:
+        """Should this spend top-tier money? Only :data:`ESCALATING` flags may say yes."""
+        return any(v for k, v in vars(self).items() if k in self.ESCALATING)
+
+    def escalating_reasons(self) -> list[str]:
+        return [k for k, v in vars(self).items() if v and k in self.ESCALATING]
 
 
 def clamp_effort(effort: str | None, task: str | None = None) -> str:
@@ -347,9 +372,9 @@ def resolve(task: str, flags: HardCaseFlags | None = None,
         if force_escalation:
             escalated = True
             reasons += [f"trigger:{r}" for r in force_escalation]
-        if flags and flags.any():
+        if flags and flags.escalating():
             escalated = True
-            reasons += flags.reasons()
+            reasons += flags.escalating_reasons()
     key = t["escalation"] if escalated else t["model"]
     floor = max(int(t.get("min_tier") or 1), MIN_TIER_FLOOR.get(task, 1))
     tier = int(tiers.get(key, _V1_TIERS.get(key, 1)))

@@ -115,7 +115,7 @@
   "sleeve_b": {
     "drift_to_a_after_h": 48
   },
-  "source_sha256": "2da52cc84d4b26e26f14d8a1ab6adbb5e21b1cbb280eedfc9e03cef249eae56f",
+  "source_sha256": "63e255fa29284ab520aaea3a09a1bc358ae11d80bc4b830c2ed77a7b6dee1a1c",
   "trading": {
     "plan_bounds": {
       "allow_model_urgency": false,
