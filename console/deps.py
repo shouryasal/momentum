@@ -228,13 +228,68 @@ def session_of(request: Request) -> Session | None:
     return signer.loads(request.cookies.get(security.COOKIE_NAME))
 
 
+#: Methods the open-view bypass may answer. Everything else needs a real signed-in session.
+_VIEW_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+#: The sid an open-view actor carries, so every audit row says which requests had no login
+#: behind them. ``audit.actor_console`` renders it ``human:console:open-view``.
+OPEN_VIEW_SID = "open-view"
+
+
+def _open_view_session(settings_ttl_s: int) -> Session:
+    """A session that can read and can never do anything else.
+
+    ``csrf`` is empty on purpose: the double-submit check compares against the session's CSRF
+    token, so an empty one matches nothing and every non-GET fails even if the method guard
+    were ever loosened. ``step_up_until`` is 0, so :meth:`HumanActor.require_step_up` always
+    raises — a dangerous action cannot be reached without re-entering the real token.
+    """
+    now = security._now()
+    return Session(sid=OPEN_VIEW_SID, csrf="", issued_at=now,
+                   expires_at=now + max(settings_ttl_s, 60), step_up_until=0.0)
+
+
 def current_actor(request: Request) -> HumanActor:
-    """``Depends(current_actor)`` — 401 when there is no valid session cookie."""
+    """``Depends(current_actor)`` — 401 when there is no valid session cookie.
+
+    One exception, off by default: ``console.open_view``. With it on, a **loopback GET** with
+    no session gets a read-only actor instead of a 401, so the dashboard opens without a
+    token. Mutations are untouched — they are not GETs — and step-up can never be satisfied,
+    so arming a mode, blessing config, flattening the book and every other dangerous action
+    still demand the real token.
+
+    What this costs, stated rather than glossed: the documented threat model
+    (``console/security.py``) names three attackers. A malicious *web page* gains little —
+    without CORS it cannot read a cross-origin response, and it still cannot mutate. An
+    *automated Claude run* is refused the loopback console by the tier-2 hook regardless.
+    Another *local process* is the real exposure: with this on, anything running as this user
+    can read the whole console — positions, NAV, config, prompts. On a single-user laptop that
+    is a modest, deliberate trade for convenience, and it is why the committed default is
+    ``false`` and why the response carries ``X-Earn-Open-View: 1`` so it is never silent.
+    """
     session = session_of(request)
     if session is None:
+        settings = getattr(request.app.state, "settings", None)
+        if (getattr(settings, "open_view", False)
+                and request.method.upper() in _VIEW_METHODS
+                and _is_loopback_client(request)):
+            view = _open_view_session(getattr(settings, "session_seconds", 3600))
+            request.state.session = view
+            request.state.open_view = True
+            return HumanActor(sid=view.sid, session=view, stepped_up=False)
         raise http_error(401, "unauthorized", "sign in with the console token")
     request.state.session = session
     return HumanActor(sid=session.sid, session=session, stepped_up=session.step_up_ok())
+
+
+def _is_loopback_client(request: Request) -> bool:
+    """True only for a client on this machine. Fails closed when the peer is unknown.
+
+    The app already refuses any non-loopback ``Host`` with a 421 and binds 127.0.0.1, so this
+    is the second of two independent checks rather than the only one.
+    """
+    host = getattr(getattr(request, "client", None), "host", None)
+    return host in ("127.0.0.1", "::1", "localhost")
 
 
 def require_step_up(request: Request) -> HumanActor:

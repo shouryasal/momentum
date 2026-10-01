@@ -184,8 +184,18 @@ class Console(_Model):
         group="console", protected=True, effects=["restart:console"], ge=1024, le=65535,
     )
     session_hours: int = F(
-        12, desc="Lifetime of a console session cookie.", group="console", unit="hours",
+        168, desc="Lifetime of a console session cookie.", group="console", unit="hours",
         protected=True, ge=1, le=168,
+    )
+    open_view: bool = F(
+        False,
+        desc="Answer a LOOPBACK GET that carries no session as read-only, instead of 401, so "
+             "the dashboard opens without entering the token. Mutations are unaffected (they "
+             "are not GETs) and step-up can never be satisfied, so arming a mode, blessing "
+             "config and flattening the book still demand the real token. The cost is that "
+             "any process running as this user can then READ the whole console. Off by "
+             "default; every response it answers carries X-Earn-Open-View: 1.",
+        group="console", protected=True,
     )
     stepup_minutes: int = F(
         10, desc="How long a step-up re-authentication stays valid for dangerous actions.",

@@ -86,6 +86,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response.headers.setdefault(name, value)
         if response.media_type == "text/event-stream":
             response.headers["Cache-Control"] = "no-cache, no-transform"
+        # `console.open_view` answered this request with no login behind it. Say so on the
+        # wire: a security property that is only visible in a config file is one nobody
+        # notices has been left on.
+        if getattr(request.state, "open_view", False):
+            response.headers["X-Earn-Open-View"] = "1"
         return response
 
 

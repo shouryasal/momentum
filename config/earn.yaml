@@ -21,7 +21,8 @@ runtime:                           # host facts ops/setup.sh writes and prefligh
 
 console:
   port: 8765                       # the bind address is the code constant 127.0.0.1
-  session_hours: 12
+  session_hours: 168               # a week: sign in once, not once a day
+  open_view: true                  # loopback GETs need no token (READ only; see ops/config.py)
   stepup_minutes: 10
   git_commit_on_save: true
   effects_default: apply_now

@@ -424,7 +424,7 @@ def test_defaults_endpoint_returns_schema_defaults(client: TestClient) -> None:
     res = client.post("/api/config/earn/defaults",
                       json={"paths": ["console.session_hours", "console.port"]})
     defaults = res.json()["defaults"]
-    assert defaults["console.session_hours"] == 12
+    assert defaults["console.session_hours"] == 168   # a week; raised from 12 on 2026-10-01
     assert defaults["console.port"] == 8765
 
 

@@ -69,6 +69,10 @@ class ConsoleSettings:
     port: int = DEFAULT_PORT
     session_hours: int = DEFAULT_SESSION_HOURS
     stepup_minutes: int = DEFAULT_STEPUP_MINUTES
+    #: ``console.open_view`` — answer a loopback GET with no session as read-only instead of
+    #: 401, so the dashboard opens without a token. Mutations and step-up are unaffected.
+    #: Default FALSE: it is a deliberate, stated trade (see ``console.deps.current_actor``).
+    open_view: bool = False
     repo_root: Path = paths.REPO_ROOT
     state_root: Path = paths.REPO_ROOT
     token_file: Path = paths.REPO_ROOT / TOKEN_FILE_NAME
@@ -110,6 +114,11 @@ class ConsoleSettings:
         return int(self.session_hours) * 3600
 
     @property
+    def session_seconds(self) -> int:
+        """Alias ``console.deps`` uses when minting the read-only open-view session."""
+        return self.session_max_age_s
+
+    @property
     def stepup_max_age_s(self) -> int:
         return int(self.stepup_minutes) * 60
 
@@ -136,6 +145,7 @@ class ConsoleSettings:
             port=int(port if port is not None else getattr(console_cfg, "port", DEFAULT_PORT)),
             session_hours=int(getattr(console_cfg, "session_hours", DEFAULT_SESSION_HOURS)),
             stepup_minutes=int(getattr(console_cfg, "stepup_minutes", DEFAULT_STEPUP_MINUTES)),
+            open_view=bool(getattr(console_cfg, "open_view", False)),
             repo_root=paths.REPO_ROOT,
             state_root=state,
             token_file=token_path(env),
