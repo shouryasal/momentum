@@ -289,10 +289,78 @@ class Healthcheck:
             (key, value, _iso(self.now)))
         self.kdb.commit()
 
+    #: Kinds whose ``detail`` is a live MEASUREMENT rather than an identity — the age in
+    #: ``stale_data``, the bps in ``tca_threshold``. One ongoing condition is ONE incident for
+    #: these, with the detail refreshed, instead of a new row every time the number moves.
+    #:
+    #: Everything else dedupes on the exact detail, because there the detail names *which*
+    #: thing is wrong and two different ones are two incidents: ``feed_degraded`` carries the
+    #: feed names and a second feed joining the outage deserves its own row, ``missed_run``
+    #: carries the job and slot. That still collapses the case this was written for — the same
+    #: complaint repeated 177 times.
+    _MEASURED_DETAIL: frozenset[str] = frozenset({"stale_data", "tca_threshold"})
+
     def _incident(self, kind: str, detail: str) -> None:
-        self.kdb.execute("INSERT INTO ops_incidents(opened_at, kind, detail) VALUES (?,?,?)",
-                         (_iso(self.now), kind, detail))
+        """Open an incident, or refresh the one already open for this condition.
+
+        This used to be a bare INSERT on every tick, so a condition that persisted was
+        re-reported every five minutes forever. Measured 2026-10-03: **557 rows, of which
+        about 59 were distinct conditions** — ``missed_run`` alone held 382 rows covering 6
+        real misses, and ``daily_review 2026-09-24T17:30:00Z`` appeared **177 times**. The
+        console's Operations page shows unresolved incidents, so the three genuine
+        multi-hour ``host_suspended`` outages were buried under hundreds of copies of the
+        same stale complaint. An alert nobody can find is an alert nobody gets.
+        """
+        same_detail = kind not in self._MEASURED_DETAIL
+        sql = "SELECT id FROM ops_incidents WHERE kind=? AND resolved_at IS NULL"
+        args: list[object] = [kind]
+        if same_detail:
+            sql += " AND detail=?"
+            args.append(detail)
+        row = self.kdb.execute(sql + " LIMIT 1", args).fetchone()
+        if row is not None:
+            # Already open: keep the row, refresh what it says. The opened_at stays, so the
+            # age of the condition is still readable.
+            self.kdb.execute("UPDATE ops_incidents SET detail=? WHERE id=?",
+                             (detail, row["id"]))
+        else:
+            self.kdb.execute(
+                "INSERT INTO ops_incidents(opened_at, kind, detail) VALUES (?,?,?)",
+                (_iso(self.now), kind, detail))
         self.kdb.commit()
+
+    def _resolve_missed_run(self, job: str) -> int:
+        """Close ``missed_run`` incidents for one job, whatever slot they name.
+
+        The detail is ``"<job> <slot>"``, so an exact match would need the slot — but the
+        slot is precisely what has moved on by the time the job recovers. A job that has
+        just produced its artifact has no outstanding miss, so the job name is the right
+        key and the prefix match is deliberate.
+        """
+        cur = self.kdb.execute(
+            "UPDATE ops_incidents SET resolved_at=? WHERE kind='missed_run'"
+            " AND resolved_at IS NULL AND (detail=? OR detail LIKE ?)",
+            (_iso(self.now), job, f"{job} %"))
+        self.kdb.commit()
+        return int(cur.rowcount or 0)
+
+    def _resolve(self, kind: str, detail: str | None = None) -> int:
+        """Close every open incident of ``kind`` (optionally only one ``detail``).
+
+        Called from a check's OK branch. Until this existed the ONLY writer of
+        ``resolved_at`` was a human clicking in the console, so every incident ever opened
+        was still open — 557 of them — and the page could not distinguish "wrong now" from
+        "was wrong once, nine days ago". A condition that has demonstrably cleared should
+        not need a human to acknowledge it.
+        """
+        sql = "UPDATE ops_incidents SET resolved_at=? WHERE kind=? AND resolved_at IS NULL"
+        args: list[object] = [_iso(self.now), kind]
+        if detail is not None:
+            sql += " AND detail=?"
+            args.append(detail)
+        cur = self.kdb.execute(sql, args)
+        self.kdb.commit()
+        return int(cur.rowcount or 0)
 
     def install_floor(self) -> datetime:
         """No fire time before the install stamp counts as missed.
@@ -536,6 +604,10 @@ class Healthcheck:
             flagslib.clear_flag(self.flags_path, "data_stale", by="healthcheck",
                                 now=self.now, audit_conn=self.kdb)
             self.sender("market data fresh again — entries unblocked", "info")
+        if age <= limit:
+            # Fresh data closes the incident whether or not a flag was ever latched, so the
+            # Operations page shows what is wrong NOW rather than everything that ever was.
+            self._resolve("stale_data")
         self.check_feed_degradation()
 
     def check_feed_degradation(self) -> None:
@@ -558,6 +630,7 @@ class Healthcheck:
             if names:
                 self._incident("feed_degraded", names)
         if not stale:
+            self._resolve("feed_degraded")
             return
         detail = ", ".join(f"{name} {'never' if age == float('inf') else f'{age:.0f}m'}"
                            for name, age in sorted(stale.items()))
@@ -817,6 +890,11 @@ class Healthcheck:
             if fire_utc is None or fire_utc < floor:
                 continue
             if self._artifact_present(job, fire_utc):
+                # The job produced its output. Close any missed_run incident still open for
+                # THIS job, whatever slot it was raised for: a job that is running again has
+                # no outstanding miss, and leaving the row open is what put 382 incidents on
+                # the Operations page covering 6 real misses.
+                self._resolve_missed_run(job)
                 continue
             slot = _iso(fire_utc)
             if self.suspended(fire_utc) is not None:

@@ -915,3 +915,98 @@ def test_run_never_raises(hc, monkeypatch):
 
     monkeypatch.setattr(h, "check_containers", boom)
     assert h.run() == 0
+
+
+class TestIncidentsAreADiagnosisNotALedger:
+    """Found 2026-10-03: `ops_incidents` had **557 rows covering about 59 real conditions**,
+    and NOT ONE had ever been resolved — the only writer of `resolved_at` was a human
+    clicking in the console. `missed_run` alone held 382 rows for 6 actual misses, with
+    `daily_review 2026-09-24T17:30:00Z` appearing **177 times**.
+
+    That is not a cosmetic problem. The console's Operations page lists unresolved incidents,
+    so the three genuine multi-hour `host_suspended` outages that week were buried under
+    hundreds of copies of one stale complaint, and nobody noticed any of them. An alert
+    nobody can find is an alert nobody gets.
+    """
+
+    def test_a_persisting_condition_is_one_incident_not_one_per_tick(self, hc):
+        h = hc[0]
+        for _ in range(20):
+            h._incident("stale_data", "age 85 min")
+        n = h.kdb.execute("SELECT COUNT(*) FROM ops_incidents WHERE kind='stale_data'"
+                          ).fetchone()[0]
+        assert n == 1, f"{n} rows for one ongoing condition"
+
+    def test_the_detail_is_refreshed_so_the_row_says_what_is_true_now(self, hc):
+        """A measured detail moves while the condition persists; the row must follow it."""
+        h = hc[0]
+        h._incident("stale_data", "age 40 min")
+        h._incident("stale_data", "age 200 min")
+        rows = h.kdb.execute("SELECT opened_at, detail FROM ops_incidents"
+                             " WHERE kind='stale_data'").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["detail"] == "age 200 min"
+
+    def test_an_identity_detail_opens_its_own_incident(self, hc):
+        """Two different jobs missing are two incidents, not one refreshed over the top."""
+        h = hc[0]
+        h._incident("missed_run", "nav_job 2026-09-28T20:10:00Z")
+        h._incident("missed_run", "daily_review 2026-09-28T17:30:00Z")
+        h._incident("missed_run", "nav_job 2026-09-28T20:10:00Z")   # a repeat of the first
+        n = h.kdb.execute("SELECT COUNT(*) FROM ops_incidents WHERE kind='missed_run'"
+                          ).fetchone()[0]
+        assert n == 2, f"expected 2 distinct misses, got {n}"
+
+    def test_resolving_closes_only_the_open_rows_of_that_kind(self, hc):
+        h = hc[0]
+        h._incident("stale_data", "age 85 min")
+        h._incident("feed_degraded", "news")
+        assert h._resolve("stale_data") == 1
+        open_kinds = {r["kind"] for r in h.kdb.execute(
+            "SELECT kind FROM ops_incidents WHERE resolved_at IS NULL")}
+        assert open_kinds == {"feed_degraded"}
+
+    def test_resolving_twice_is_harmless(self, hc):
+        h = hc[0]
+        h._incident("stale_data", "age 85 min")
+        assert h._resolve("stale_data") == 1
+        assert h._resolve("stale_data") == 0
+
+    def test_a_recovered_condition_can_reopen_later(self, hc):
+        """Resolved is not latched-shut: the same thing going wrong again is a new incident."""
+        h = hc[0]
+        h._incident("stale_data", "age 85 min")
+        h._resolve("stale_data")
+        h._incident("stale_data", "age 90 min")
+        rows = h.kdb.execute("SELECT resolved_at FROM ops_incidents"
+                             " WHERE kind='stale_data' ORDER BY id").fetchall()
+        assert len(rows) == 2
+        assert rows[0]["resolved_at"] is not None and rows[1]["resolved_at"] is None
+
+    def test_a_missed_run_closes_when_that_job_runs_again(self, hc):
+        """Keyed on the JOB, not the slot — the slot is what has moved on by recovery time."""
+        h = hc[0]
+        h._incident("missed_run", "nav_job 2026-09-28T20:10:00Z")
+        h._incident("missed_run", "daily_review 2026-09-28T17:30:00Z")
+        assert h._resolve_missed_run("nav_job") == 1
+        still = {r["detail"] for r in h.kdb.execute(
+            "SELECT detail FROM ops_incidents WHERE resolved_at IS NULL")}
+        assert still == {"daily_review 2026-09-28T17:30:00Z"}
+
+    def test_fresh_data_closes_the_stale_data_incident(self, hc):
+        """The end-to-end property: the check's own OK branch must close what it opened.
+
+        This is the one that matters. On 2026-10-03 market data went stale for 3h16m and then
+        recovered completely on the next ingest cycle — and the `stale_data` incident stayed
+        open, because nothing but a human click could close it.
+        """
+        h, _sent, _ran, _apis, _jdb, kdb, _root = hc
+        _fresh_data(kdb)
+        h._incident("stale_data", "age 400 min")
+        assert h.kdb.execute("SELECT resolved_at FROM ops_incidents"
+                             " WHERE kind='stale_data'").fetchone()["resolved_at"] is None
+        h.check_data_freshness()
+        row = h.kdb.execute("SELECT resolved_at FROM ops_incidents"
+                            " WHERE kind='stale_data'").fetchone()
+        assert row is not None and row["resolved_at"] is not None, \
+            "fresh data left the stale_data incident open"
