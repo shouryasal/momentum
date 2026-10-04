@@ -377,6 +377,54 @@ class TestCorrelationCap:
         gate = benign_gate(cfg, returns_provider=lambda p: _series(scale=1.0))
         assert gate.check_entry("TIA/USDT", 300.0, wide_ps()).allowed
 
+    # ---- the core pair is calibrated out (fixed 2026-10-04) ------------------------
+
+    def test_BTC_and_ETH_may_be_held_together(self, tmp_path):
+        """The core book the whole strategy is built on must not be refused as "correlated".
+
+        `max_avg_pairwise_corr` is 0.70 and its config comment records the calibration: an
+        alt-alt "calm p90 0.591". BTC and ETH are neither alts nor independent bets — holding
+        both IS the strategy (`universe.core` is exactly those two, `tier_caps.core` is 0.40,
+        and the trend ensemble is a BTC/ETH ensemble). Measured on the 3,266-day panel their
+        60-day return correlation is above 0.70 on **88.7% of all days and 100% of the last
+        365** (median 0.8518, latest 0.8757), so averaging the pair in made the core book
+        permanently unholdable: BTC *or* ETH, never both, capping the book near 5% of NAV
+        against a 70% target.
+        """
+        cfg = wide_cfg(tmp_path)
+        returns = {"BTC/USDT": _bench(), "ETH/USDT": _bench()}   # perfectly correlated
+        gate = benign_gate(cfg, returns_provider=returns.get)
+        d = gate.check_entry("ETH/USDT", 1_000.0, wide_ps(positions={"BTC/USDT": 1_000.0}))
+        assert d.allowed, f"the core pair was refused on {d.reason}"
+        assert d.checks["corr_cap"] is True
+
+    def test_a_core_to_satellite_pair_still_counts(self, tmp_path):
+        """Only CORE-CORE is excluded. A satellite that merely tracks BTC is still caught."""
+        cfg = wide_cfg(tmp_path, **FOUR_SEAT_SLEEVE)
+        returns = {"BTC/USDT": _bench(), "TIA/USDT": _bench(), "INJ/USDT": _bench()}
+        gate = benign_gate(cfg, returns_provider=returns.get)
+        d = gate.check_entry("INJ/USDT", 300.0,
+                             wide_ps(positions={"BTC/USDT": 1_000.0, "TIA/USDT": 300.0}))
+        assert not d.allowed and d.reason == "corr_cap"
+
+    def test_avg_pairwise_corr_drops_only_the_core_core_pair(self):
+        """The statistic itself: core-core out, every other pair still in."""
+        up = [0.01, -0.02, 0.03, -0.01, 0.02, 0.00, 0.01, -0.03]
+        alt = [-0.02, 0.03, -0.01, 0.02, -0.03, 0.01, -0.02, 0.02]
+        series = {"BTC/USDT": up, "ETH/USDT": up, "TIA/USDT": alt}
+        is_core = lambda pair: pair.split("/")[0] in ("BTC", "ETH")  # noqa: E731
+        both = avg_pairwise_corr({k: series[k] for k in ("BTC/USDT", "ETH/USDT")}, is_core)
+        assert both is None, "the core pair alone must be unmeasurable, i.e. pass"
+        with_alt = avg_pairwise_corr(series, is_core)
+        without = avg_pairwise_corr(series)
+        assert with_alt is not None and without is not None
+        assert with_alt != pytest.approx(without), "excluding the pair changed nothing"
+
+    def test_omitting_the_predicate_keeps_the_old_behaviour(self):
+        """Default argument = unchanged, so no existing caller is silently affected."""
+        up = [0.01, -0.02, 0.03, -0.01, 0.02]
+        assert avg_pairwise_corr({"BTC/USDT": up, "ETH/USDT": up}) == pytest.approx(1.0)
+
     def test_avg_pairwise_corr_is_none_below_two_measurable_series(self):
         assert avg_pairwise_corr({"a": [0.1, 0.2, 0.3]}) is None
         assert avg_pairwise_corr({"a": [0.1] * 5, "b": [0.2, 0.1, 0.3, 0.1, 0.2]}) is None

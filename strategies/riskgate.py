@@ -47,6 +47,7 @@ import json
 import math
 import os
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -150,6 +151,9 @@ class UniverseView:
 
     def is_satellite(self, asset: str) -> bool:
         return self.tiers.get(asset, "") == SATELLITE_TIER
+
+    def is_core(self, asset: str) -> bool:
+        return self.tiers.get(asset, "") == "core"
 
     def filter_floor(self, asset: str) -> float:
         """Smallest order notional this asset's own exchange filters permit, in USDT.
@@ -434,6 +438,10 @@ class GateConfig:
     def is_satellite(self, pair: str) -> bool:
         return self.universe.is_satellite(asset_of(pair))
 
+    def is_core(self, pair: str) -> bool:
+        """Pair-level core test. The series dicts the checks walk are keyed by PAIR."""
+        return self.universe.is_core(asset_of(pair))
+
     def notional_floor(self, pair: str) -> float:
         """The binding minimum order notional: Earn's own floor or the exchange's."""
         return max(self.min_notional, self.universe.filter_floor(asset_of(pair)))
@@ -512,16 +520,36 @@ def _pearson(a: list[float], b: list[float]) -> float | None:
     return cov / ((va ** 0.5) * (vb ** 0.5))
 
 
-def avg_pairwise_corr(series: dict[str, list[float]]) -> float | None:
+def avg_pairwise_corr(series: dict[str, list[float]],
+                      is_core: Callable[[str], bool] | None = None) -> float | None:
     """Average pairwise correlation of a held book. ``None`` when it cannot be measured.
 
     Fewer than two measurable names is not a correlated book — it is one position, which
     the per-asset cap already bounds — so the answer is ``None`` and the check passes.
+
+    **CORE-CORE pairs are excluded.** ``risk.max_avg_pairwise_corr`` is 0.70 and its own
+    config comment records where that came from: an alt-alt *"calm p90 0.591"*. BTC and ETH
+    are not alts and are not independent bets — holding both IS the strategy, which is why
+    ``universe.core`` names exactly those two, ``tier_caps.core`` is 0.40 and the trend
+    ensemble is a BTC/ETH ensemble. Measured on the 3,266-day panel, their 60-day return
+    correlation sits **above 0.70 on 88.7% of all days and on 100% of the last 365** (median
+    0.8518, latest 0.8757). Averaging that pair into the statistic therefore made the
+    intended core book permanently unholdable: the gate would allow BTC *or* ETH and refuse
+    the second on ``corr_cap`` more or less forever, which caps the book near 5% of NAV
+    instead of the 70% the policy targets.
+
+    This keeps the cap doing exactly the job it was calibrated for — bounding
+    diversification *among the names that are supposed to be diversified* — and leaves every
+    core-to-satellite and satellite-to-satellite pair in the average. With ``is_core`` left
+    ``None`` the behaviour is unchanged, so no caller is silently affected.
     """
     names = sorted(series)
+    core = is_core or (lambda _name: False)
     vals: list[float] = []
     for i, x in enumerate(names):
         for y in names[i + 1:]:
+            if core(x) and core(y):
+                continue        # a deliberate, calibrated-out pair, not a diversification failure
             c = _pearson(series[x], series[y])
             if c is not None:
                 vals.append(c)
@@ -1076,7 +1104,10 @@ class RiskGate:
         series = self._series_for(book)
         beta = portfolio_beta(book, series, self._benchmark_series())
         checks["beta_cap"] = beta is None or beta <= cfg.max_beta_to_btc + _EPS
-        corr = avg_pairwise_corr(series)
+        # Core-core pairs are excluded: see avg_pairwise_corr. BTC/ETH are above the
+        # 0.70 cap on 88.7% of 3,266 days, so averaging them in made the core book
+        # the policy is built on permanently unholdable.
+        corr = avg_pairwise_corr(series, self.cfg.is_core)
         checks["corr_cap"] = corr is None or corr <= cfg.max_avg_pairwise_corr + _EPS
         gross = ps.gross
         checks["gross_cap"] = (gross + stake) / nav <= cfg.gross_cap + _EPS
