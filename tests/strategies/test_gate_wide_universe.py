@@ -259,10 +259,14 @@ def _uncorrelated(n: int = 60) -> list[float]:
 
 class TestBetaCap:
     def test_a_high_beta_book_is_refused(self, tmp_path):
+        """NOTE the 1,000 BTC position. It used to be 100.0 — exactly the dust floor
+        (dust_weight 0.01 x 10,000 NAV), and `_held` keeps only positions STRICTLY above it.
+        So BTC was never in the book and this test was really exercising a one-name book,
+        which is the very bug fixed on 2026-10-04. It passed for the wrong reason."""
         cfg = wide_cfg(tmp_path)
-        returns = {"BTC/USDT": _bench(), "TIA/USDT": _series(scale=2.0)}
+        returns = {"BTC/USDT": _bench(), "TIA/USDT": _series(scale=3.0)}
         gate = benign_gate(cfg, returns_provider=returns.get)
-        d = gate.check_entry("TIA/USDT", 300.0, wide_ps(positions={"BTC/USDT": 100.0}))
+        d = gate.check_entry("TIA/USDT", 300.0, wide_ps(positions={"BTC/USDT": 1_000.0}))
         assert not d.allowed and d.reason == "beta_cap"
 
     def test_a_beta_one_book_passes(self, tmp_path):
@@ -287,6 +291,64 @@ class TestBetaCap:
 
     def test_beta_of_a_series_against_itself_is_one(self):
         assert beta_to(_bench(), _bench()) == pytest.approx(1.0)
+
+    # ---- one name is not a blend (fixed 2026-10-04) -------------------------------
+
+    def test_a_single_high_beta_name_on_an_EMPTY_book_is_not_a_breach(self, tmp_path):
+        """The 6,862-refusal bug. check_entry's own comment says one name passes.
+
+        Measured 2026-10-04: beta_cap refused 6,864 of 10,913 entry attempts and 6,862 of
+        those were refused while the book held NOTHING — because portfolio_beta over one
+        element is just that element's own beta. Any alt above 1.30 could never be a FIRST
+        position, so entry ORDER was decided by beta bookkeeping and the book sat in cash.
+        """
+        cfg = wide_cfg(tmp_path)
+        returns = {"BTC/USDT": _bench(), "TIA/USDT": _series(scale=3.0)}   # beta 3, alone
+        gate = benign_gate(cfg, returns_provider=returns.get)
+        d = gate.check_entry("TIA/USDT", 300.0, wide_ps())                 # empty book
+        assert d.allowed, f"refused on {d.reason} with one name and nothing held"
+        assert d.checks["beta_cap"] is True
+
+    def test_the_same_name_IS_refused_once_there_is_a_blend_to_measure(self, tmp_path):
+        """The cap still does its job the moment the statistic means something."""
+        cfg = wide_cfg(tmp_path)
+        returns = {"BTC/USDT": _bench(), "TIA/USDT": _series(scale=3.0)}
+        gate = benign_gate(cfg, returns_provider=returns.get)
+        d = gate.check_entry("TIA/USDT", 300.0, wide_ps(positions={"BTC/USDT": 1_000.0}))
+        assert not d.allowed and d.reason == "beta_cap"
+
+    def test_portfolio_beta_of_one_name_is_unmeasurable(self):
+        assert portfolio_beta({"TIA/USDT": 1_000.0},
+                              {"TIA/USDT": _series(scale=3.0)}, _bench()) is None
+
+    def test_portfolio_beta_of_two_names_is_still_the_weighted_blend(self):
+        """The relaxation must not change the statistic where it was already correct."""
+        b = portfolio_beta({"BTC/USDT": 1_000.0, "TIA/USDT": 1_000.0},
+                           {"BTC/USDT": _bench(), "TIA/USDT": _series(scale=3.0)}, _bench())
+        assert b == pytest.approx(2.0)
+
+    def test_a_name_with_no_history_does_not_count_toward_the_two(self):
+        """Two entries, one unmeasurable, is still one measurable name — so still None."""
+        assert portfolio_beta({"BTC/USDT": 1_000.0, "NEW/USDT": 1_000.0},
+                              {"BTC/USDT": _bench(), "NEW/USDT": []}, _bench()) is None
+
+    def test_relaxing_beta_does_not_unbound_a_single_name(self, tmp_path):
+        """The checks that DO bound one name must still bite, or this opened a hole.
+
+        check_entry's comment names them: the tier cap and max_satellite_gross. A single
+        satellite is capped at a few per cent of NAV however attractive its beta looks.
+        """
+        cfg = wide_cfg(tmp_path)
+        returns = {"BTC/USDT": _bench(), "TIA/USDT": _series(scale=3.0)}
+        gate = benign_gate(cfg, returns_provider=returns.get)
+        huge = gate.check_entry("TIA/USDT", 9_000.0, wide_ps())
+        assert not huge.allowed, "a 90%-of-NAV satellite was allowed"
+        # Which check wins the race does not matter (turnover_day is ahead of them in
+        # CHECK_ORDER); what matters is that the SIZE checks are the ones saying no, and
+        # that beta_cap is not carrying weight it was never meant to carry.
+        assert huge.checks["weight_cap"] is False
+        assert huge.checks["satellite_gross"] is False
+        assert huge.checks["beta_cap"] is True
 
 
 class TestCorrelationCap:

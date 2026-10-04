@@ -545,16 +545,33 @@ def beta_to(series: list[float], benchmark: list[float]) -> float | None:
 
 def portfolio_beta(weights: dict[str, float], series: dict[str, list[float]],
                    benchmark: list[float]) -> float | None:
-    """Exposure-weighted beta of the risk book. ``None`` when nothing is measurable.
+    """Exposure-weighted beta of the risk book, or ``None`` when there is no BLEND to measure.
 
     Weights are position values; the result is normalised by the measurable exposure, so
     a name with no history neither inflates nor deflates the answer. A pure-BTC book
     measures 1.0 and can therefore never breach a cap above 1.0 — which is the intent:
     the cap exists to stop an eight-name alt book being a 1.5x levered BTC position
     wearing eight names (wide-universe.md §2.3).
+
+    **Fewer than two measurable names returns ``None``.** With one name the "portfolio"
+    beta is just that name's own beta, which is not what the cap is about and is not what
+    the call site says it does — ``check_entry`` states in as many words that "unmeasurable
+    (no history yet, ONE NAME, a constant series) is not a breach: it passes, and the tier
+    cap plus max_satellite_gross are what bound the damage in that window". The
+    implementation did not honour its own contract, and the cost was measured on
+    2026-10-04: **beta_cap refused 6,864 of 10,913 entry attempts, 6,862 of them while the
+    book held nothing at all.** Any alt whose own beta exceeded 1.30 could therefore never
+    be a FIRST position, and entry *order* ended up decided by beta bookkeeping — AAVE was
+    only openable while BTC happened to be held. That is the mechanical reason the book sat
+    in cash on roughly 40% of samples with a mean 3.4% deployed.
+
+    A single name is bounded by the checks designed for it — ``weight_cap`` /
+    ``tier_caps`` and ``max_satellite_gross`` — not by a blend statistic computed over one
+    element.
     """
     num = 0.0
     den = 0.0
+    measured = 0
     for name, w in weights.items():
         if w <= 0:
             continue
@@ -563,7 +580,10 @@ def portfolio_beta(weights: dict[str, float], series: dict[str, list[float]],
             continue
         num += w * b
         den += w
-    return num / den if den > _EPS else None
+        measured += 1
+    if measured < 2 or den <= _EPS:
+        return None
+    return num / den
 
 
 def _resolve_cap(asset: str, universe: UniverseView, tier_caps: dict[str, float],
